@@ -101,35 +101,71 @@ local function ResolveDesignerObject(designerHud)
     return designer
 end
 
+local function CollectObjectsFromArray(arr, seen, out)
+    if not arr then return end
+    StationData.ForEachArray(arr, function(_, elem)
+        local obj = Core.UnwrapArrayElem(elem)
+        if Core.IsValidObj(obj) then
+            local a = obj:GetAddress()
+            if not seen[a] then
+                seen[a] = true
+                out[#out + 1] = obj
+            end
+        end
+    end)
+end
+
 local function ComputeDesignerPower(designerHud)
-    local totalGen, totalCons = 0.0, 0.0
     local designer = ResolveDesignerObject(designerHud)
-    if not Core.IsValidObj(designer) then return totalGen, totalCons end
+    if not Core.IsValidObj(designer) then return 0.0, 0.0 end
 
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
+
+    local pgGen, pgCons = 0.0, 0.0
     if Core.IsValidObj(frame) then
         local pg = nil
         if frame.GetPowerGrid then
             pcall(function() pg = frame:GetPowerGrid() end)
         end
         if Core.IsValidObj(pg) then
-            local maxP = Core.GetFPFloat(pg.MaxProduction)
-            local maxC = Core.GetFPFloat(pg.MaxConsumption)
-            if maxP > 0 or maxC > 0 then
-                return maxP, maxC
-            end
-        end
-
-        local machines = StationData.GetFrameMachines(frame)
-        for _, m in ipairs(machines) do
-            local g, c = ComputePowerFromObject(m)
-            totalGen = totalGen + g
-            totalCons = totalCons + c
+            pgGen = Core.GetFPFloat(pg.MaxProduction)
+            pgCons = Core.GetFPFloat(pg.MaxConsumption)
         end
     end
 
-    return totalGen, totalCons
+    local seen = {}
+    local objects = {}
+    if Core.IsValidObj(frame) then
+        local okFind, arr = pcall(function() return frame:FindMachines() end)
+        if okFind and arr then CollectObjectsFromArray(arr, seen, objects) end
+        for _, prop in ipairs({ "Machines", "Blocks", "GridBlocks", "PlacedBlocks" }) do
+            local okP, pArr = pcall(function() return frame[prop] end)
+            if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
+        end
+    end
+    for _, prop in ipairs({ "Blocks", "PlacedBlocks", "PreviewBlocks", "GhostBlocks" }) do
+        local okP, pArr = pcall(function() return designer[prop] end)
+        if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
+    end
+
+    local objGen, objCons = 0.0, 0.0
+    for _, obj in ipairs(objects) do
+        local g, c = ComputePowerFromObject(obj)
+        if g == 0 and c == 0 then
+            for _, dataProp in ipairs({ "BlockData", "Data", "Item" }) do
+                local okD, dataObj = pcall(function() return obj[dataProp] end)
+                if okD and Core.IsValidObj(dataObj) then
+                    g, c = ComputePowerFromObject(dataObj)
+                    if g ~= 0 or c ~= 0 then break end
+                end
+            end
+        end
+        objGen = objGen + g
+        objCons = objCons + c
+    end
+
+    return math.max(objGen, pgGen), math.max(objCons, pgCons)
 end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
@@ -342,7 +378,7 @@ local function RefreshDesignerPowerStats(hud)
         local pwrTxt, pwrLbl = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power", nextCol, labelColor, labelSize)
         if not Core.IsValidObj(pwrTxt) then return end
 
-        st = { PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
+        st = { Hud = hud, PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
         InjectedDesigners[addr] = st
     end
 
@@ -364,11 +400,40 @@ end
 -- Feature Lifecycle
 --------------------------------------------------------------------------------
 
+local DesignerPollActive = false
+
+local function StartDesignerPoll()
+    if DesignerPollActive then return end
+    DesignerPollActive = true
+
+    local function Tick()
+        local anyActive = false
+        for addr, st in pairs(InjectedDesigners) do
+            if Core.IsValidObj(st.Hud) and Core.IsValidObj(st.PowerText) then
+                local okVis, vis = pcall(function() return st.Hud:IsVisible() end)
+                if okVis and vis then
+                    anyActive = true
+                    pcall(RefreshDesignerPowerStats, st.Hud)
+                end
+            else
+                InjectedDesigners[addr] = nil
+            end
+        end
+        if anyActive then
+            ExecuteInGameThreadWithDelay(250, Tick)
+        else
+            DesignerPollActive = false
+        end
+    end
+    ExecuteInGameThreadWithDelay(250, Tick)
+end
+
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
         ExecuteInGameThreadWithDelay(150, function()
             if Core.IsValidObj(hud) then
                 RefreshDesignerPowerStats(hud)
+                StartDesignerPoll()
             end
         end)
     end,
@@ -391,7 +456,7 @@ end
 
 function Feature.PruneCaches()
     for addr, st in pairs(InjectedDesigners) do
-        if not Core.IsValidObj(st.GenText) then
+        if not Core.IsValidObj(st.PowerText) then
             InjectedDesigners[addr] = nil
         end
     end
