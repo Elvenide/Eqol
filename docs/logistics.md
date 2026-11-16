@@ -9,8 +9,10 @@ Inspect your station's total stored inventory and production/consumption through
 
 ## Features
 
-- **Station Container Storage Grid**:
+- **Station Container Storage Grid (Top-Left)**:
   - Aggregates all items currently stored across every container on your station into an inventory-style icon grid, sorted by quantity.
+- **Total Production Rates (Bottom-Left)**:
+  - 2-column summary showing the combined items/min production rate for every item produced on your station.
 - **Production & Consumption Rate Monitor**:
   - Lists every production machine (assemblers, advanced assemblers, refineries, etc.) on the station in an icon-heavy layout.
   - Displays each ingredient's icon and consumption rate (**items/min**) alongside the output item's icon and production rate (**items/min**).

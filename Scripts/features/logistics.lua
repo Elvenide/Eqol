@@ -169,6 +169,8 @@ local function CollectStationLogisticsData(station, walkFrame)
     local stationProdRates = {} -- itemKey -> items/min
     local stationConsRates = {} -- itemKey -> items/min
 
+    local stationProdItems = {} -- itemKey -> { Item = uobj, Rate = number }
+
     local seenMachines = {}
 
     for _, plat in ipairs(platforms) do
@@ -231,6 +233,10 @@ local function CollectStationLogisticsData(station, walkFrame)
                             table.insert(outputs, { Item = outStack.Item, Rate = rate })
                             local k = GetItemKey(outStack.Item)
                             stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
+                            if not stationProdItems[k] then
+                                stationProdItems[k] = { Item = outStack.Item, Rate = 0.0 }
+                            end
+                            stationProdItems[k].Rate = stationProdItems[k].Rate + rate
                         else
                             local okOuts, outs = pcall(function() return rec:GetOutputs() end)
                             if okOuts and outs then
@@ -246,6 +252,10 @@ local function CollectStationLogisticsData(station, walkFrame)
                                         table.insert(outputs, { Item = st.Item, Rate = rate })
                                         local k = GetItemKey(st.Item)
                                         stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
+                                        if not stationProdItems[k] then
+                                            stationProdItems[k] = { Item = st.Item, Rate = 0.0 }
+                                        end
+                                        stationProdItems[k].Rate = stationProdItems[k].Rate + rate
                                     end
                                 end)
                             end
@@ -290,7 +300,13 @@ local function CollectStationLogisticsData(station, walkFrame)
     end
     table.sort(sortedItems, function(a, b) return a.Amount > b.Amount end)
 
-    return sortedItems, assemblers, stationProdRates, stationConsRates
+    local sortedProdTotals = {}
+    for _, entry in pairs(stationProdItems) do
+        table.insert(sortedProdTotals, entry)
+    end
+    table.sort(sortedProdTotals, function(a, b) return a.Rate > b.Rate end)
+
+    return sortedItems, assemblers, stationProdRates, stationConsRates, sortedProdTotals
 end
 
 --------------------------------------------------------------------------------
@@ -403,7 +419,7 @@ local function OpenLogisticsWindow()
         Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, CloseLogisticsWindow)
     end
 
-    local items, assemblers, prodRates, consRates = CollectStationLogisticsData(station, walkFrame)
+    local items, assemblers, prodRates, consRates, prodTotals = CollectStationLogisticsData(station, walkFrame)
 
     local rootBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
@@ -454,7 +470,61 @@ local function OpenLogisticsWindow()
         sBox:AddChild(invScroll)
         local sBoxSlot = leftVBox:AddChildToVerticalBox(sBox)
         if Core.IsValidObj(sBoxSlot) then
-            pcall(function() sBoxSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end)
+            pcall(function() sBoxSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
+        end
+    end
+
+    -- Bottom-Left Half: Total Production Rates (2-column list)
+    local totHeader = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+    local totScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
+    local totListBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
+    if Core.IsValidObj(totHeader) then
+        pcall(function()
+            totHeader:SetSize(14)
+            totHeader:SetText(Core.MakeText(string.format("Total Production (%d)", #prodTotals)))
+        end)
+        local thSlot = leftVBox:AddChildToVerticalBox(totHeader)
+        if Core.IsValidObj(thSlot) then
+            pcall(function() thSlot:SetPadding({ Left = 0.0, Top = 10.0, Right = 0.0, Bottom = 4.0 }) end)
+        end
+    end
+
+    if Core.IsValidObj(totListBox) and Core.IsValidObj(totScroll) then
+        for i = 1, #prodTotals, 2 do
+            local pairRow = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+            if Core.IsValidObj(pairRow) then
+                for col = 0, 1 do
+                    local entry = prodTotals[i + col]
+                    local cellBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+                    if Core.IsValidObj(cellBox) then
+                        pcall(function() cellBox:SetWidthOverride(175.0) end)
+                        if entry then
+                            local chipH = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+                            if Core.IsValidObj(chipH) then
+                                AddItemRateChip(chipH, win, pc, outer, entry.Item, entry.Rate, STATUS_COLORS.Green)
+                                cellBox:AddChild(chipH)
+                            end
+                        end
+                        local cSlot = pairRow:AddChildToHorizontalBox(cellBox)
+                        if Core.IsValidObj(cSlot) then
+                            pcall(function() cSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
+                        end
+                    end
+                end
+                local prSlot = totListBox:AddChildToVerticalBox(pairRow)
+                if Core.IsValidObj(prSlot) then
+                    pcall(function() prSlot:SetPadding({ Left = 0.0, Top = 3.0, Right = 0.0, Bottom = 3.0 }) end)
+                end
+            end
+        end
+
+        totScroll:AddChild(totListBox)
+        local tBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+        pcall(function() tBox:SetWidthOverride(360.0) end)
+        tBox:AddChild(totScroll)
+        local tBoxSlot = leftVBox:AddChildToVerticalBox(tBox)
+        if Core.IsValidObj(tBoxSlot) then
+            pcall(function() tBoxSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
         end
     end
 
