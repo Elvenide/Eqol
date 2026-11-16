@@ -412,6 +412,9 @@ local function OpenLogisticsWindow()
     pcall(function()
         win:SetWindowName(Core.MakeText("Logistics"))
         win:AddToViewport(50)
+        win:SetAnchorsInViewport({ Minimum = { X = 0.5, Y = 0.5 }, Maximum = { X = 0.5, Y = 0.5 } })
+        win:SetAlignmentInViewport({ X = 0.5, Y = 0.5 })
+        win:SetDesiredSizeInViewport({ X = 980.0, Y = 780.0 })
     end)
     SetLogisticsCursorMode(pc, win, true)
 
@@ -561,6 +564,7 @@ local function OpenLogisticsWindow()
                 -- Determine bottleneck status: consuming faster than station produces?
                 -- Only flag items that are produced by a station machine (pRate > 0) or have a crafting recipe
                 local hasDeficit = false
+                local deficitNames = {}
                 for _, inp in ipairs(entry.Inputs) do
                     local k = GetItemKey(inp.Item)
                     local pRate = prodRates[k] or 0.0
@@ -569,20 +573,34 @@ local function OpenLogisticsWindow()
                     pcall(function() hasRecipe = Core.IsValidObj(inp.Item.Recipe) end)
                     if (pRate > 0.001 or hasRecipe) and cRate > pRate + 0.001 then
                         hasDeficit = true
-                        break
+                        local iName = k
+                        pcall(function()
+                            if inp.Item and inp.Item.Name then
+                                local s = tostring(inp.Item.Name:ToString())
+                                if s ~= "" then iName = s end
+                            elseif inp.Item and inp.Item.GetName then
+                                local s = tostring(inp.Item:GetName())
+                                if s ~= "" then iName = s end
+                            end
+                        end)
+                        deficitNames[#deficitNames + 1] = string.format("%s (%.1f/m needed, %.1f/m produced)", iName, cRate, pRate)
                     end
                 end
 
                 local statusCol = STATUS_COLORS.Green
+                local tooltipMsg = "Production OK: all input rates meet station demand."
                 if not entry.HasRecipe then
                     statusCol = STATUS_COLORS.Amber
+                    tooltipMsg = "Idle: no active recipe or output configured."
                 elseif hasDeficit then
                     statusCol = STATUS_COLORS.Red
+                    tooltipMsg = "Bottlenecked: input demand exceeds production (" .. table.concat(deficitNames, ", ") .. ")."
                 end
 
                 pcall(function()
                     rowBorder:SetBrushColor(STATUS_COLORS.RowBg)
                     rowBorder:SetPadding({ Left = 6.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
+                    rowBorder:SetToolTipText(Core.MakeText(tooltipMsg))
                     statusBar:SetBrushColor(statusCol)
                     statusSize:SetWidthOverride(6.0)
                     statusSize:SetHeightOverride(28.0)
@@ -656,7 +674,7 @@ local function OpenLogisticsWindow()
         machScroll:AddChild(machListBox)
         local mBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
         pcall(function()
-            mBox:SetWidthOverride(640.0)
+            mBox:SetWidthOverride(560.0)
         end)
         mBox:AddChild(machScroll)
         local mBoxSlot = rightVBox:AddChildToVerticalBox(mBox)

@@ -16,7 +16,7 @@ Inspect your station's total stored inventory and production/consumption through
 - **Production & Consumption Rate Monitor**:
   - Lists every production machine (assemblers, advanced assemblers, refineries, etc.) on the station in an icon-heavy layout.
   - Displays each ingredient's icon and consumption rate (**items/min**) alongside the output item's icon and production rate (**items/min**).
-  - **Bottleneck Status Indicator**:
+  - **Bottleneck Status Indicator** (hover over any machine row for a detailed status tooltip):
     - **Green**: All ingredients are being produced on the station at or above the total consumption rate.
     - **Red**: At least one ingredient is being consumed faster than the station is producing it (deficit/bottleneck).
     - **Amber**: No recipe is currently assigned.
