@@ -117,6 +117,7 @@ end
 
 local LoggedDesignerInfo = false
 local HookedBlueprintStats = false
+local RefreshDesignerPowerStats -- forward declaration
 
 local function EnsureBlueprintStatsHook(designer, hud)
     if HookedBlueprintStats or not Core.IsValidObj(designer) then return end
@@ -172,8 +173,8 @@ local function ComputeDesignerPower(designerHud)
         local previews = {}
         local seen = {}
         CollectObjectsFromArray(prevArr, seen, previews)
-        if not LoggedDesignerInfo then
-            LoggedDesignerInfo = true
+        if not LoggedDesignerInfo or (LoggedDesignerInfo == "zero" and #previews > 0) then
+            LoggedDesignerInfo = (#previews > 0) and true or "zero"
             local firstCls = (#previews > 0) and previews[1]:GetClass():GetFName():ToString() or "none"
             Core.Log(string.format("DesignerPowerStats: PlacementPreviews=%d first=%s", #previews, tostring(firstCls)))
         end
@@ -340,7 +341,7 @@ end
 
 local LoggedHudInit = {}
 
-local function RefreshDesignerPowerStats(hud)
+RefreshDesignerPowerStats = function(hud)
     if not Core.IsValidObj(hud) then return end
     local addr = hud:GetAddress()
     local st = InjectedDesigners[addr]
