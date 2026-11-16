@@ -116,82 +116,84 @@ local function CollectObjectsFromArray(arr, seen, out)
 end
 
 local LoggedDesignerInfo = false
+local HookedBlueprintStats = false
+
+local function EnsureBlueprintStatsHook(designer, hud)
+    if HookedBlueprintStats or not Core.IsValidObj(designer) then return end
+    local dCls = designer:GetClass()
+    if not Core.IsValidObj(dCls) then return end
+    local full = dCls:GetFullName()
+    local clsPath = full and full:match("^%S+ (.+)$") or nil
+    if not clsPath then return end
+    if Core.TryRegisterHook("Designer_RefreshBlueprintStats", clsPath .. ":RefreshBlueprintStats", function()
+        ExecuteInGameThreadWithDelay(50, function()
+            for _, st in pairs(InjectedDesigners) do
+                if Core.IsValidObj(st.Hud) then
+                    RefreshDesignerPowerStats(st.Hud)
+                end
+            end
+        end)
+    end) then
+        HookedBlueprintStats = true
+    end
+end
 
 local function ComputeDesignerPower(designerHud)
     local designer = ResolveDesignerObject(designerHud)
     if not Core.IsValidObj(designer) then return 0.0, 0.0 end
 
-    if not LoggedDesignerInfo then
-        LoggedDesignerInfo = true
+    EnsureBlueprintStatsHook(designer, designerHud)
+
+    local frame = nil
+    pcall(function() frame = designer:GetFrame() end)
+
+    local isStationFrame = false
+    if Core.IsValidObj(frame) then
         pcall(function()
-            local dCls = designer:GetClass()
-            Core.Log("DesignerPowerStats: designer=" .. dCls:GetFName():ToString())
-            if dCls.ForEachProperty then
-                dCls:ForEachProperty(function(prop)
-                    local n = prop:GetFName():ToString()
-                    if string.find(n, "Block", 1, true) or string.find(n, "Plan", 1, true)
-                        or string.find(n, "Build", 1, true) or string.find(n, "Ghost", 1, true)
-                        or string.find(n, "Preview", 1, true) or string.find(n, "Power", 1, true)
-                        or string.find(n, "Blueprint", 1, true) or string.find(n, "Item", 1, true) then
-                        Core.Log("DesignerPowerStats [Designer prop]: " .. n .. " (" .. prop:GetClass():GetFName():ToString() .. ")")
-                    end
-                end)
-            end
-            if dCls.ForEachFunction then
-                dCls:ForEachFunction(function(fn)
-                    local n = fn:GetFName():ToString()
-                    if string.find(n, "Place", 1, true) or string.find(n, "Build", 1, true)
-                        or string.find(n, "Module", 1, true) or string.find(n, "Block", 1, true)
-                        or string.find(n, "Power", 1, true) or string.find(n, "Stat", 1, true)
-                        or string.find(n, "Plan", 1, true) or string.find(n, "Grid", 1, true) then
-                        Core.Log("DesignerPowerStats [Designer fn]: " .. n)
-                    end
-                end)
-            end
-            local hCls = designerHud:GetClass()
-            if Core.IsValidObj(hCls) and hCls.ForEachFunction then
-                hCls:ForEachFunction(function(fn)
-                    local n = fn:GetFName():ToString()
-                    if string.find(n, "Stat", 1, true) or string.find(n, "Refresh", 1, true)
-                        or string.find(n, "Update", 1, true) or string.find(n, "Hull", 1, true)
-                        or string.find(n, "Mass", 1, true) then
-                        Core.Log("DesignerPowerStats [HUD fn]: " .. n)
-                    end
-                end)
+            local clsName = frame:GetClass():GetFName():ToString()
+            if clsName and string.find(clsName, "Station", 1, true) then
+                isStationFrame = true
             end
         end)
     end
 
-    local frame = nil
-    pcall(function() frame = designer:GetFrame() end)
-    if not Core.IsValidObj(frame) then return 0.0, 0.0 end
-
-    local isStationFrame = false
-    pcall(function()
-        local clsName = frame:GetClass():GetFName():ToString()
-        if LoggedDesignerInfo == true then
-            Core.Log("DesignerPowerStats: frame=" .. tostring(clsName))
-            LoggedDesignerInfo = "done"
-        end
-        if clsName and string.find(clsName, "Station", 1, true) then
-            isStationFrame = true
-        end
-    end)
-
     local pgGen, pgCons = 0.0, 0.0
-    local objGen, objCons = 0.0, 0.0
-
-    if isStationFrame then
-        if frame.GetPowerGrid then
-            local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
-            if okPG and Core.IsValidObj(pg) then
-                pgGen = Core.GetFPFloat(pg.MaxProduction)
-                pgCons = Core.GetFPFloat(pg.MaxConsumption)
-            end
+    if isStationFrame and frame.GetPowerGrid then
+        local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
+        if okPG and Core.IsValidObj(pg) then
+            pgGen = Core.GetFPFloat(pg.MaxProduction)
+            pgCons = Core.GetFPFloat(pg.MaxConsumption)
         end
     end
 
-    return math.max(objGen, pgGen), math.max(objCons, pgCons)
+    local previewGen, previewCons = 0.0, 0.0
+    local okPrev, prevArr = pcall(function() return designer.PlacementPreviews end)
+    if okPrev and prevArr and type(prevArr.GetArrayNum) == "function" then
+        local previews = {}
+        local seen = {}
+        CollectObjectsFromArray(prevArr, seen, previews)
+        if not LoggedDesignerInfo then
+            LoggedDesignerInfo = true
+            local firstCls = (#previews > 0) and previews[1]:GetClass():GetFName():ToString() or "none"
+            Core.Log(string.format("DesignerPowerStats: PlacementPreviews=%d first=%s", #previews, tostring(firstCls)))
+        end
+        for _, obj in ipairs(previews) do
+            local g, c = ComputePowerFromObject(obj)
+            if g == 0 and c == 0 then
+                for _, prop in ipairs({ "Block", "BlockData", "Data", "Item", "Building" }) do
+                    local okSub, sub = pcall(function() return obj[prop] end)
+                    if okSub and Core.IsValidObj(sub) then
+                        g, c = ComputePowerFromObject(sub)
+                        if g ~= 0 or c ~= 0 then break end
+                    end
+                end
+            end
+            previewGen = previewGen + g
+            previewCons = previewCons + c
+        end
+    end
+
+    return pgGen + previewGen, pgCons + previewCons
 end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
