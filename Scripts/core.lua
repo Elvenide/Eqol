@@ -76,6 +76,21 @@ function Core.GetFPFloat(fpNum)
     return 0.0
 end
 
+function Core.GetFPVector(fpVec)
+    if not fpVec then return 0.0, 0.0, 0.0 end
+    if type(fpVec.X) == "number" and type(fpVec.Y) == "number" then
+        return fpVec.X, fpVec.Y, tonumber(fpVec.Z) or 0.0
+    end
+    local fpMath = Core.GetCDO(Core.PATHS.FPMathCDO)
+    if Core.IsValidObj(fpMath) then
+        local ok, vec = pcall(function() return fpMath:GetVector(fpVec) end)
+        if ok and vec and type(vec.X) == "number" then
+            return vec.X, vec.Y, tonumber(vec.Z) or 0.0
+        end
+    end
+    return 0.0, 0.0, 0.0
+end
+
 function Core.MakeText(str)
     local ktl = Core.GetCDO(Core.PATHS.KismetTextLibCDO)
     if Core.IsValidObj(ktl) then
@@ -647,6 +662,35 @@ function Core.RegisterConfigurableKeybind(opts)
     ApplyKeybindState(bs, Core.Config[bs.ConfigKey], false)
     Core.EnsureKeybindHooks()
     return bs
+end
+
+--------------------------------------------------------------------------------
+-- Safe WBP_Button_C Click Registry (avoids UButton.OnPressed:Add crashes)
+--------------------------------------------------------------------------------
+
+local ButtonClickCallbacks = {}
+local ButtonHookRegistered = false
+
+function Core.RegisterWBPButtonClick(btn, fn)
+    if not Core.IsValidObj(btn) or type(fn) ~= "function" then return end
+    ButtonClickCallbacks[btn:GetAddress()] = fn
+
+    if not ButtonHookRegistered then
+        local ok = Core.TryRegisterHook(
+            "Core_WBPButton_OnPressed",
+            "/Game/Blueprints/Widgets/Basic/WBP_Button.WBP_Button_C:BndEvt__WBP_Button_Button_K2Node_ComponentBoundEvent_0_OnButtonPressedEvent__DelegateSignature",
+            function(Context)
+                local w = Context:get()
+                if Core.IsValidObj(w) then
+                    local cb = ButtonClickCallbacks[w:GetAddress()]
+                    if cb then
+                        pcall(cb, w)
+                    end
+                end
+            end
+        )
+        if ok then ButtonHookRegistered = true end
+    end
 end
 
 return Core

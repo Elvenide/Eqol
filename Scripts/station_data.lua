@@ -281,31 +281,57 @@ end
 function StationData.GetPlatformWorldBounds(platform)
     local actor = StationData.GetObjectActor(platform)
     if Core.IsValidObj(actor) then
-        local okB, origin, extent = pcall(function()
-            return actor:GetActorBounds(false)
+        local outOrigin, outExtent = {}, {}
+        local okB = pcall(function()
+            actor:GetActorBounds(false, outOrigin, outExtent)
         end)
-        if okB and origin and extent then
+        if okB and type(outOrigin.X) == "number" and type(outExtent.X) == "number" then
             return {
-                cx = origin.X or 0,
-                cy = origin.Y or 0,
-                cz = origin.Z or 0,
-                ex = math.max(extent.X or 600, 100),
-                ey = math.max(extent.Y or 600, 100),
-                ez = math.max(extent.Z or 300, 100),
+                cx = outOrigin.X,
+                cy = outOrigin.Y or 0,
+                cz = outOrigin.Z or 0,
+                ex = math.max(outExtent.X, 100),
+                ey = math.max(outExtent.Y or 600, 100),
+                ez = math.max(outExtent.Z or 300, 100),
                 hasActor = true,
             }
         end
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
-        if okLoc and loc then
-            return { cx = loc.X or 0, cy = loc.Y or 0, cz = loc.Z or 0, ex = 600, ey = 600, ez = 300, hasActor = true }
+        if okLoc and loc and type(loc.X) == "number" then
+            return { cx = loc.X, cy = loc.Y or 0, cz = loc.Z or 0, ex = 600, ey = 600, ez = 300, hasActor = true }
         end
     end
 
     local okL, loc = pcall(function() return platform.Location end)
     if okL and loc then
-        return { cx = loc.X or 0, cy = loc.Y or 0, cz = loc.Z or 0, ex = 600, ey = 600, ez = 300, hasActor = false }
+        local x, y, z = Core.GetFPVector(loc)
+        return { cx = x, cy = y, cz = z, ex = 600, ey = 600, ez = 300, hasActor = false }
     end
     return { cx = 0, cy = 0, cz = 0, ex = 600, ey = 600, ez = 300, hasActor = false }
+end
+
+function StationData.GetPlatformConnectors(platform)
+    local connectors = {}
+    if not Core.IsValidObj(platform) then return connectors end
+
+    local actor = StationData.GetObjectActor(platform)
+    if Core.IsValidObj(actor) then
+        local okComps, comps = pcall(function() return actor.ConnectorComponents end)
+        if okComps and comps then
+            StationData.ForEachArray(comps, function(_, elem)
+                local comp = Core.UnwrapArrayElem(elem)
+                if Core.IsValidObj(comp) then
+                    local okL, loc = pcall(function() return comp:K2_GetComponentLocation() end)
+                    if okL and loc and type(loc.X) == "number" then
+                        local occupied = false
+                        pcall(function() occupied = comp.bOccupied == true end)
+                        table.insert(connectors, { x = loc.X, y = loc.Y or 0, occupied = occupied })
+                    end
+                end
+            end)
+        end
+    end
+    return connectors
 end
 
 function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds)
@@ -313,18 +339,19 @@ function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds)
     if Core.IsValidObj(actor) then
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
         local okRot, rot = pcall(function() return actor:K2_GetActorRotation() end)
-        if okLoc and loc then
-            return loc.X or 0, loc.Y or 0, loc.Z or 0, (okRot and rot and rot.Yaw) or 0
+        if okLoc and loc and type(loc.X) == "number" then
+            return loc.X, loc.Y or 0, loc.Z or 0, (okRot and rot and type(rot.Yaw) == "number") and rot.Yaw or 0
         end
     end
 
     local okL, loc = pcall(function() return machine.Location end)
-    if okL and loc and (loc.X ~= nil) then
-        return loc.X or 0, loc.Y or 0, loc.Z or 0, 0
+    if okL and loc then
+        local x, y, z = Core.GetFPVector(loc)
+        return x, y, z, 0
     end
 
     if fallbackBounds then
-        return fallbackBounds.cx, fallbackBounds.cy, fallbackBounds.cz, 0
+        return tonumber(fallbackBounds.cx) or 0, tonumber(fallbackBounds.cy) or 0, tonumber(fallbackBounds.cz) or 0, 0
     end
     return 0, 0, 0, 0
 end
