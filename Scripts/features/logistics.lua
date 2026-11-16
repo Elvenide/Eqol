@@ -292,6 +292,13 @@ local function CloseLogisticsWindow()
         pcall(function() ActiveLogisticsWin:RemoveFromParent() end)
     end
     ActiveLogisticsWin = nil
+    local pc = Core.GetLocalPlayerController()
+    if Core.IsValidObj(pc) then
+        pcall(function()
+            pc.bShowMouseCursor = false
+            if pc.SetMouseCursor then pc:SetMouseCursor(false) end
+        end)
+    end
 end
 
 local function FormatRate(rate)
@@ -364,6 +371,8 @@ local function OpenLogisticsWindow()
     pcall(function()
         win:SetWindowName(Core.MakeText("Logistics"))
         win:AddToViewport(50)
+        pc.bShowMouseCursor = true
+        if pc.SetMouseCursor then pc:SetMouseCursor(true) end
     end)
 
     if Core.IsValidObj(win.WBP_WindowHeader) and Core.IsValidObj(win.WBP_WindowHeader.CloseButton) then
@@ -376,6 +385,14 @@ local function OpenLogisticsWindow()
     local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
     if not (Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
 
+    local attached = false
+    if Core.IsValidObj(win.Content) then
+        local okC = pcall(function() win.Content:AddChild(rootBox) end)
+        if okC then attached = true end
+    end
+    if not attached and Core.IsValidObj(win.ContentBorder) then
+        pcall(function() win.ContentBorder:AddChild(rootBox) end)
+    end
     pcall(function() win:SetContentForSlot(FName("Content"), rootBox) end)
 
     -- Left Column: Container Inventory Grid (Icon-heavy)
@@ -755,8 +772,8 @@ local function EnsureHudKeybindIndicator(hud)
         iconW:SetVisibility(0)
     end)
 
-    -- Place in Row 0, Column 0 (left of Tab, B, X on top row) with matching GridSlot padding
-    local targetRow, targetCol = 0, 0
+    -- Place in Row 0, Column 1 (left of Tab, B, X on top row) with matching GridSlot padding
+    local targetRow, targetCol = 0, 1
     local refSlot = nil
     if Core.IsValidObj(hud.BuildingInput) and Core.IsValidObj(hud.BuildingInput.Slot) then
         refSlot = hud.BuildingInput.Slot
@@ -773,7 +790,7 @@ local function EnsureHudKeybindIndicator(hud)
         end)
     end
 
-    HudKeyIndicators[addr] = { Root = iconW, KeyText = keyTxt }
+    HudKeyIndicators[addr] = { Root = iconW, IconAddr = iconW:GetAddress(), KeyText = keyTxt }
 end
 
 --------------------------------------------------------------------------------
@@ -850,6 +867,29 @@ function Feature.RegisterHooks()
             if not IsEqolRemapRow(row) then return end
             ApplyLogisticsKeybind("None", true)
             SyncRemapRowDisplay(row)
+        end
+    )
+
+    Core.TryRegisterHook(
+        "InputIcon_RefreshVisible_Logistics",
+        "/Game/Blueprints/Widgets/HUDs/WBP_InputIcon.WBP_InputIcon_C:RefreshVisible",
+        function(Context)
+            local iconW = Context:get()
+            if not Core.IsValidObj(iconW) then return end
+            local iconAddr = iconW:GetAddress()
+            for _, entry in pairs(HudKeyIndicators) do
+                if entry.IconAddr == iconAddr then
+                    pcall(function()
+                        iconW:SetVisibility(0)
+                        if Core.IsValidObj(entry.KeyText) then
+                            local keyStr = tostring(Core.Config.LogisticsKey or DEFAULT_KEY)
+                            if keyStr == "None" or keyStr == "" then keyStr = "-" end
+                            entry.KeyText:SetText(Core.MakeText(keyStr))
+                        end
+                    end)
+                    break
+                end
+            end
         end
     )
 
