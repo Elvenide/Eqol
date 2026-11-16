@@ -21,7 +21,7 @@ local COLORS = {
     Offline = { R = 0.90, G = 0.35, B = 0.35, A = 1.0 },
 }
 
-local HEAD_OFFSET   = 115.0  -- cm above actor origin along player's local up vector
+local HEAD_OFFSET   = 215.0  -- cm above actor origin along player's local up vector (clears helmet)
 local MAX_VIEW_DIST = 2500.0 -- 25 meters max viewing distance from camera
 local MIN_CAM_DIST  = 120.0  -- hide when camera is inside player's head (1st-person)
 local TAG_SCALE     = 0.25   -- 3D world scale for crisp Minecraft-style proportions
@@ -77,7 +77,7 @@ local function GetOrCreateTagActor(pc, idx)
         nameTxt:SetJustification(1)
         comp:SetWidgetSpace(0) -- World space
         comp:SetDrawAtDesiredSize(true)
-        comp:SetPivot({ X = 0.5, Y = 0.5 })
+        comp:SetPivot({ X = 0.5, Y = 1.0 })
         comp:SetTwoSided(true)
         comp:SetBackgroundColor(COLORS.Bg)
         comp:SetWidget(nameTxt)
