@@ -199,13 +199,24 @@ function Core.ReadConfig(defaults)
     end
 end
 
+local CachedLocalPC = nil
+
 function Core.GetLocalPlayerController()
+    if Core.IsValidObj(CachedLocalPC) then
+        local okLocal, isLocal = pcall(function() return CachedLocalPC:IsLocalPlayerController() end)
+        if okLocal and isLocal then
+            return CachedLocalPC
+        end
+        CachedLocalPC = nil
+    end
+
     local ok, list = pcall(FindAllOf, "BP_PlayerController_C")
     if ok and list then
         for _, pc in ipairs(list) do
             if Core.IsValidObj(pc) then
                 local okLocal, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
                 if okLocal and isLocal then
+                    CachedLocalPC = pc
                     return pc
                 end
             end
@@ -215,6 +226,7 @@ function Core.GetLocalPlayerController()
     if Core.IsValidObj(fallback) then
         local okLocal, isLocal = pcall(function() return fallback:IsLocalPlayerController() end)
         if okLocal and isLocal then
+            CachedLocalPC = fallback
             return fallback
         end
     end

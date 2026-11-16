@@ -10,6 +10,8 @@ local Feature = {
 local PollActive = false
 local ConveyorBuilderCls = nil
 
+local CachedBuilder = { time = -999, obj = nil }
+
 local function GetActiveConveyorBuilder(pc)
     if not Core.IsValidObj(pc) then return nil end
 
@@ -25,18 +27,32 @@ local function GetActiveConveyorBuilder(pc)
         end
     end
 
+    if Core.IsValidObj(CachedBuilder.obj) then
+        local okPrev, prev = pcall(function() return CachedBuilder.obj.bIsPreviewing or CachedBuilder.obj.bActive end)
+        if not okPrev or prev ~= false then
+            return CachedBuilder.obj
+        end
+    end
+
+    local now = os.clock()
+    if (now - CachedBuilder.time) < 1.5 then
+        return nil
+    end
+    CachedBuilder.time = now
+
     local okAll, list = pcall(FindAllOf, "ConveyorBuilder")
     if okAll and list then
         for _, b in ipairs(list) do
             if Core.IsValidObj(b) then
                 local okPrev, prev = pcall(function() return b.bIsPreviewing or b.bActive end)
                 if not okPrev or prev ~= false then
+                    CachedBuilder.obj = b
                     return b
                 end
             end
         end
     end
-
+    CachedBuilder.obj = nil
     return nil
 end
 
