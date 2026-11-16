@@ -133,17 +133,11 @@ local function ComputeDesignerPower(designerHud)
         end
     end
 
-    -- Augment with scanned machines on the frame (including placed/unconstructed solar panels & machines)
+    -- Augment with placed/unconstructed machines on the frame (never calling FindMachines() on Designer frames)
     local seen = {}
     local objects = {}
-    if frame.FindMachines then
-        local okFind, arr = pcall(function() return frame:FindMachines() end)
-        if okFind and arr then CollectObjectsFromArray(arr, seen, objects) end
-    end
-    if #objects == 0 then
-        local okP, pArr = pcall(function() return frame.Machines end)
-        if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
-    end
+    local okP, pArr = pcall(function() return frame.Machines end)
+    if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
 
     local objGen, objCons = 0.0, 0.0
     for _, obj in ipairs(objects) do
