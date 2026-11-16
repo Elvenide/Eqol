@@ -19,6 +19,7 @@ local Core = require("core")
 
 -- Feature modules (one script file per feature)
 Core.RegisterFeature(require("features.power_overview"))
+Core.RegisterFeature(require("features.station_minimap"))
 
 -- Startup
 Core.InitAll()
