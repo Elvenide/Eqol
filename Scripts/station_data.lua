@@ -281,21 +281,6 @@ end
 function StationData.GetPlatformWorldBounds(platform)
     local actor = StationData.GetObjectActor(platform)
     if Core.IsValidObj(actor) then
-        local outOrigin, outExtent = {}, {}
-        local okB = pcall(function()
-            actor:GetActorBounds(false, outOrigin, outExtent)
-        end)
-        if okB and type(outOrigin.X) == "number" and type(outExtent.X) == "number" then
-            return {
-                cx = outOrigin.X,
-                cy = outOrigin.Y or 0,
-                cz = outOrigin.Z or 0,
-                ex = math.max(outExtent.X, 100),
-                ey = math.max(outExtent.Y or 600, 100),
-                ez = math.max(outExtent.Z or 300, 100),
-                hasActor = true,
-            }
-        end
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
         if okLoc and loc and type(loc.X) == "number" then
             return { cx = loc.X, cy = loc.Y or 0, cz = loc.Z or 0, ex = 600, ey = 600, ez = 300, hasActor = true }
@@ -598,6 +583,18 @@ end
 -- Player Discovery & Online/Offline Status
 --------------------------------------------------------------------------------
 
+local function ToLuaString(v)
+    if v == nil then return nil end
+    if type(v) == "string" then
+        return (v ~= "" and not v:match("^FString ") and not v:match("^FText ")) and v or nil
+    end
+    local ok, s = pcall(function() return v:ToString() end)
+    if ok and type(s) == "string" and s ~= "" and not s:match("^FString ") and not s:match("^FText ") then
+        return s
+    end
+    return nil
+end
+
 function StationData.GetAllPlayersInfo(localPC)
     local players = {}
     local pc = localPC or Core.GetLocalPlayerController()
@@ -670,22 +667,22 @@ function StationData.GetAllPlayersInfo(localPC)
             end
 
             -- Resolve nickname
-            local name = connInfo and connInfo.Name or nil
+            local name = connInfo and ToLuaString(connInfo.Name) or nil
             if (not name or name == "") and isLocal and Core.IsValidObj(pc) then
                 local okAcc, acc = pcall(function() return pc:GetAccountNickname() end)
-                if okAcc and acc and tostring(acc) ~= "" then
-                    name = tostring(acc)
+                if okAcc and acc then
+                    name = ToLuaString(acc)
                 end
             end
             if not name or name == "" then
                 for _, prop in ipairs({ "DisplayName", "PlayerName", "Nickname", "AccountNickname" }) do
-                    local okN, n = pcall(function()
-                        local v = po[prop]
-                        return (v and type(v.ToString) == "function") and v:ToString() or tostring(v)
-                    end)
-                    if okN and n and n ~= "" and n ~= "nil" then
-                        name = n
-                        break
+                    local okN, v = pcall(function() return po[prop] end)
+                    if okN and v ~= nil then
+                        local s = ToLuaString(v)
+                        if s then
+                            name = s
+                            break
+                        end
                     end
                 end
             end
