@@ -168,44 +168,25 @@ local function ComputeDesignerPower(designerHud)
         end
     end
 
-    local previewGen, previewCons = 0.0, 0.0
-    local okPrev, prevArr = pcall(function() return designer.PlacementPreviews end)
-    if okPrev and prevArr and type(prevArr.GetArrayNum) == "function" then
-        local previews = {}
-        local seen = {}
-        CollectObjectsFromArray(prevArr, seen, previews)
-        if not LoggedDesignerInfo or (LoggedDesignerInfo == "zero" and #previews > 0) then
-            LoggedDesignerInfo = (#previews > 0) and true or "zero"
-            local firstCls = (#previews > 0) and previews[1]:GetClass():GetFName():ToString() or "none"
-            Core.Log(string.format("DesignerPowerStats: PlacementPreviews=%d first=%s", #previews, tostring(firstCls)))
-            if #previews > 0 then
-                pcall(function()
-                    local sc = previews[1]:GetClass()
-                    if Core.IsValidObj(sc) and sc.ForEachProperty then
-                        sc:ForEachProperty(function(prop)
-                            Core.Log("DesignerPowerStats [Preview prop]: " .. prop:GetFName():ToString() .. " (" .. prop:GetClass():GetFName():ToString() .. ")")
-                        end)
-                    end
-                end)
+    local costGen, costCons = 0.0, 0.0
+    local okCost, costArr = pcall(function() return designer.FrameBlueprintCost end)
+    if okCost and costArr and type(costArr.GetArrayNum) == "function" then
+        StationData.ForEachArray(costArr, function(_, elem)
+            local itemObj = nil
+            local amt = 1
+            pcall(function() itemObj = elem.Item end)
+            pcall(function()
+                if type(elem.Amount) == "number" then amt = elem.Amount end
+            end)
+            if Core.IsValidObj(itemObj) and amt > 0 then
+                local g, c = ComputePowerFromObject(itemObj)
+                costGen = costGen + g * amt
+                costCons = costCons + c * amt
             end
-        end
-        for _, obj in ipairs(previews) do
-            local g, c = ComputePowerFromObject(obj)
-            if g == 0 and c == 0 then
-                for _, prop in ipairs({ "Actor", "PreviewActor", "SpawnedActor", "Block", "BlockData", "Data", "Item", "Building" }) do
-                    local okSub, sub = pcall(function() return obj[prop] end)
-                    if okSub and Core.IsValidObj(sub) then
-                        g, c = ComputePowerFromObject(sub)
-                        if g ~= 0 or c ~= 0 then break end
-                    end
-                end
-            end
-            previewGen = previewGen + g
-            previewCons = previewCons + c
-        end
+        end)
     end
 
-    return pgGen + previewGen, pgCons + previewCons
+    return math.max(pgGen, costGen), math.max(pgCons, costCons)
 end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
