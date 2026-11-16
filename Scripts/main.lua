@@ -27,6 +27,7 @@ Core.RegisterFeature(require("features.cinematic_freecam"))
 Core.RegisterFeature(require("features.ship_camera"))
 Core.RegisterFeature(require("features.conveyor_scroll_rotate"))
 Core.RegisterFeature(require("features.ship_zero_throttle"))
+Core.RegisterFeature(require("features.player_nametags"))
 
 -- Startup
 Core.InitAll()
