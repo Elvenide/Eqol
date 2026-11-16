@@ -170,7 +170,7 @@ local function ComputeDesignerPower(designerHud)
 
     local costGen, costCons = 0.0, 0.0
     local okCost, costArr = pcall(function() return designer.FrameBlueprintCost end)
-    if okCost and costArr and type(costArr.GetArrayNum) == "function" then
+    if okCost and costArr then
         local costCount = 0
         StationData.ForEachArray(costArr, function(_, elem)
             costCount = costCount + 1
@@ -203,8 +203,8 @@ local function ComputeDesignerPower(designerHud)
                 costCons = costCons + c * amt
             end
         end)
-        if costCount == 0 and LoggedDesignerInfo == false then
-            Core.Log("DesignerPowerStats: FrameBlueprintCost count=0")
+        if not LoggedDesignerInfo then
+            Core.Log("DesignerPowerStats: FrameBlueprintCost count=" .. tostring(costCount))
         end
     end
 
