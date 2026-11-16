@@ -148,6 +148,15 @@ end
 -- Logistics Data Aggregation
 --------------------------------------------------------------------------------
 
+local function GetItemKey(item)
+    if not Core.IsValidObj(item) then return nil end
+    local ok, n = pcall(function() return item:GetFName():ToString() end)
+    if ok and type(n) == "string" and n ~= "" then
+        return n
+    end
+    return tostring(item:GetAddress())
+end
+
 local function CollectStationLogisticsData(station, walkFrame)
     local platforms = StationData.GetStationPlatforms(station)
     if #platforms == 0 and Core.IsValidObj(walkFrame) then
@@ -183,7 +192,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                                 if st and Core.IsValidObj(st.Item) then
                                     local amt = tonumber(st.Amount) or 0
                                     if amt > 0 then
-                                        local k = StationData.GetObjectKey(st.Item) or tostring(st.Item:GetAddress())
+                                        local k = GetItemKey(st.Item)
                                         if not containerItems[k] then
                                             containerItems[k] = { Item = st.Item, Amount = 0 }
                                         end
@@ -219,7 +228,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                             local amt = tonumber(outStack.Amount) or 1
                             local rate = (amt * 60.0 / craftSec) * bonusMult
                             table.insert(outputs, { Item = outStack.Item, Rate = rate })
-                            local k = StationData.GetObjectKey(outStack.Item) or tostring(outStack.Item:GetAddress())
+                            local k = GetItemKey(outStack.Item)
                             stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
                         else
                             local okOuts, outs = pcall(function() return rec:GetOutputs() end)
@@ -234,7 +243,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                                         local amt = tonumber(st.Amount) or 1
                                         local rate = (amt * 60.0 / craftSec) * bonusMult
                                         table.insert(outputs, { Item = st.Item, Rate = rate })
-                                        local k = StationData.GetObjectKey(st.Item) or tostring(st.Item:GetAddress())
+                                        local k = GetItemKey(st.Item)
                                         stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
                                     end
                                 end)
@@ -254,7 +263,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                                     local amt = tonumber(st.Amount) or 1
                                     local rate = (amt * 60.0 / craftSec) * bonusMult
                                     table.insert(inputs, { Item = st.Item, Rate = rate })
-                                    local k = StationData.GetObjectKey(st.Item) or tostring(st.Item:GetAddress())
+                                    local k = GetItemKey(st.Item)
                                     stationConsRates[k] = (stationConsRates[k] or 0.0) + rate
                                 end
                             end)
@@ -287,18 +296,30 @@ end
 -- Logistics Window UI
 --------------------------------------------------------------------------------
 
+local function SetLogisticsCursorMode(pc, win, active)
+    if not Core.IsValidObj(pc) then return end
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if Core.IsValidObj(widgetSub) then
+        pcall(function() widgetSub:SetCursorVisible(active) end)
+    end
+    local wbl = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
+    if Core.IsValidObj(wbl) then
+        pcall(function()
+            if active then
+                wbl:SetInputMode_GameAndUIEx(pc, win, 0, false, false)
+            else
+                wbl:SetInputMode_GameOnly(pc, false)
+            end
+        end)
+    end
+end
+
 local function CloseLogisticsWindow()
     if Core.IsValidObj(ActiveLogisticsWin) then
         pcall(function() ActiveLogisticsWin:RemoveFromParent() end)
     end
     ActiveLogisticsWin = nil
-    local pc = Core.GetLocalPlayerController()
-    if Core.IsValidObj(pc) then
-        pcall(function()
-            pc.bShowMouseCursor = false
-            if pc.SetMouseCursor then pc:SetMouseCursor(false) end
-        end)
-    end
+    SetLogisticsCursorMode(Core.GetLocalPlayerController(), nil, false)
 end
 
 local function FormatRate(rate)
@@ -371,9 +392,8 @@ local function OpenLogisticsWindow()
     pcall(function()
         win:SetWindowName(Core.MakeText("Logistics"))
         win:AddToViewport(50)
-        pc.bShowMouseCursor = true
-        if pc.SetMouseCursor then pc:SetMouseCursor(true) end
     end)
+    SetLogisticsCursorMode(pc, win, true)
 
     if Core.IsValidObj(win.WBP_WindowHeader) and Core.IsValidObj(win.WBP_WindowHeader.CloseButton) then
         Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, CloseLogisticsWindow)
@@ -426,15 +446,20 @@ local function OpenLogisticsWindow()
         local sBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
         pcall(function()
             sBox:SetWidthOverride(360.0)
-            sBox:SetHeightOverride(560.0)
         end)
         sBox:AddChild(invScroll)
-        leftVBox:AddChildToVerticalBox(sBox)
+        local sBoxSlot = leftVBox:AddChildToVerticalBox(sBox)
+        if Core.IsValidObj(sBoxSlot) then
+            pcall(function() sBoxSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end)
+        end
     end
 
     local leftSlot = mainHBox:AddChildToHorizontalBox(leftVBox)
     if Core.IsValidObj(leftSlot) then
-        pcall(function() leftSlot:SetPadding({ Left = 8.0, Top = 8.0, Right = 16.0, Bottom = 8.0 }) end)
+        pcall(function()
+            leftSlot:SetVerticalAlignment(0)
+            leftSlot:SetPadding({ Left = 8.0, Top = 8.0, Right = 16.0, Bottom = 8.0 })
+        end)
     end
 
     -- Right Column: Production Machines & Rates (Icon-heavy)
@@ -462,7 +487,7 @@ local function OpenLogisticsWindow()
                 -- Determine bottleneck status: consuming faster than station produces?
                 local hasDeficit = false
                 for _, inp in ipairs(entry.Inputs) do
-                    local k = StationData.GetObjectKey(inp.Item) or tostring(inp.Item:GetAddress())
+                    local k = GetItemKey(inp.Item)
                     local pRate = prodRates[k] or 0.0
                     local cRate = consRates[k] or 0.0
                     if cRate > pRate + 0.001 then
@@ -513,7 +538,7 @@ local function OpenLogisticsWindow()
 
                 -- Ingredient icons + rates
                 for _, inp in ipairs(entry.Inputs) do
-                    local k = StationData.GetObjectKey(inp.Item) or tostring(inp.Item:GetAddress())
+                    local k = GetItemKey(inp.Item)
                     local pRate = prodRates[k] or 0.0
                     local cRate = consRates[k] or 0.0
                     local chipTint = (cRate > pRate + 0.001) and STATUS_COLORS.Red or nil
@@ -555,21 +580,31 @@ local function OpenLogisticsWindow()
         local mBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
         pcall(function()
             mBox:SetWidthOverride(640.0)
-            mBox:SetHeightOverride(560.0)
         end)
         mBox:AddChild(machScroll)
-        rightVBox:AddChildToVerticalBox(mBox)
+        local mBoxSlot = rightVBox:AddChildToVerticalBox(mBox)
+        if Core.IsValidObj(mBoxSlot) then
+            pcall(function() mBoxSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end)
+        end
     end
 
     local rightSlot = mainHBox:AddChildToHorizontalBox(rightVBox)
     if Core.IsValidObj(rightSlot) then
         pcall(function()
             rightSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+            rightSlot:SetVerticalAlignment(0)
             rightSlot:SetPadding({ Left = 8.0, Top = 8.0, Right = 8.0, Bottom = 8.0 })
         end)
     end
 
-    rootBox:AddChildToVerticalBox(mainHBox)
+    local mainSlot = rootBox:AddChildToVerticalBox(mainHBox)
+    if Core.IsValidObj(mainSlot) then
+        pcall(function()
+            mainSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+            mainSlot:SetHorizontalAlignment(0)
+            mainSlot:SetVerticalAlignment(0)
+        end)
+    end
 end
 
 local function ToggleLogistics()
@@ -757,19 +792,41 @@ local function EnsureHudKeybindIndicator(hud)
     if keyStr == "None" or keyStr == "" then keyStr = "-" end
 
     local keyTxt = nil
-    pcall(function()
-        if Core.IsValidObj(iconW.Image_82) then
-            if Core.IsValidObj(hud.MapInput) and Core.IsValidObj(hud.MapInput.Image_82) then
-                iconW.Image_82:SetBrush(hud.MapInput.Image_82.Brush)
-            elseif Core.IsValidObj(hud.BuildingInput) and Core.IsValidObj(hud.BuildingInput.Image_82) then
-                iconW.Image_82:SetBrush(hud.BuildingInput.Image_82.Brush)
+    local function ApplyMatSciIcon()
+        local tex = nil
+        for _, tPath in ipairs({
+            "/Game/Materials/UI_Textures/T_MatSciIcon.T_MatSciIcon",
+            "/Game/Materials/Icons/T_MatSciIcon.T_MatSciIcon",
+            "/Game/Textures/Icons/T_MatSciIcon.T_MatSciIcon",
+            "/Game/Textures/T_MatSciIcon.T_MatSciIcon",
+        }) do
+            local candidate = Core.FindOrLoadClass(tPath)
+            if Core.IsValidObj(candidate) then
+                tex = candidate
+                break
             end
         end
-        if Core.IsValidObj(iconW.WBP_InputKey) and Core.IsValidObj(iconW.WBP_InputKey.WBP_Text) then
-            keyTxt = iconW.WBP_InputKey.WBP_Text
-            keyTxt:SetText(Core.MakeText(keyStr))
+        if not Core.IsValidObj(tex) and Core.IsValidObj(hud.ResearchInput) then
+            pcall(function() tex = hud.ResearchInput.Icon end)
         end
-        iconW:SetVisibility(0)
+        pcall(function()
+            if Core.IsValidObj(tex) then
+                iconW.Icon = tex
+                if Core.IsValidObj(iconW.Image_82) then
+                    iconW.Image_82:SetBrushFromTexture(tex, false)
+                end
+            end
+            if Core.IsValidObj(iconW.WBP_InputKey) and Core.IsValidObj(iconW.WBP_InputKey.WBP_Text) then
+                keyTxt = iconW.WBP_InputKey.WBP_Text
+                keyTxt:SetText(Core.MakeText(keyStr))
+            end
+            iconW:SetVisibility(0)
+        end)
+    end
+
+    ApplyMatSciIcon()
+    ExecuteInGameThreadAfterFrames(1, function()
+        if Core.IsValidObj(iconW) then ApplyMatSciIcon() end
     end)
 
     -- Place in Row 0, Column 1 (left of Tab, B, X on top row) with matching GridSlot padding
