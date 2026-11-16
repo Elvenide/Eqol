@@ -127,17 +127,23 @@ end
 
 local function FindStatsListPanel(statsContainer)
     if not Core.IsValidObj(statsContainer) then return nil end
+    local vBoxCls = Core.FindOrLoadClass("/Script/UMG.VerticalBox")
+    local gridCls = Core.FindOrLoadClass("/Script/UMG.GridPanel")
+
+    local function isListPanel(obj)
+        if not Core.IsValidObj(obj) then return false end
+        if Core.IsValidObj(vBoxCls) and obj:IsA(vBoxCls) then return true end
+        if Core.IsValidObj(gridCls) and obj:IsA(gridCls) then return true end
+        return false
+    end
+
     local okChild, child = pcall(function() return statsContainer:GetChildAt(0) end)
     if not okChild or not Core.IsValidObj(child) then return nil end
+    if isListPanel(child) then return child end
 
-    -- Drill down one level if wrapped in a Margin/Padding/SizeBox
-    if child.AddChildToVerticalBox or child.AddChildToGrid then
-        return child
-    end
     local okSub, sub = pcall(function() return child:GetChildAt(0) end)
-    if okSub and Core.IsValidObj(sub) and (sub.AddChildToVerticalBox or sub.AddChildToGrid) then
-        return sub
-    end
+    if okSub and isListPanel(sub) then return sub end
+
     return child
 end
 
@@ -171,12 +177,15 @@ local function CreateStatRow(hud, pc, outer, parentPanel, labelStr)
         end)
     end
 
-    if parentPanel.AddChildToVerticalBox then
-        local vSlot = parentPanel:AddChildToVerticalBox(rowBox)
-        if Core.IsValidObj(vSlot) then
+    local vBoxCls = Core.FindOrLoadClass("/Script/UMG.VerticalBox")
+    local gridCls = Core.FindOrLoadClass("/Script/UMG.GridPanel")
+
+    if Core.IsValidObj(vBoxCls) and parentPanel:IsA(vBoxCls) then
+        local okV, vSlot = pcall(function() return parentPanel:AddChildToVerticalBox(rowBox) end)
+        if okV and Core.IsValidObj(vSlot) then
             pcall(function() vSlot:SetPadding({ Left = 0.0, Top = 4.0, Right = 0.0, Bottom = 0.0 }) end)
         end
-    elseif parentPanel.AddChildToGrid then
+    elseif Core.IsValidObj(gridCls) and parentPanel:IsA(gridCls) then
         local rowIdx = 4
         pcall(function()
             local ch = parentPanel:GetAllChildren()
@@ -184,7 +193,7 @@ local function CreateStatRow(hud, pc, outer, parentPanel, labelStr)
             StationData.ForEachArray(ch, function() cnt = cnt + 1 end)
             rowIdx = cnt
         end)
-        parentPanel:AddChildToGrid(rowBox, rowIdx, 0)
+        pcall(function() parentPanel:AddChildToGrid(rowBox, rowIdx, 0) end)
     else
         pcall(function() parentPanel:AddChild(rowBox) end)
     end
