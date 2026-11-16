@@ -26,6 +26,7 @@ Core.RegisterFeature(require("features.designer_power_stats"))
 Core.RegisterFeature(require("features.cinematic_freecam"))
 Core.RegisterFeature(require("features.ship_camera"))
 Core.RegisterFeature(require("features.conveyor_scroll_rotate"))
+Core.RegisterFeature(require("features.ship_zero_throttle"))
 
 -- Startup
 Core.InitAll()
