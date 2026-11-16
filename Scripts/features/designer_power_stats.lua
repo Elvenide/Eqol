@@ -37,7 +37,8 @@ local function ComputePowerFromObject(obj)
     local gen, cons = 0.0, 0.0
     if not Core.IsValidObj(obj) then return gen, cons end
 
-    if obj.GetDisplayMaxPower then
+    local okHasFn, hasFn = pcall(function() return obj.GetDisplayMaxPower ~= nil end)
+    if okHasFn and hasFn then
         local okMax, maxP = pcall(function() return obj:GetDisplayMaxPower() end)
         local okCur, curP = pcall(function() return obj:GetDisplayPower() end)
         local val = (okMax and type(maxP) == "number" and maxP ~= 0) and maxP or ((okCur and type(curP) == "number") and curP or 0)
@@ -177,11 +178,21 @@ local function ComputeDesignerPower(designerHud)
             LoggedDesignerInfo = (#previews > 0) and true or "zero"
             local firstCls = (#previews > 0) and previews[1]:GetClass():GetFName():ToString() or "none"
             Core.Log(string.format("DesignerPowerStats: PlacementPreviews=%d first=%s", #previews, tostring(firstCls)))
+            if #previews > 0 then
+                pcall(function()
+                    local sc = previews[1]:GetClass()
+                    if Core.IsValidObj(sc) and sc.ForEachProperty then
+                        sc:ForEachProperty(function(prop)
+                            Core.Log("DesignerPowerStats [Preview prop]: " .. prop:GetFName():ToString() .. " (" .. prop:GetClass():GetFName():ToString() .. ")")
+                        end)
+                    end
+                end)
+            end
         end
         for _, obj in ipairs(previews) do
             local g, c = ComputePowerFromObject(obj)
             if g == 0 and c == 0 then
-                for _, prop in ipairs({ "Block", "BlockData", "Data", "Item", "Building" }) do
+                for _, prop in ipairs({ "Actor", "PreviewActor", "SpawnedActor", "Block", "BlockData", "Data", "Item", "Building" }) do
                     local okSub, sub = pcall(function() return obj[prop] end)
                     if okSub and Core.IsValidObj(sub) then
                         g, c = ComputePowerFromObject(sub)
