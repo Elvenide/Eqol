@@ -133,17 +133,33 @@ local function ComputeDesignerPower(designerHud)
         end
     end
 
-    -- Augment with placed/unconstructed machines on the frame (never calling FindMachines() on Designer frames)
-    local seen = {}
-    local objects = {}
-    local okP, pArr = pcall(function() return frame.Machines end)
-    if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
+    -- Augment with scanned machines ONLY on Station frames (calling FindMachines/Machines on Ship Designer frames crashes C++)
+    local isStationFrame = false
+    pcall(function()
+        local clsName = frame:GetClass():GetFName():ToString()
+        if clsName and string.find(clsName, "Station", 1, true) then
+            isStationFrame = true
+        end
+    end)
 
     local objGen, objCons = 0.0, 0.0
-    for _, obj in ipairs(objects) do
-        local g, c = ComputePowerFromObject(obj)
-        objGen = objGen + g
-        objCons = objCons + c
+    if isStationFrame then
+        local seen = {}
+        local objects = {}
+        if frame.FindMachines then
+            local okFind, arr = pcall(function() return frame:FindMachines() end)
+            if okFind and arr then CollectObjectsFromArray(arr, seen, objects) end
+        end
+        if #objects == 0 then
+            local okP, pArr = pcall(function() return frame.Machines end)
+            if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
+        end
+
+        for _, obj in ipairs(objects) do
+            local g, c = ComputePowerFromObject(obj)
+            objGen = objGen + g
+            objCons = objCons + c
+        end
     end
 
     return math.max(objGen, pgGen), math.max(objCons, pgCons)
