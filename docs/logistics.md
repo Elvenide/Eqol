@@ -5,7 +5,7 @@ Inspect your station's total stored inventory and production/consumption through
 ## Opening Logistics
 
 - Press **`L`** (default) while on foot in a space station to toggle the **Logistics** window.
-- A **Logistics** keybind indicator also appears in the bottom-right HUD alongside the other keybind hints and updates automatically if you rebind the key.
+- A **Logistics** keybind indicator also appears in the bottom-right HUD while on foot in a station (automatically collapsing when piloting a ship or outside a station) and updates automatically if you rebind the key.
 
 ## Features
 

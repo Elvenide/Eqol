@@ -926,6 +926,45 @@ local function EnsureHudKeybindIndicator(hud)
     HudKeyIndicators[addr] = { Root = iconW, IconAddr = iconW:GetAddress(), KeyText = keyTxt }
 end
 
+local HudIndicatorPollActive = false
+
+local function StartHudIndicatorPoll()
+    if HudIndicatorPollActive then return end
+    HudIndicatorPollActive = true
+
+    local function Tick()
+        local anyValid = false
+        local pc = Core.GetLocalPlayerController()
+        local showIndicator = false
+        if Core.IsValidObj(pc) then
+            local playerObj = pc.PlayerObject
+            local piloting = Core.IsValidObj(playerObj) and Core.IsValidObj(playerObj.PilotedShip)
+            if not piloting then
+                local inStation = StationData.IsPlayerInStation(pc)
+                showIndicator = inStation == true
+            end
+        end
+
+        local targetVis = showIndicator and 0 or 1 -- Visible or Collapsed
+        for addr, entry in pairs(HudKeyIndicators) do
+            if Core.IsValidObj(entry.Root) then
+                anyValid = true
+                pcall(function() entry.Root:SetVisibility(targetVis) end)
+            else
+                HudKeyIndicators[addr] = nil
+            end
+        end
+
+        if anyValid then
+            ExecuteInGameThreadWithDelay(250, Tick)
+        else
+            HudIndicatorPollActive = false
+        end
+    end
+
+    ExecuteInGameThreadWithDelay(250, Tick)
+end
+
 --------------------------------------------------------------------------------
 -- Feature Lifecycle
 --------------------------------------------------------------------------------
@@ -936,6 +975,7 @@ Feature.WatchWidgets = {
     end,
     WBP_CharacterHUD_C = function(hud)
         EnsureHudKeybindIndicator(hud)
+        StartHudIndicatorPoll()
     end,
 }
 
