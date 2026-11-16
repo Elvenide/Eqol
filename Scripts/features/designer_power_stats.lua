@@ -132,23 +132,35 @@ local function ComputeDesignerPower(designerHud)
     return totalGen, totalCons
 end
 
-local function CopyTextStyle(dstText, srcText, overrideColor)
+local function CopyTextStyle(dstText, srcText, fallbackText, overrideColor)
     if not Core.IsValidObj(dstText) then return end
     pcall(function()
-        if Core.IsValidObj(srcText) then
-            if dstText.SetSize then dstText:SetSize(srcText.Size) end
-            if dstText.SetJustification then dstText:SetJustification(srcText.Justification) end
-        else
-            if dstText.SetSize then dstText:SetSize(14) end
-            if dstText.SetJustification then dstText:SetJustification(1) end
+        local sz = nil
+        if Core.IsValidObj(srcText) and srcText.Size ~= nil then
+            local n = tonumber(srcText.Size)
+            if n and n >= 8 then sz = n end
         end
+        if not sz and Core.IsValidObj(fallbackText) and fallbackText.Size ~= nil then
+            local n = tonumber(fallbackText.Size)
+            if n and n >= 8 then sz = n end
+        end
+        if dstText.SetSize then dstText:SetSize(sz or 18) end
+
+        local just = nil
+        if Core.IsValidObj(srcText) and srcText.Justification ~= nil then
+            just = srcText.Justification
+        elseif Core.IsValidObj(fallbackText) and fallbackText.Justification ~= nil then
+            just = fallbackText.Justification
+        end
+        if dstText.SetJustification then dstText:SetJustification(just or 1) end
+
         if overrideColor and Core.IsValidObj(dstText.TextBlock) then
             dstText.TextBlock:SetColorAndOpacity({ SpecifiedColor = overrideColor, ColorUseRule = 0 })
         end
     end)
 end
 
-local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, refLabelText, refValueText, labelStr)
+local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, refLabelText, refValueText, labelStr, gridColIdx)
     local colVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local lblTxt = Core.CreateUserWidget(PATHS.WBPTextClass, hud, pc)
     local divBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
@@ -160,8 +172,8 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
         return nil
     end
 
-    CopyTextStyle(lblTxt, refLabelText, COLORS.GoldAccent)
-    CopyTextStyle(valTxt, refValueText, COLORS.WhiteValue)
+    CopyTextStyle(lblTxt, refLabelText, refValueText, COLORS.GoldAccent)
+    CopyTextStyle(valTxt, refValueText, refValueText, COLORS.WhiteValue)
 
     pcall(function()
         lblTxt:SetText(Core.MakeText(labelStr))
@@ -206,18 +218,17 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
             end)
         end
     elseif Core.IsValidObj(gridCls) and statsHBox:IsA(gridCls) then
-        local colIdx = 3
-        pcall(function()
-            local ch = statsHBox:GetAllChildren()
-            local cnt = 0
-            StationData.ForEachArray(ch, function() cnt = cnt + 1 end)
-            colIdx = cnt
-        end)
+        local colIdx = gridColIdx or 3
         local okG, gSlot = pcall(function() return statsHBox:AddChildToGrid(colVBox, 0, colIdx) end)
         if okG and Core.IsValidObj(gSlot) then
             pcall(function()
                 gSlot:SetVerticalAlignment(2)
-                gSlot:SetPadding({ Left = 24.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                gSlot:SetHorizontalAlignment(2)
+                if Core.IsValidObj(refColVBox) and Core.IsValidObj(refColVBox.Slot) then
+                    gSlot:SetPadding(refColVBox.Slot.Padding)
+                else
+                    gSlot:SetPadding({ Left = 24.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                end
             end)
         end
     else
@@ -275,8 +286,26 @@ local function RefreshDesignerPowerStats(hud)
         local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
         local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
 
-        local genTxt = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Generation")
-        local consTxt = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Consumption")
+        local nextCol = 3
+        pcall(function()
+            local maxCol = -1
+            local count = statsPanel:GetChildrenCount()
+            for i = 0, count - 1 do
+                local child = statsPanel:GetChildAt(i)
+                if Core.IsValidObj(child) and Core.IsValidObj(child.Slot) and child.Slot.Column ~= nil then
+                    local c = tonumber(child.Slot.Column)
+                    if c and c > maxCol then maxCol = c end
+                end
+            end
+            if maxCol >= 0 then
+                nextCol = maxCol + 1
+            elseif count > 0 then
+                nextCol = count
+            end
+        end)
+
+        local genTxt = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Generation", nextCol)
+        local consTxt = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Consumption", nextCol + 1)
         if not (Core.IsValidObj(genTxt) and Core.IsValidObj(consTxt)) then return end
 
         st = { GenText = genTxt, ConsText = consTxt }
