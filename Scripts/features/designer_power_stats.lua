@@ -126,6 +126,17 @@ local function ComputeDesignerPower(designerHud)
         pcall(function()
             local dCls = designer:GetClass()
             Core.Log("DesignerPowerStats: designer=" .. dCls:GetFName():ToString())
+            if dCls.ForEachProperty then
+                dCls:ForEachProperty(function(prop)
+                    local n = prop:GetFName():ToString()
+                    if string.find(n, "Block", 1, true) or string.find(n, "Plan", 1, true)
+                        or string.find(n, "Build", 1, true) or string.find(n, "Ghost", 1, true)
+                        or string.find(n, "Preview", 1, true) or string.find(n, "Power", 1, true)
+                        or string.find(n, "Blueprint", 1, true) or string.find(n, "Item", 1, true) then
+                        Core.Log("DesignerPowerStats [Designer prop]: " .. n .. " (" .. prop:GetClass():GetFName():ToString() .. ")")
+                    end
+                end)
+            end
             if dCls.ForEachFunction then
                 dCls:ForEachFunction(function(fn)
                     local n = fn:GetFName():ToString()
