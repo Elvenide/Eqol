@@ -185,17 +185,45 @@ local function GetOrCreatePlatformWidget(st, index)
         return entry
     end
 
-    local b = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
-    if not Core.IsValidObj(b) then return nil end
+    -- Outer border = module boundary outline, inner border = dark module floor fill
+    local outerB = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
+    local innerB = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
+    if not Core.IsValidObj(outerB) or not Core.IsValidObj(innerB) then return nil end
 
-    pcall(function() b:SetBrushColor(COLORS.ModuleFill) end)
-    local slot = st.Canvas:AddChildToCanvas(b)
+    pcall(function()
+        outerB:SetBrushColor(COLORS.ModuleBorder)
+        outerB:SetPadding({ Left = 2.0, Top = 2.0, Right = 2.0, Bottom = 2.0 })
+        innerB:SetBrushColor(COLORS.ModuleFill)
+    end)
+    outerB:AddChild(innerB)
+
+    local slot = st.Canvas:AddChildToCanvas(outerB)
     if Core.IsValidObj(slot) then
         pcall(function() slot:SetZOrder(1) end)
     end
 
-    entry = { Widget = b, Slot = slot }
+    entry = { Widget = outerB, Slot = slot }
     st.PlatformPool[index] = entry
+    return entry
+end
+
+local function GetOrCreateConnectorWidget(st, index)
+    st.ConnectorPool = st.ConnectorPool or {}
+    local entry = st.ConnectorPool[index]
+    if entry and Core.IsValidObj(entry.Widget) then
+        return entry
+    end
+
+    local b = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
+    if not Core.IsValidObj(b) then return nil end
+
+    local slot = st.Canvas:AddChildToCanvas(b)
+    if Core.IsValidObj(slot) then
+        pcall(function() slot:SetZOrder(5) end)
+    end
+
+    entry = { Widget = b, Slot = slot }
+    st.ConnectorPool[index] = entry
     return entry
 end
 
@@ -323,6 +351,7 @@ local function UpdateMinimapState(st)
     local maxCullDist = (MODULES_SPAN * 0.5 + 2.0) * unitSize
 
     local platCount = 0
+    local connCount = 0
     local machCount = 0
     local iconCount = 0
 
@@ -340,6 +369,23 @@ local function UpdateMinimapState(st)
                 local ph = math.max(12.0, b.ey * 2.0 * scale - 2.0)
                 SetCanvasSlot(pEntry.Slot, sx, sy, pw, ph, 0.5, 0.5)
                 pcall(function() pEntry.Widget:SetVisibility(0) end)
+            end
+
+            -- Entry points / connectors on this module
+            local conns = StationData.GetPlatformConnectors(pe.platform)
+            for _, c in ipairs(conns) do
+                connCount = connCount + 1
+                local cEntry = GetOrCreateConnectorWidget(st, connCount)
+                if cEntry then
+                    local csx = halfMap + (c.x - px) * scale
+                    local csy = halfMap + (c.y - py) * scale
+                    local cCol = c.occupied and { R = 0.25, G = 0.78, B = 0.92, A = 0.95 } or { R = 0.90, G = 0.72, B = 0.18, A = 0.90 }
+                    pcall(function()
+                        cEntry.Widget:SetBrushColor(cCol)
+                        cEntry.Widget:SetVisibility(0)
+                    end)
+                    SetCanvasSlot(cEntry.Slot, csx, csy, 8.0, 8.0, 0.5, 0.5)
+                end
             end
 
             -- Machines on this platform
@@ -397,6 +443,7 @@ local function UpdateMinimapState(st)
     end
 
     HidePoolFrom(st.PlatformPool, platCount + 1)
+    if st.ConnectorPool then HidePoolFrom(st.ConnectorPool, connCount + 1) end
     HidePoolFrom(st.MachinePool, machCount + 1)
     HidePoolFrom(st.IconPool, iconCount + 1)
 
