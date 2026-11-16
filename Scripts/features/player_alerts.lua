@@ -28,42 +28,25 @@ local function PushBuiltInAlert(messageStr)
         return
     end
 
-    local alertCls = Core.FindOrLoadClass(PATHS.PlayerAlertStatusClass)
-    local alertObj = nil
-    if Core.IsValidObj(alertCls) then
-        local okNew, obj = pcall(StaticConstructObject, alertCls, pc)
-        if okNew and Core.IsValidObj(obj) then
-            alertObj = obj
-            local txt = Core.MakeText(messageStr)
-            for _, prop in ipairs({ "Message", "Text", "AlertText", "Title", "Description" }) do
+    for _, w in ipairs(alertWidgets) do
+        if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
+            local entryW = Core.CreateUserWidget(PATHS.WBPPlayerAlertStatusClass, w, pc)
+            if Core.IsValidObj(entryW) then
                 pcall(function()
-                    if alertObj[prop] ~= nil then
-                        alertObj[prop] = txt
+                    if Core.IsValidObj(entryW.WBP_RichText) then
+                        entryW.WBP_RichText:SetText(Core.MakeText(messageStr))
+                    end
+                    if w.Container.AddChildToVerticalBox then
+                        w.Container:AddChildToVerticalBox(entryW)
+                    else
+                        w.Container:AddChild(entryW)
                     end
                 end)
-            end
-        end
-    end
-
-    for _, w in ipairs(alertWidgets) do
-        if Core.IsValidObj(w) then
-            local shown = false
-            if Core.IsValidObj(alertObj) and w.ShowAlert then
-                local okShow = pcall(function() w:ShowAlert(alertObj) end)
-                if okShow then shown = true end
-            end
-            if not shown and Core.IsValidObj(w.Container) then
-                local entryW = Core.CreateUserWidget(PATHS.WBPPlayerAlertStatusClass, w, pc)
-                if Core.IsValidObj(entryW) then
-                    pcall(function()
-                        if entryW.SetAlertText then
-                            entryW:SetAlertText(Core.MakeText(messageStr))
-                        elseif entryW.TextBlock then
-                            entryW.TextBlock:SetText(Core.MakeText(messageStr))
-                        end
-                        w.Container:AddChild(entryW)
-                    end)
-                end
+                ExecuteInGameThreadWithDelay(6000, function()
+                    if Core.IsValidObj(entryW) then
+                        pcall(function() entryW:RemoveSelf() end)
+                    end
+                end)
             end
         end
     end
