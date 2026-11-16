@@ -735,63 +735,53 @@ local function EnsureHudKeybindIndicator(hud)
     local container = hud.HUDInputContainer
     if not Core.IsValidObj(container) then return end
 
-    local outer = Core.GetWidgetOuter(hud)
     local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
     local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
 
-    local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    local keyBadge = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    local keyTxt = Core.CreateUserWidget(PATHS.WBPTextClass, hud, pc)
-    local labelTxt = Core.CreateUserWidget(PATHS.WBPTextClass, hud, pc)
-
-    if not (Core.IsValidObj(rowHBox) and Core.IsValidObj(keyBadge) and Core.IsValidObj(keyTxt) and Core.IsValidObj(labelTxt)) then
-        return
-    end
+    local inputIconCls = "/Game/Blueprints/Widgets/HUDs/WBP_InputIcon.WBP_InputIcon_C"
+    local iconW = Core.CreateUserWidget(inputIconCls, hud, pc)
+    if not Core.IsValidObj(iconW) then return end
 
     local keyStr = tostring(Core.Config.LogisticsKey or DEFAULT_KEY)
     if keyStr == "None" or keyStr == "" then keyStr = "-" end
 
+    local keyTxt = nil
     pcall(function()
-        keyBadge:SetBrushColor(STATUS_COLORS.KeyBg)
-        keyBadge:SetPadding({ Left = 7.0, Top = 3.0, Right = 7.0, Bottom = 3.0 })
-        keyTxt:SetSize(12)
-        keyTxt:SetText(Core.MakeText(keyStr))
-        labelTxt:SetSize(12)
-        labelTxt:SetText(Core.MakeText("Logistics"))
-    end)
-
-    keyBadge:AddChild(keyTxt)
-    local s1 = rowHBox:AddChildToHorizontalBox(keyBadge)
-    if Core.IsValidObj(s1) then
-        pcall(function()
-            s1:SetVerticalAlignment(2)
-            s1:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
-        end)
-    end
-    local s2 = rowHBox:AddChildToHorizontalBox(labelTxt)
-    if Core.IsValidObj(s2) then
-        pcall(function() s2:SetVerticalAlignment(2) end)
-    end
-
-    local nextRow = 6
-    pcall(function()
-        local children = container:GetAllChildren()
-        if children then
-            local count = 0
-            StationData.ForEachArray(children, function() count = count + 1 end)
-            nextRow = count
+        -- Use a station/inventory-style icon on top
+        local tex = Core.FindOrLoadClass("/Game/Materials/UI_Textures/T_UI_StationIcon.T_UI_StationIcon")
+        if Core.IsValidObj(iconW.Image_82) then
+            if Core.IsValidObj(tex) then
+                iconW.Image_82:SetBrushFromTexture(tex, false)
+            elseif Core.IsValidObj(hud.MapInput) and Core.IsValidObj(hud.MapInput.Image_82) then
+                iconW.Image_82:SetBrush(hud.MapInput.Image_82.Brush)
+            end
         end
+        if Core.IsValidObj(iconW.WBP_InputKey) and Core.IsValidObj(iconW.WBP_InputKey.WBP_Text) then
+            keyTxt = iconW.WBP_InputKey.WBP_Text
+            keyTxt:SetText(Core.MakeText(keyStr))
+        end
+        iconW:SetVisibility(0)
     end)
 
-    local gSlot = container:AddChildToGrid(rowHBox, nextRow, 0)
-    if Core.IsValidObj(gSlot) then
+    -- Place in Row 0, Column 0 (left of Tab, B, X on top row) with matching GridSlot padding
+    local targetRow, targetCol = 0, 0
+    local refSlot = nil
+    if Core.IsValidObj(hud.BuildingInput) and Core.IsValidObj(hud.BuildingInput.Slot) then
+        refSlot = hud.BuildingInput.Slot
+    elseif Core.IsValidObj(hud.MapInput) and Core.IsValidObj(hud.MapInput.Slot) then
+        refSlot = hud.MapInput.Slot
+    end
+
+    local gSlot = container:AddChildToGrid(iconW, targetRow, targetCol)
+    if Core.IsValidObj(gSlot) and Core.IsValidObj(refSlot) then
         pcall(function()
-            gSlot:SetPadding({ Left = 0.0, Top = 4.0, Right = 0.0, Bottom = 0.0 })
-            gSlot:SetHorizontalAlignment(3) -- Right
+            gSlot:SetPadding(refSlot.Padding)
+            gSlot:SetHorizontalAlignment(refSlot.HorizontalAlignment)
+            gSlot:SetVerticalAlignment(refSlot.VerticalAlignment)
         end)
     end
 
-    HudKeyIndicators[addr] = { Root = rowHBox, KeyText = keyTxt }
+    HudKeyIndicators[addr] = { Root = iconW, KeyText = keyTxt }
 end
 
 --------------------------------------------------------------------------------
