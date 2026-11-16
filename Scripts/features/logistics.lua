@@ -412,9 +412,10 @@ local function OpenLogisticsWindow()
     pcall(function()
         win:SetWindowName(Core.MakeText("Logistics"))
         win:AddToViewport(50)
-        win:SetAnchorsInViewport({ Minimum = { X = 0.5, Y = 0.5 }, Maximum = { X = 0.5, Y = 0.5 } })
-        win:SetAlignmentInViewport({ X = 0.5, Y = 0.5 })
-        win:SetDesiredSizeInViewport({ X = 980.0, Y = 780.0 })
+        win:SetAnchorsInViewport({ Minimum = { X = 0.16, Y = 0.08 }, Maximum = { X = 0.84, Y = 0.92 } })
+        win:SetAlignmentInViewport({ X = 0.0, Y = 0.0 })
+        win:SetPositionInViewport({ X = 0.0, Y = 0.0 }, false)
+        win:SetDesiredSizeInViewport({ X = 0.0, Y = 0.0 })
     end)
     SetLogisticsCursorMode(pc, win, true)
 
@@ -466,12 +467,7 @@ local function OpenLogisticsWindow()
             end
         end
         invScroll:AddChild(invWrap)
-        local sBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-        pcall(function()
-            sBox:SetWidthOverride(360.0)
-        end)
-        sBox:AddChild(invScroll)
-        local sBoxSlot = leftVBox:AddChildToVerticalBox(sBox)
+        local sBoxSlot = leftVBox:AddChildToVerticalBox(invScroll)
         if Core.IsValidObj(sBoxSlot) then
             pcall(function() sBoxSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
         end
@@ -498,15 +494,10 @@ local function OpenLogisticsWindow()
             if Core.IsValidObj(pairRow) then
                 for col = 0, 1 do
                     local entry = prodTotals[i + col]
-                    local cellBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+                    local cellBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
                     if Core.IsValidObj(cellBox) then
-                        pcall(function() cellBox:SetWidthOverride(175.0) end)
                         if entry then
-                            local chipH = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-                            if Core.IsValidObj(chipH) then
-                                AddItemRateChip(chipH, win, pc, outer, entry.Item, entry.Rate, STATUS_COLORS.Green)
-                                cellBox:AddChild(chipH)
-                            end
+                            AddItemRateChip(cellBox, win, pc, outer, entry.Item, entry.Rate, STATUS_COLORS.Green)
                         end
                         local cSlot = pairRow:AddChildToHorizontalBox(cellBox)
                         if Core.IsValidObj(cSlot) then
@@ -522,10 +513,7 @@ local function OpenLogisticsWindow()
         end
 
         totScroll:AddChild(totListBox)
-        local tBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-        pcall(function() tBox:SetWidthOverride(360.0) end)
-        tBox:AddChild(totScroll)
-        local tBoxSlot = leftVBox:AddChildToVerticalBox(tBox)
+        local tBoxSlot = leftVBox:AddChildToVerticalBox(totScroll)
         if Core.IsValidObj(tBoxSlot) then
             pcall(function() tBoxSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
         end
@@ -534,6 +522,7 @@ local function OpenLogisticsWindow()
     local leftSlot = mainHBox:AddChildToHorizontalBox(leftVBox)
     if Core.IsValidObj(leftSlot) then
         pcall(function()
+            leftSlot:SetSize({ Value = 0.36, SizeRule = 1 })
             leftSlot:SetVerticalAlignment(0)
             leftSlot:SetPadding({ Left = 8.0, Top = 8.0, Right = 16.0, Bottom = 8.0 })
         end)
@@ -672,12 +661,7 @@ local function OpenLogisticsWindow()
         end
 
         machScroll:AddChild(machListBox)
-        local mBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-        pcall(function()
-            mBox:SetWidthOverride(560.0)
-        end)
-        mBox:AddChild(machScroll)
-        local mBoxSlot = rightVBox:AddChildToVerticalBox(mBox)
+        local mBoxSlot = rightVBox:AddChildToVerticalBox(machScroll)
         if Core.IsValidObj(mBoxSlot) then
             pcall(function() mBoxSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end)
         end
@@ -686,7 +670,7 @@ local function OpenLogisticsWindow()
     local rightSlot = mainHBox:AddChildToHorizontalBox(rightVBox)
     if Core.IsValidObj(rightSlot) then
         pcall(function()
-            rightSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+            rightSlot:SetSize({ Value = 0.64, SizeRule = 1 })
             rightSlot:SetVerticalAlignment(0)
             rightSlot:SetPadding({ Left = 8.0, Top = 8.0, Right = 8.0, Bottom = 8.0 })
         end)
