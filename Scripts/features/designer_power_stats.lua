@@ -171,7 +171,9 @@ local function ComputeDesignerPower(designerHud)
     local costGen, costCons = 0.0, 0.0
     local okCost, costArr = pcall(function() return designer.FrameBlueprintCost end)
     if okCost and costArr and type(costArr.GetArrayNum) == "function" then
+        local costCount = 0
         StationData.ForEachArray(costArr, function(_, elem)
+            costCount = costCount + 1
             local itemObj = nil
             local amt = 1
             pcall(function() itemObj = elem.Item end)
@@ -179,11 +181,31 @@ local function ComputeDesignerPower(designerHud)
                 if type(elem.Amount) == "number" then amt = elem.Amount end
             end)
             if Core.IsValidObj(itemObj) and amt > 0 then
+                if not LoggedDesignerInfo then
+                    LoggedDesignerInfo = true
+                    pcall(function()
+                        local iCls = itemObj:GetClass()
+                        Core.Log("DesignerPowerStats: CostItem=" .. itemObj:GetFName():ToString() .. " class=" .. iCls:GetFName():ToString())
+                        if iCls.ForEachProperty then
+                            iCls:ForEachProperty(function(prop)
+                                local n = prop:GetFName():ToString()
+                                if string.find(n, "Block", 1, true) or string.find(n, "Power", 1, true)
+                                    or string.find(n, "Actor", 1, true) or string.find(n, "Class", 1, true)
+                                    or string.find(n, "Machine", 1, true) or string.find(n, "Building", 1, true) then
+                                    Core.Log("DesignerPowerStats [Item prop]: " .. n .. " (" .. prop:GetClass():GetFName():ToString() .. ")")
+                                end
+                            end)
+                        end
+                    end)
+                end
                 local g, c = ComputePowerFromObject(itemObj)
                 costGen = costGen + g * amt
                 costCons = costCons + c * amt
             end
         end)
+        if costCount == 0 and LoggedDesignerInfo == false then
+            Core.Log("DesignerPowerStats: FrameBlueprintCost count=0")
+        end
     end
 
     return math.max(pgGen, costGen), math.max(pgCons, costCons)
