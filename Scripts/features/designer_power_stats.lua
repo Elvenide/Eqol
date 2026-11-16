@@ -444,7 +444,11 @@ function Feature.RegisterHooks()
             function(Context)
                 local hud = Context:get()
                 if Core.IsValidObj(hud) then
-                    RefreshDesignerPowerStats(hud)
+                    ExecuteInGameThreadWithDelay(50, function()
+                        if Core.IsValidObj(hud) then
+                            RefreshDesignerPowerStats(hud)
+                        end
+                    end)
                 end
             end
         )
