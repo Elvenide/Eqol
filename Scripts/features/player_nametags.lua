@@ -24,7 +24,7 @@ local COLORS = {
 local HEAD_OFFSET   = 180.0  -- cm above actor origin along player's local up vector (clears helmet)
 local MAX_VIEW_DIST = 2500.0 -- 25 meters max viewing distance from camera
 local MIN_CAM_DIST  = 120.0  -- hide when camera is inside player's head (1st-person)
-local TAG_SCALE     = 0.25   -- 3D world scale for crisp Minecraft-style proportions
+local TAG_SCALE     = 0.30   -- 3D world scale for crisp Minecraft-style proportions
 
 local TagPool = {} -- idx -> { Actor, Comp, TextWidget }
 local PollActive = false
@@ -73,7 +73,7 @@ local function GetOrCreateTagActor(pc, idx)
     end
 
     pcall(function()
-        nameTxt:SetSize(16)
+        nameTxt:SetSize(20)
         nameTxt:SetJustification(1)
         comp:SetWidgetSpace(0) -- World space
         comp:SetDrawAtDesiredSize(true)
