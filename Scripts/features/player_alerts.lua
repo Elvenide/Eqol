@@ -20,14 +20,14 @@ local PollActive = false
 
 local function PushBuiltInAlert(messageStr)
     local pc = Core.GetLocalPlayerController()
-    if not Core.IsValidObj(pc) then return end
+    if not Core.IsValidObj(pc) then return false end
 
     local okAlerts, alertWidgets = pcall(FindAllOf, "WBP_PlayerAlerts_C")
     if not okAlerts or not alertWidgets or #alertWidgets == 0 then
-        Core.Log("PlayerAlerts: " .. messageStr)
-        return
+        return false
     end
 
+    local pushed = false
     for _, w in ipairs(alertWidgets) do
         if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
             local entryW = Core.CreateUserWidget(PATHS.WBPPlayerAlertStatusClass, w, pc)
@@ -41,6 +41,7 @@ local function PushBuiltInAlert(messageStr)
                     else
                         w.Container:AddChild(entryW)
                     end
+                    pushed = true
                 end)
                 ExecuteInGameThreadWithDelay(6000, function()
                     if Core.IsValidObj(entryW) then
@@ -50,6 +51,7 @@ local function PushBuiltInAlert(messageStr)
             end
         end
     end
+    return pushed
 end
 
 local function PollPlayerPresence()
@@ -60,11 +62,20 @@ local function PollPlayerPresence()
     if #players == 0 then return end
 
     if not InitializedSnapshot then
-        InitializedSnapshot = true
+        -- Wait until WBP_PlayerAlerts_C actually exists in-game before marking snapshot initialized
+        local localJoined = false
         for _, p in ipairs(players) do
-            KnownOnlinePlayers[p.Key] = { Name = p.Name, IsOnline = p.IsOnline }
             if p.IsLocal and p.IsOnline then
-                PushBuiltInAlert(string.format("%s joined the game", p.Name))
+                if PushBuiltInAlert(string.format("%s joined the game", p.Name)) then
+                    localJoined = true
+                end
+                break
+            end
+        end
+        if localJoined then
+            InitializedSnapshot = true
+            for _, p in ipairs(players) do
+                KnownOnlinePlayers[p.Key] = { Name = p.Name, IsOnline = p.IsOnline }
             end
         end
         return
