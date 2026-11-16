@@ -156,14 +156,8 @@ local function ComputeDesignerPower(designerHud)
 
         local seen = {}
         local objects = {}
-        if frame.FindMachines then
-            local okFind, arr = pcall(function() return frame:FindMachines() end)
-            if okFind and arr then CollectObjectsFromArray(arr, seen, objects) end
-        end
-        if #objects == 0 then
-            local okP, pArr = pcall(function() return frame.Machines end)
-            if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
-        end
+        local okP, pArr = pcall(function() return frame.Machines end)
+        if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
 
         for _, obj in ipairs(objects) do
             local g, c = ComputePowerFromObject(obj)
