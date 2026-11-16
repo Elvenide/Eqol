@@ -42,8 +42,14 @@ local function EnsureSpecHook(pc)
             if Core.IsValidObj(pCls) and pCls.ForEachFunction then
                 pCls:ForEachFunction(function(fn)
                     local n = fn:GetFName():ToString()
-                    if string.find(n, "Spectat", 1, true) or string.find(n, "Cam", 1, true) then
-                        Core.Log("Freecam Reflection [Pawn fn]: " .. n)
+                    if n == "AddSpectatorInput" or n == "UpdateSpectatorCamera" then
+                        local params = {}
+                        if fn.ForEachProperty then
+                            fn:ForEachProperty(function(prop)
+                                params[#params + 1] = prop:GetFName():ToString() .. ":" .. prop:GetClass():GetFName():ToString()
+                            end)
+                        end
+                        Core.Log("Freecam Pawn Sig [" .. n .. "]: " .. table.concat(params, ", "))
                     end
                 end)
             end
