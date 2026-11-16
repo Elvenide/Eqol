@@ -36,7 +36,8 @@ local STATUS_COLORS = {
     Green = { R = 0.05402, G = 0.7042, B = 0.05281, A = 1.0 },
     Amber = { R = 0.8917,  G = 0.6242, B = 0.0,     A = 1.0 },
     Red   = { R = 0.5177,  G = 0.0,    B = 0.04122, A = 1.0 },
-    RowBg = { R = 0.030,   G = 0.045,  B = 0.065,   A = 0.85 },
+    WinBg = { R = 0.012,   G = 0.016,  B = 0.024,   A = 0.78 },
+    RowBg = { R = 0.0,     G = 0.0,    B = 0.0,     A = 0.0  },
     KeyBg = { R = 0.060,   G = 0.090,  B = 0.130,   A = 0.85 },
 }
 
@@ -404,19 +405,29 @@ local function OpenLogisticsWindow()
 
     local items, assemblers, prodRates, consRates = CollectStationLogisticsData(station, walkFrame)
 
+    local rootBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local rootBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    if not (Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
+    if not (Core.IsValidObj(rootBg) and Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
+
+    pcall(function()
+        rootBg:SetBrushColor(STATUS_COLORS.WinBg)
+        rootBg:SetPadding({ Left = 12.0, Top = 8.0, Right = 12.0, Bottom = 12.0 })
+        if Core.IsValidObj(win.ContentBorder) then
+            win.ContentBorder:SetBrushColor(STATUS_COLORS.RowBg)
+        end
+    end)
+    rootBg:AddChild(rootBox)
 
     local attached = false
     if Core.IsValidObj(win.Content) then
-        local okC = pcall(function() win.Content:AddChild(rootBox) end)
+        local okC = pcall(function() win.Content:AddChild(rootBg) end)
         if okC then attached = true end
     end
     if not attached and Core.IsValidObj(win.ContentBorder) then
-        pcall(function() win.ContentBorder:AddChild(rootBox) end)
+        pcall(function() win.ContentBorder:AddChild(rootBg) end)
     end
-    pcall(function() win:SetContentForSlot(FName("Content"), rootBox) end)
+    pcall(function() win:SetContentForSlot(FName("Content"), rootBg) end)
 
     -- Left Column: Container Inventory Grid (Icon-heavy)
     local leftVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
@@ -869,9 +880,26 @@ Feature.WatchWidgets = {
 function Feature.Init()
     Core.ReadConfig({ LogisticsKey = DEFAULT_KEY })
     ApplyLogisticsKeybind(Core.Config.LogisticsKey, false)
+    if Key and Key.ESCAPE then
+        RegisterKeyBind(Key.ESCAPE, function()
+            if Core.IsValidObj(ActiveLogisticsWin) then
+                ExecuteInGameThread(CloseLogisticsWindow)
+            end
+        end)
+    end
 end
 
 function Feature.RegisterHooks()
+    Core.TryRegisterHook(
+        "WindowBase_CloseWindow_Logistics",
+        "/Game/Blueprints/Widgets/Basic/WBP_WindowBase.WBP_WindowBase_C:BndEvt__WBP_WindowBase_WBP_WindowHeader_K2Node_ComponentBoundEvent_1_CloseWindow__DelegateSignature",
+        function(Context)
+            local w = Context:get()
+            if Core.IsValidObj(w) and Core.IsValidObj(ActiveLogisticsWin) and w:GetAddress() == ActiveLogisticsWin:GetAddress() then
+                CloseLogisticsWindow()
+            end
+        end
+    )
     Core.TryRegisterHook(
         "SettingsMenu_Setup_Logistics",
         "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Setup",
