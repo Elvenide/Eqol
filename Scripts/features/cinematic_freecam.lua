@@ -37,6 +37,20 @@ local function EnsureSpecHook(pc)
     end
 
     pcall(function()
+        if Core.IsValidObj(pc.Pawn) then
+            local pCls = pc.Pawn:GetClass()
+            if Core.IsValidObj(pCls) and pCls.ForEachFunction then
+                pCls:ForEachFunction(function(fn)
+                    local n = fn:GetFName():ToString()
+                    if string.find(n, "Spectat", 1, true) or string.find(n, "Cam", 1, true) then
+                        Core.Log("Freecam Reflection [Pawn fn]: " .. n)
+                    end
+                end)
+            end
+        end
+    end)
+
+    pcall(function()
         local gStatics = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
         local gi = Core.IsValidObj(gStatics) and gStatics:GetGameInstance(pc) or nil
         if Core.IsValidObj(gi) then
