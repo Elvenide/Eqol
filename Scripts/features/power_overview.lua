@@ -272,7 +272,7 @@ local function TogglePowerOverview()
     end
 
     local okShow, errShow = pcall(function()
-        widgetSub:ShowWindow(powerOverviewClass, gridOwner, nil)
+        widgetSub:ShowWindow(powerOverviewClass, gridOwner, nil, false)
     end)
     if not okShow then
         Core.Log("TogglePowerOverview: ShowWindow failed: " .. tostring(errShow))
