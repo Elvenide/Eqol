@@ -44,11 +44,6 @@ local function SetHudHiddenState(pc, hidden)
 end
 
 local function SpawnFreecamActor(pc)
-    local gStatics = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
-    local mathLib = Core.GetCDO("/Script/Engine.Default__KismetMathLibrary")
-    local camCls = Core.FindOrLoadClass("/Script/Engine.CameraActor")
-    if not (Core.IsValidObj(gStatics) and Core.IsValidObj(camCls)) then return nil end
-
     local camMgr = pc.PlayerCameraManager
     local camLoc = { X = 0.0, Y = 0.0, Z = 0.0 }
     local camRot = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
@@ -61,33 +56,11 @@ local function SpawnFreecamActor(pc)
         end)
     end
 
-    local quat = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 }
-    if Core.IsValidObj(mathLib) then
-        pcall(function()
-            local q = mathLib:Conv_RotatorToQuaternion(camRot)
-            if q then quat = { X = q.X or 0, Y = q.Y or 0, Z = q.Z or 0, W = q.W or 1 } end
-        end)
-    end
-
-    local xform = {
-        Rotation = quat,
-        Translation = camLoc,
-        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
-    }
-
-    local okSpawn, actor = pcall(function()
-        local deferred = gStatics:BeginDeferredActorSpawnFromClass(pc, camCls, xform, 1, pc)
-        if Core.IsValidObj(deferred) then
-            return gStatics:FinishSpawningActor(deferred, xform)
-        end
-        return nil
-    end)
-
-    if okSpawn and Core.IsValidObj(actor) then
+    local actor = Core.SpawnActor(pc, "/Script/Engine.CameraActor", camLoc, camRot)
+    if Core.IsValidObj(actor) then
         pcall(function() actor:K2_SetActorRotation(camRot, false) end)
-        return actor
     end
-    return nil
+    return actor
 end
 
 local function StartFreecamTick()
