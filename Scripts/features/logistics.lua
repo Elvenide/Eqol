@@ -348,8 +348,11 @@ local function AddItemRateChip(parentHBox, window, pc, outer, item, rate, tintCo
         itemW:SetItem(item)
         rateTxt:SetSize(12)
         rateTxt:SetText(Core.MakeText(FormatRate(rate)))
-        if tintColor and rateTxt.SetColour then
-            rateTxt:SetColour(tintColor)
+        if tintColor then
+            rateTxt.bOverrideColour = true
+            rateTxt.Colour = tintColor
+            if rateTxt.SetColour then rateTxt:SetColour(tintColor) end
+            if rateTxt.PreConstruct then rateTxt:PreConstruct(false) end
         end
     end)
 
@@ -405,29 +408,27 @@ local function OpenLogisticsWindow()
 
     local items, assemblers, prodRates, consRates = CollectStationLogisticsData(station, walkFrame)
 
-    local rootBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local rootBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    if not (Core.IsValidObj(rootBg) and Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
+    if not (Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
 
+    -- Keep WBP_WindowBase's native ContentBorder dark translucent background and flush alignment with the yellow header tab
     pcall(function()
-        rootBg:SetBrushColor(STATUS_COLORS.WinBg)
-        rootBg:SetPadding({ Left = 12.0, Top = 8.0, Right = 12.0, Bottom = 12.0 })
         if Core.IsValidObj(win.ContentBorder) then
-            win.ContentBorder:SetBrushColor(STATUS_COLORS.RowBg)
+            win.ContentBorder:SetBrushColor({ R = 0.012, G = 0.016, B = 0.024, A = 0.88 })
+            win.ContentBorder:SetPadding({ Left = 16.0, Top = 12.0, Right = 16.0, Bottom = 12.0 })
         end
     end)
-    rootBg:AddChild(rootBox)
 
     local attached = false
     if Core.IsValidObj(win.Content) then
-        local okC = pcall(function() win.Content:AddChild(rootBg) end)
+        local okC = pcall(function() win.Content:AddChild(rootBox) end)
         if okC then attached = true end
     end
     if not attached and Core.IsValidObj(win.ContentBorder) then
-        pcall(function() win.ContentBorder:AddChild(rootBg) end)
+        pcall(function() win.ContentBorder:AddChild(rootBox) end)
     end
-    pcall(function() win:SetContentForSlot(FName("Content"), rootBg) end)
+    pcall(function() win:SetContentForSlot(FName("Content"), rootBox) end)
 
     -- Left Column: Container Inventory Grid (Icon-heavy)
     local leftVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
