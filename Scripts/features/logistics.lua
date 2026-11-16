@@ -367,13 +367,7 @@ local function OpenLogisticsWindow()
     end)
 
     if Core.IsValidObj(win.WBP_WindowHeader) and Core.IsValidObj(win.WBP_WindowHeader.CloseButton) then
-        local closeBtn = win.WBP_WindowHeader.CloseButton
-        local inner = closeBtn.Button or closeBtn
-        local addr = inner:GetAddress()
-        if not HookedButtons[addr] then
-            HookedButtons[addr] = true
-            pcall(function() inner.OnPressed:Add(CloseLogisticsWindow) end)
-        end
+        Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, CloseLogisticsWindow)
     end
 
     local items, assemblers, prodRates, consRates = CollectStationLogisticsData(station, walkFrame)
@@ -747,13 +741,11 @@ local function EnsureHudKeybindIndicator(hud)
 
     local keyTxt = nil
     pcall(function()
-        -- Use a station/inventory-style icon on top
-        local tex = Core.FindOrLoadClass("/Game/Materials/UI_Textures/T_UI_StationIcon.T_UI_StationIcon")
         if Core.IsValidObj(iconW.Image_82) then
-            if Core.IsValidObj(tex) then
-                iconW.Image_82:SetBrushFromTexture(tex, false)
-            elseif Core.IsValidObj(hud.MapInput) and Core.IsValidObj(hud.MapInput.Image_82) then
+            if Core.IsValidObj(hud.MapInput) and Core.IsValidObj(hud.MapInput.Image_82) then
                 iconW.Image_82:SetBrush(hud.MapInput.Image_82.Brush)
+            elseif Core.IsValidObj(hud.BuildingInput) and Core.IsValidObj(hud.BuildingInput.Image_82) then
+                iconW.Image_82:SetBrush(hud.BuildingInput.Image_82.Brush)
             end
         end
         if Core.IsValidObj(iconW.WBP_InputKey) and Core.IsValidObj(iconW.WBP_InputKey.WBP_Text) then

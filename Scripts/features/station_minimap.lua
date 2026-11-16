@@ -12,6 +12,7 @@ local Feature = {
 
 local PATHS = {
     WBPBorderClass    = "/Game/Blueprints/Widgets/Basic/WBP_Border.WBP_Border_C",
+    WBPButtonClass    = "/Game/Blueprints/Widgets/Basic/WBP_Button.WBP_Button_C",
     WBPTextClass      = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
     WBPItemClass      = "/Game/Blueprints/Widgets/Display/Inventory/WBP_Item.WBP_Item_C",
     CanvasPanelClass  = "/Script/UMG.CanvasPanel",
@@ -252,18 +253,18 @@ local function GetOrCreateIconWidget(st, index)
         return entry
     end
 
-    local btn = Core.CreateRawWidget(PATHS.ButtonClass, st.Outer)
+    local btn = Core.CreateUserWidget(PATHS.WBPButtonClass, st.Hud, st.PC)
     local itemWidget = Core.CreateUserWidget(PATHS.WBPItemClass, st.Hud, st.PC)
     if not Core.IsValidObj(btn) or not Core.IsValidObj(itemWidget) then
         return nil
     end
 
     pcall(function()
-        btn:SetBackgroundColor(COLORS.Transparent)
-        btn:SetColorAndOpacity({ R = 1, G = 1, B = 1, A = 1 })
         itemWidget:SetIconSize(16.0)
+        btn:SetBackgroundColour(COLORS.Transparent)
+        btn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+        btn:SetContentForSlot(FName("Content"), itemWidget)
     end)
-    btn:AddChild(itemWidget)
 
     local slot = st.Canvas:AddChildToCanvas(btn)
     if Core.IsValidObj(slot) then
@@ -277,17 +278,11 @@ local function GetOrCreateIconWidget(st, index)
         Machine = nil,
     }
 
-    local btnAddr = btn:GetAddress()
-    if not HookedIconButtons[btnAddr] then
-        HookedIconButtons[btnAddr] = true
-        pcall(function()
-            btn.OnPressed:Add(function()
-                if Core.IsValidObj(entry.Machine) then
-                    StationData.ToggleMachineIcon(entry.Machine)
-                end
-            end)
-        end)
-    end
+    Core.RegisterWBPButtonClick(btn, function()
+        if Core.IsValidObj(entry.Machine) then
+            StationData.ToggleMachineIcon(entry.Machine)
+        end
+    end)
 
     st.IconPool[index] = entry
     return entry

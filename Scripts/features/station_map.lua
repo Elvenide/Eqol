@@ -77,11 +77,7 @@ local function HookWBPButton(btn, fn)
 end
 
 local function HookRawButton(btn, fn)
-    if not Core.IsValidObj(btn) then return end
-    local addr = btn:GetAddress()
-    if HookedButtons[addr] then return end
-    HookedButtons[addr] = true
-    pcall(function() btn.OnPressed:Add(fn) end)
+    Core.RegisterWBPButtonClick(btn, fn)
 end
 
 local function SetCanvasSlot(slot, x, y, w, h, alignX, alignY, zOrder)
@@ -468,14 +464,15 @@ RefreshStationMapCanvas = function()
         local mw = math.max(24.0, b.ex * 2.0 * scale - 2.0)
         local mh = math.max(24.0, b.ey * 2.0 * scale - 2.0)
 
-        local modBtn = Core.CreateRawWidget(PATHS.ButtonClass, outer)
+        local modBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, MapUI.PC)
         local modBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
         if Core.IsValidObj(modBtn) and Core.IsValidObj(modBorder) then
             pcall(function()
-                modBtn:SetBackgroundColor(COLORS.Transparent)
                 modBorder:SetBrushColor(COLORS.ModuleFill)
+                modBtn:SetBackgroundColour(COLORS.Transparent)
+                modBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                modBtn:SetContentForSlot(FName("Content"), modBorder)
             end)
-            modBtn:AddChild(modBorder)
             local slot = MapUI.MapCanvas:AddChildToCanvas(modBtn)
             SetCanvasSlot(slot, mx, my, mw, mh, 0.5, 0.5, 1)
 
@@ -519,14 +516,15 @@ RefreshStationMapCanvas = function()
                 col = COLORS.Selected
             end
 
-            local machBtn = Core.CreateRawWidget(PATHS.ButtonClass, outer)
+            local machBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, MapUI.PC)
             local machBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
             if Core.IsValidObj(machBtn) and Core.IsValidObj(machBox) then
                 pcall(function()
-                    machBtn:SetBackgroundColor(COLORS.Transparent)
                     machBox:SetBrushColor(col)
+                    machBtn:SetBackgroundColour(COLORS.Transparent)
+                    machBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                    machBtn:SetContentForSlot(FName("Content"), machBox)
                 end)
-                machBtn:AddChild(machBox)
                 local mSlot = MapUI.MapCanvas:AddChildToCanvas(machBtn)
                 SetCanvasSlot(mSlot, mx, my, baseSize, baseSize, 0.5, 0.5, isSel and 20 or 10)
 
@@ -568,16 +566,17 @@ RefreshStationMapCanvas = function()
                 local item = StationData.GetPrimaryItemForMachine(m)
                 if Core.IsValidObj(item) then
                     local isHidden = StationData.IsMachineIconHidden(m)
-                    local iconBtn = Core.CreateRawWidget(PATHS.ButtonClass, outer)
+                    local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, MapUI.PC)
                     local iconWidget = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, MapUI.PC)
                     if Core.IsValidObj(iconBtn) and Core.IsValidObj(iconWidget) then
                         pcall(function()
-                            iconBtn:SetBackgroundColor(COLORS.Transparent)
+                            iconBtn:SetBackgroundColour(COLORS.Transparent)
+                            iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
                             iconBtn:SetColorAndOpacity({ R = 1, G = 1, B = 1, A = isHidden and 0.25 or 1.0 })
                             iconWidget:SetIconSize(cat == "Conveyor" and 14.0 or 18.0)
                             iconWidget:SetItem(item)
+                            iconBtn:SetContentForSlot(FName("Content"), iconWidget)
                         end)
-                        iconBtn:AddChild(iconWidget)
                         local iSlot = MapUI.MapCanvas:AddChildToCanvas(iconBtn)
                         SetCanvasSlot(iSlot, mx, my, 22.0, 22.0, 0.5, 0.5, 30)
 
