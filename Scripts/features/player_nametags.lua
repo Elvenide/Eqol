@@ -21,7 +21,7 @@ local COLORS = {
     Offline = { R = 0.90, G = 0.35, B = 0.35, A = 1.0 },
 }
 
-local HEAD_OFFSET   = 165.0  -- cm above actor origin along player's local up vector (clears helmet)
+local HEAD_OFFSET   = 180.0  -- cm above actor origin along player's local up vector (clears helmet)
 local MAX_VIEW_DIST = 2500.0 -- 25 meters max viewing distance from camera
 local MIN_CAM_DIST  = 120.0  -- hide when camera is inside player's head (1st-person)
 local TAG_SCALE     = 0.25   -- 3D world scale for crisp Minecraft-style proportions
