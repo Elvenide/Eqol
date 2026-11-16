@@ -181,7 +181,7 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
     pcall(function()
         lblTxt:SetText(Core.MakeText(labelStr))
         valTxt:SetText(Core.MakeText("0 kW / 0 kW"))
-        divBox:SetHeightOverride(2.0)
+        divBox:SetHeightOverride(1.75)
         divLine:SetBrushColor(accentCol)
     end)
     divBox:AddChild(divLine)
@@ -190,14 +190,14 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
     if Core.IsValidObj(s1) then
         pcall(function()
             s1:SetHorizontalAlignment(2) -- HAlign_Center
-            s1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 })
+            s1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 1.5 })
         end)
     end
     local s2 = colVBox:AddChildToVerticalBox(divBox)
     if Core.IsValidObj(s2) then
         pcall(function()
             s2:SetHorizontalAlignment(0) -- HAlign_Fill
-            s2:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 })
+            s2:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 3.0 })
         end)
     end
     local s3 = colVBox:AddChildToVerticalBox(valTxt)
