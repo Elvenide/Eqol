@@ -180,8 +180,8 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
 
     pcall(function()
         lblTxt:SetText(Core.MakeText(labelStr))
-        valTxt:SetText(Core.MakeText("0 kW"))
-        divBox:SetHeightOverride(1.5)
+        valTxt:SetText(Core.MakeText("0 kW / 0 kW"))
+        divBox:SetHeightOverride(2.0)
         divLine:SetBrushColor(accentCol)
     end)
     divBox:AddChild(divLine)
@@ -283,7 +283,7 @@ local function RefreshDesignerPowerStats(hud)
     local addr = hud:GetAddress()
     local st = InjectedDesigners[addr]
 
-    if not st or not Core.IsValidObj(st.GenText) or not Core.IsValidObj(st.ConsText) then
+    if not st or not Core.IsValidObj(st.PowerText) then
         local statsPanel, refCol, hullText, hullColVBox = FindStatsContainerPanel(hud)
         if not Core.IsValidObj(statsPanel) then return end
 
@@ -339,28 +339,23 @@ local function RefreshDesignerPowerStats(hud)
             end
         end)
 
-        local genTxt, genLbl = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Generation", nextCol, labelColor, labelSize)
-        local consTxt, consLbl = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Consumption", nextCol + 1, labelColor, labelSize)
-        if not (Core.IsValidObj(genTxt) and Core.IsValidObj(consTxt)) then return end
+        local pwrTxt, pwrLbl = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power", nextCol, labelColor, labelSize)
+        if not Core.IsValidObj(pwrTxt) then return end
 
-        st = { GenText = genTxt, ConsText = consTxt, GenLabel = genLbl, ConsLabel = consLbl, LabelColor = labelColor }
+        st = { PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
         InjectedDesigners[addr] = st
     end
 
     local gen, cons = ComputeDesignerPower(hud)
     pcall(function()
-        st.GenText:SetText(Core.MakeText(FormatPower(gen)))
-        st.ConsText:SetText(Core.MakeText(FormatPower(cons)))
+        st.PowerText:SetText(Core.MakeText(string.format("%s / %s", FormatPower(cons), FormatPower(gen))))
         local lblCol = st.LabelColor or COLORS.GoldAccent
-        if Core.IsValidObj(st.GenLabel) and Core.IsValidObj(st.GenLabel.TextBlock) then
-            st.GenLabel.TextBlock:SetColorAndOpacity({ SpecifiedColor = lblCol, ColorUseRule = 0 })
+        if Core.IsValidObj(st.PowerLabel) and Core.IsValidObj(st.PowerLabel.TextBlock) then
+            st.PowerLabel.TextBlock:SetColorAndOpacity({ SpecifiedColor = lblCol, ColorUseRule = 0 })
         end
-        if Core.IsValidObj(st.ConsLabel) and Core.IsValidObj(st.ConsLabel.TextBlock) then
-            st.ConsLabel.TextBlock:SetColorAndOpacity({ SpecifiedColor = lblCol, ColorUseRule = 0 })
-        end
-        local consColor = (cons > gen and cons > 0) and COLORS.RedValue or COLORS.WhiteValue
-        if Core.IsValidObj(st.ConsText.TextBlock) then
-            st.ConsText.TextBlock:SetColorAndOpacity({ SpecifiedColor = consColor, ColorUseRule = 0 })
+        local valColor = (cons > gen and cons > 0) and COLORS.RedValue or COLORS.WhiteValue
+        if Core.IsValidObj(st.PowerText.TextBlock) then
+            st.PowerText.TextBlock:SetColorAndOpacity({ SpecifiedColor = valColor, ColorUseRule = 0 })
         end
     end)
 end
