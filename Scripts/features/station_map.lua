@@ -73,21 +73,7 @@ local HookedButtons = {}
 --------------------------------------------------------------------------------
 
 local function HookWBPButton(btn, fn)
-    if not Core.IsValidObj(btn) then return end
-    local addr = btn:GetAddress()
-    if HookedButtons[addr] then return end
-    HookedButtons[addr] = true
-
-    local inner = btn.Button
-    if Core.IsValidObj(inner) then
-        pcall(function()
-            inner.OnPressed:Add(fn)
-        end)
-    else
-        pcall(function()
-            btn.OnPressed:Add(fn)
-        end)
-    end
+    Core.RegisterWBPButtonClick(btn, fn)
 end
 
 local function HookRawButton(btn, fn)
@@ -695,7 +681,7 @@ local function OpenBuildMenuFromStationMap()
 
     WaitingForBuildMenuSelection = true
     pcall(function()
-        widgetSub:ShowWindow(bldCls, nil, nil)
+        widgetSub:ShowWindow(bldCls, nil, nil, false)
     end)
 end
 
