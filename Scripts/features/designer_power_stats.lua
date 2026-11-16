@@ -14,6 +14,8 @@ local PATHS = {
     VerticalBoxClass = "/Script/UMG.VerticalBox",
     BorderClass      = "/Script/UMG.Border",
     SizeBoxClass     = "/Script/UMG.SizeBox",
+    DesignerHUDClass = "/Game/Blueprints/Widgets/HUDs/Designer/WBP_DesignerHUD.WBP_DesignerHUD_C",
+    BPCDesignerClass = "/Game/Blueprints/Player/Designer/BPC_Designer.BPC_Designer_C",
 }
 
 local COLORS = {
@@ -23,7 +25,30 @@ local COLORS = {
     GreenValue = { R = 0.30, G = 0.90, B = 0.40, A = 1.0 },
 }
 
-local InjectedDesigners = {} -- hudAddr -> { GenText, ConsText }
+local GEN_PROPS = {
+    "PowerGenRate",
+    "PowerGeneration",
+    "PowerProduction",
+    "MaxPowerProduction",
+    "GeneratedPower",
+}
+
+local CONS_PROPS = {
+    "PowerConsumptionRate",
+    "PowerDraw",
+    "ThrusterPower",
+    "AssemblerPowerDraw",
+    "RefineryPowerDraw",
+    "ThrusterPowerDraw",
+    "PowerConsumption",
+    "MaxPowerConsumption",
+    "RequiredPower",
+    "ConsumedPower",
+}
+
+local InjectedDesigners = {} -- hudAddr -> { Hud, PowerText, PowerLabel, LabelColor }
+local HookedBlueprintStats = false
+local RefreshDesignerPowerStats -- forward declaration
 
 local function FormatPower(kw)
     local val = tonumber(kw) or 0.0
@@ -33,45 +58,123 @@ local function FormatPower(kw)
     return string.format("%.0f kW", val)
 end
 
-local function ComputePowerFromObject(obj)
+local function ReadFPNum(val)
+    if type(val) == "number" then return val end
+    if val ~= nil then return Core.GetFPFloat(val) end
+    return 0.0
+end
+
+local function GetCDOFromUClass(uclass)
+    uclass = Core.UnwrapArrayElem(uclass)
+    if not Core.IsValidObj(uclass) then return nil end
+    local ok, full = pcall(function() return uclass:GetFullName() end)
+    if not ok or type(full) ~= "string" then return nil end
+    local objPath = full:match("^%S+ (.+)$") or full
+    local pkg, clsName = objPath:match("^(.-)%.([^.]+)$")
+    if not pkg or not clsName then return nil end
+    if string.sub(clsName, 1, 9) == "Default__" then
+        return Core.GetCDO(objPath)
+    end
+    return Core.GetCDO(pkg .. ".Default__" .. clsName)
+end
+
+local function IsSolarPanelObject(obj)
+    local okDE, hasDE = pcall(function() return obj.DistanceEfficiency ~= nil end)
+    if okDE and hasDE == true then return true end
+    local okCls, clsName = pcall(function() return obj:GetClass():GetFName():ToString() end)
+    return okCls and type(clsName) == "string" and string.find(clsName, "SolarPanel", 1, true) ~= nil
+end
+
+local function FirstPositiveProp(obj, propList)
+    for _, prop in ipairs(propList) do
+        local ok, v = pcall(function() return obj[prop] end)
+        if ok and v ~= nil then
+            local num = ReadFPNum(v)
+            if num > 0 then
+                return num
+            end
+        end
+    end
+    return 0.0
+end
+
+local function ComputePowerFromObject(obj, solarEfficiency)
     local gen, cons = 0.0, 0.0
     if not Core.IsValidObj(obj) then return gen, cons end
 
-    local okHasFn, hasFn = pcall(function() return obj.GetDisplayMaxPower ~= nil end)
-    if okHasFn and hasFn then
-        local okMax, maxP = pcall(function() return obj:GetDisplayMaxPower() end)
-        local okCur, curP = pcall(function() return obj:GetDisplayPower() end)
-        local val = (okMax and type(maxP) == "number" and maxP ~= 0) and maxP or ((okCur and type(curP) == "number") and curP or 0)
-        if val > 0 then
-            gen = gen + val
-        elseif val < 0 then
-            cons = cons + math.abs(val)
-        end
-        if val ~= 0 then return gen, cons end
-    end
+    local eff = (type(solarEfficiency) == "number" and solarEfficiency > 0) and solarEfficiency or 1.0
 
-    for _, prop in ipairs({ "PowerGeneration", "PowerProduction", "MaxPowerProduction", "GeneratedPower" }) do
-        local ok, v = pcall(function() return obj[prop] end)
-        if ok and v ~= nil then
-            local num = (type(v) == "number") and v or Core.GetFPFloat(v)
-            if num > 0 then
-                gen = gen + num
-                break
+    local rawGen = FirstPositiveProp(obj, GEN_PROPS)
+    if rawGen > 0 then
+        gen = IsSolarPanelObject(obj) and (rawGen * eff) or rawGen
+    end
+    cons = FirstPositiveProp(obj, CONS_PROPS)
+
+    if gen == 0.0 and cons == 0.0 then
+        local okHasFn, hasFn = pcall(function() return obj.GetDisplayMaxPower ~= nil end)
+        if okHasFn and hasFn then
+            local okMax, maxP = pcall(function() return obj:GetDisplayMaxPower() end)
+            local okCur, curP = pcall(function() return obj:GetDisplayPower() end)
+            local val = (okMax and type(maxP) == "number" and maxP ~= 0) and maxP
+                        or ((okCur and type(curP) == "number") and curP or 0)
+            if val > 0 then
+                gen = gen + val
+            elseif val < 0 then
+                cons = cons + math.abs(val)
             end
         end
     end
 
-    for _, prop in ipairs({ "PowerConsumption", "MaxPowerConsumption", "RequiredPower", "ConsumedPower" }) do
-        local ok, v = pcall(function() return obj[prop] end)
-        if ok and v ~= nil then
-            local num = (type(v) == "number") and v or Core.GetFPFloat(v)
-            if num > 0 then
-                cons = cons + num
-                break
+    return gen, cons
+end
+
+local function ComputePowerFromBlockClass(blockCls, solarEfficiency, cache)
+    blockCls = Core.UnwrapArrayElem(blockCls)
+    if not Core.IsValidObj(blockCls) then return 0.0, 0.0 end
+
+    local addr = blockCls:GetAddress()
+    local cached = cache and cache[addr]
+    if cached then
+        return cached.gen, cached.cons
+    end
+
+    local gen, cons = 0.0, 0.0
+    local blockCDO = GetCDOFromUClass(blockCls)
+    if Core.IsValidObj(blockCDO) then
+        local machineObj = nil
+        local okDef, defM = pcall(function()
+            if blockCDO.GetDefaultMachine then
+                return blockCDO:GetDefaultMachine()
             end
+            return nil
+        end)
+        if okDef and Core.IsValidObj(defM) then
+            local isClass = false
+            pcall(function()
+                local cCls = Core.FindOrLoadClass("/Script/CoreUObject.Class")
+                if Core.IsValidObj(cCls) and defM:IsA(cCls) then
+                    isClass = true
+                end
+            end)
+            machineObj = isClass and GetCDOFromUClass(defM) or defM
+        else
+            local okMC, mc = pcall(function() return blockCDO.MachineClass end)
+            if okMC and mc then
+                machineObj = GetCDOFromUClass(mc)
+            end
+        end
+
+        if Core.IsValidObj(machineObj) then
+            gen, cons = ComputePowerFromObject(machineObj, solarEfficiency)
+        end
+        if gen == 0.0 and cons == 0.0 then
+            gen, cons = ComputePowerFromObject(blockCDO, solarEfficiency)
         end
     end
 
+    if cache then
+        cache[addr] = { gen = gen, cons = cons }
+    end
     return gen, cons
 end
 
@@ -102,25 +205,18 @@ local function ResolveDesignerObject(designerHud)
     return designer
 end
 
-local function CollectObjectsFromArray(arr, seen, out)
-    if not arr or type(arr.GetArrayNum) ~= "function" then return end
-    StationData.ForEachArray(arr, function(_, elem)
-        local obj = Core.UnwrapArrayElem(elem)
-        if Core.IsValidObj(obj) then
-            local a = obj:GetAddress()
-            if not seen[a] then
-                seen[a] = true
-                out[#out + 1] = obj
+local function ScheduleAllDesignersRefresh()
+    ExecuteInGameThreadWithDelay(50, function()
+        for _, st in pairs(InjectedDesigners) do
+            if Core.IsValidObj(st.Hud) then
+                RefreshDesignerPowerStats(st.Hud)
             end
         end
     end)
 end
 
-local LoggedDesignerInfo = false
-local HookedBlueprintStats = false
-local RefreshDesignerPowerStats -- forward declaration
-
-local function EnsureBlueprintStatsHook(designer, hud)
+local function EnsureBlueprintStatsHook(designer)
+    Feature.RegisterHooks()
     if HookedBlueprintStats or not Core.IsValidObj(designer) then return end
     local dCls = designer:GetClass()
     if not Core.IsValidObj(dCls) then return end
@@ -128,13 +224,7 @@ local function EnsureBlueprintStatsHook(designer, hud)
     local clsPath = full and full:match("^%S+ (.+)$") or nil
     if not clsPath then return end
     if Core.TryRegisterHook("Designer_RefreshBlueprintStats", clsPath .. ":RefreshBlueprintStats", function()
-        ExecuteInGameThreadWithDelay(50, function()
-            for _, st in pairs(InjectedDesigners) do
-                if Core.IsValidObj(st.Hud) then
-                    RefreshDesignerPowerStats(st.Hud)
-                end
-            end
-        end)
+        ScheduleAllDesignersRefresh()
     end) then
         HookedBlueprintStats = true
     end
@@ -144,7 +234,7 @@ local function ComputeDesignerPower(designerHud)
     local designer = ResolveDesignerObject(designerHud)
     if not Core.IsValidObj(designer) then return 0.0, 0.0 end
 
-    EnsureBlueprintStatsHook(designer, designerHud)
+    EnsureBlueprintStatsHook(designer)
 
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
@@ -160,55 +250,103 @@ local function ComputeDesignerPower(designerHud)
     end
 
     local pgGen, pgCons = 0.0, 0.0
+    local solarEfficiency = 1.0
     if isStationFrame and frame.GetPowerGrid then
         local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
         if okPG and Core.IsValidObj(pg) then
-            pgGen = Core.GetFPFloat(pg.MaxProduction)
-            pgCons = Core.GetFPFloat(pg.MaxConsumption)
+            pgGen = ReadFPNum(pg.MaxProduction)
+            pgCons = ReadFPNum(pg.MaxConsumption)
+            local okProds, prods = pcall(function() return pg.Producers end)
+            if okProds and prods then
+                local foundSolarEff = false
+                StationData.ForEachArray(prods, function(_, elem)
+                    if foundSolarEff then return end
+                    local prod = Core.UnwrapArrayElem(elem)
+                    if not Core.IsValidObj(prod) then return end
+                    local okDE, deVal = pcall(function() return prod.DistanceEfficiency end)
+                    if okDE and deVal ~= nil then
+                        local de = ReadFPNum(deVal)
+                        if de > 0 then
+                            solarEfficiency = de
+                            foundSolarEff = true
+                            return
+                        end
+                    end
+                    if IsSolarPanelObject(prod) and prod.GetDisplayMaxPower then
+                        local okMaxP, maxP = pcall(function() return prod:GetDisplayMaxPower() end)
+                        local okRate, rateVal = pcall(function() return prod.PowerGenRate end)
+                        if okMaxP and type(maxP) == "number" and maxP > 0 and okRate and rateVal ~= nil then
+                            local rate = ReadFPNum(rateVal)
+                            if rate > 0 then
+                                solarEfficiency = maxP / rate
+                                foundSolarEff = true
+                            end
+                        end
+                    end
+                end)
+            end
         end
     end
 
-    local costGen, costCons = 0.0, 0.0
-    local okCost, costArr = pcall(function() return designer.FrameBlueprintCost end)
-    if okCost and costArr then
-        local costCount = 0
-        StationData.ForEachArray(costArr, function(_, elem)
-            costCount = costCount + 1
-            local itemObj = nil
-            local amt = 1
-            pcall(function() itemObj = elem.Item end)
+    local loadedGen, loadedCons = 0.0, 0.0
+    local addedGen, addedCons = 0.0, 0.0
+    local removedLoadedGen, removedLoadedCons = 0.0, 0.0
+    local classPowerCache = {}
+
+    local okPreview, previewBlocks = pcall(function()
+        if Core.IsValidObj(designer.Visualizer) then
+            return designer.Visualizer.PreviewBlocks
+        end
+        return nil
+    end)
+    if okPreview and previewBlocks then
+        StationData.ForEachArray(previewBlocks, function(_, elem)
+            local entry = elem
+            if type(elem.get) == "function" then
+                local okG, g = pcall(function() return elem:get() end)
+                if okG and g ~= nil then entry = g end
+            end
+
+            local bLoaded, bRemoved = false, false
+            pcall(function() bLoaded = (entry.bLoaded == true) end)
+            pcall(function() bRemoved = (entry.bRemoved == true) end)
+
+            local blockCls = nil
             pcall(function()
-                if type(elem.Amount) == "number" then amt = elem.Amount end
-            end)
-            if Core.IsValidObj(itemObj) and amt > 0 then
-                if not LoggedDesignerInfo then
-                    LoggedDesignerInfo = true
-                    pcall(function()
-                        local iCls = itemObj:GetClass()
-                        Core.Log("DesignerPowerStats: CostItem=" .. itemObj:GetFName():ToString() .. " class=" .. iCls:GetFName():ToString())
-                        if iCls.ForEachProperty then
-                            iCls:ForEachProperty(function(prop)
-                                local n = prop:GetFName():ToString()
-                                if string.find(n, "Block", 1, true) or string.find(n, "Power", 1, true)
-                                    or string.find(n, "Actor", 1, true) or string.find(n, "Class", 1, true)
-                                    or string.find(n, "Machine", 1, true) or string.find(n, "Building", 1, true) then
-                                    Core.Log("DesignerPowerStats [Item prop]: " .. n .. " (" .. prop:GetClass():GetFName():ToString() .. ")")
-                                end
-                            end)
-                        end
-                    end)
+                local actor = Core.UnwrapArrayElem(entry.Actor)
+                if Core.IsValidObj(actor) then
+                    blockCls = actor.BlockClass
                 end
-                local g, c = ComputePowerFromObject(itemObj)
-                costGen = costGen + g * amt
-                costCons = costCons + c * amt
+            end)
+            if not Core.IsValidObj(Core.UnwrapArrayElem(blockCls)) then
+                pcall(function() blockCls = entry.Entry.Class end)
+            end
+
+            local g, c = ComputePowerFromBlockClass(blockCls, solarEfficiency, classPowerCache)
+            if bLoaded then
+                if bRemoved then
+                    removedLoadedGen = removedLoadedGen + g
+                    removedLoadedCons = removedLoadedCons + c
+                else
+                    loadedGen = loadedGen + g
+                    loadedCons = loadedCons + c
+                end
+            elseif not bRemoved then
+                addedGen = addedGen + g
+                addedCons = addedCons + c
             end
         end)
-        if not LoggedDesignerInfo then
-            Core.Log("DesignerPowerStats: FrameBlueprintCost count=" .. tostring(costCount))
-        end
     end
 
-    return math.max(pgGen, costGen), math.max(pgCons, costCons)
+    if isStationFrame then
+        if addedGen > 0 or addedCons > 0 or removedLoadedGen > 0 or removedLoadedCons > 0 then
+            return math.max(0.0, pgGen + addedGen - removedLoadedGen),
+                   math.max(0.0, pgCons + addedCons - removedLoadedCons)
+        end
+        return math.max(pgGen, loadedGen), math.max(pgCons, loadedCons)
+    end
+
+    return loadedGen + addedGen, loadedCons + addedCons
 end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
@@ -353,17 +491,10 @@ local function FindStatsContainerPanel(hud)
     return nil, nil, nil, nil
 end
 
-local LoggedHudInit = {}
-
 RefreshDesignerPowerStats = function(hud)
     if not Core.IsValidObj(hud) then return end
     local addr = hud:GetAddress()
     local st = InjectedDesigners[addr]
-
-    if not LoggedHudInit[addr] then
-        LoggedHudInit[addr] = true
-        Core.Log("DesignerPowerStats: RefreshDesignerPowerStats start")
-    end
 
     if not st or not Core.IsValidObj(st.PowerText) then
         local statsPanel, refCol, hullText, hullColVBox = FindStatsContainerPanel(hud)
@@ -426,7 +557,6 @@ RefreshDesignerPowerStats = function(hud)
 
         st = { Hud = hud, PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
         InjectedDesigners[addr] = st
-        Core.Log("DesignerPowerStats: column injected, computing power")
     end
 
     local gen, cons = ComputeDesignerPower(hud)
@@ -449,6 +579,7 @@ end
 
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
+        Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(150, function()
             if Core.IsValidObj(hud) then
                 RefreshDesignerPowerStats(hud)
@@ -461,7 +592,7 @@ function Feature.RegisterHooks()
     for _, fnName in ipairs({ "Refresh", "RefreshStats" }) do
         Core.TryRegisterHook(
             "DesignerHUD_" .. fnName,
-            "/Game/Blueprints/Widgets/HUDs/WBP_DesignerHUD.WBP_DesignerHUD_C:" .. fnName,
+            PATHS.DesignerHUDClass .. ":" .. fnName,
             function(Context)
                 local hud = Context:get()
                 if Core.IsValidObj(hud) then
@@ -471,6 +602,16 @@ function Feature.RegisterHooks()
                         end
                     end)
                 end
+            end
+        )
+    end
+
+    for _, fnName in ipairs({ "Confirm", "RemoveBlock" }) do
+        Core.TryRegisterHook(
+            "BPCDesigner_" .. fnName,
+            PATHS.BPCDesignerClass .. ":" .. fnName,
+            function()
+                ScheduleAllDesignersRefresh()
             end
         )
     end
