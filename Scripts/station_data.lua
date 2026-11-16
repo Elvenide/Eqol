@@ -194,9 +194,10 @@ function StationData.ResolveStationFromFrame(frame, pc)
     return nil
 end
 
-function StationData.GetStationPlatforms(station)
+function StationData.GetStationPlatforms(station, fallbackFrame)
     local result = {}
-    if not Core.IsValidObj(station) then return result end
+    local refObj = Core.IsValidObj(station) and station or fallbackFrame
+    if not Core.IsValidObj(refObj) then return result end
 
     local seen = {}
     local function addPlat(p)
@@ -209,31 +210,52 @@ function StationData.GetStationPlatforms(station)
         end
     end
 
-    for _, propName in ipairs({ "Platforms", "Modules", "StationPlatforms", "ConnectedFrames", "Children" }) do
-        local ok, arr = pcall(function() return station[propName] end)
-        if ok and arr then
-            StationData.ForEachArray(arr, function(_, elem)
-                addPlat(Core.UnwrapArrayElem(elem))
-            end)
-            if #result > 0 then
-                return result
+    if Core.IsValidObj(station) then
+        for _, propName in ipairs({ "Platforms", "Modules", "StationPlatforms", "ConnectedFrames", "Children" }) do
+            local ok, arr = pcall(function() return station[propName] end)
+            if ok and arr then
+                StationData.ForEachArray(arr, function(_, elem)
+                    addPlat(Core.UnwrapArrayElem(elem))
+                end)
+                if #result > 0 then
+                    return result
+                end
             end
         end
     end
 
-    -- Fallback: scan live StationPlatformObject instances belonging to this station
+    -- Resolve target PowerGrid address for reliable station matching
+    local targetGridAddr = nil
+    if Core.IsValidObj(fallbackFrame) and fallbackFrame.GetStationPowerGrid then
+        local okG, g = pcall(function() return fallbackFrame:GetStationPowerGrid() end)
+        if okG and Core.IsValidObj(g) then targetGridAddr = g:GetAddress() end
+    end
+    if not targetGridAddr and Core.IsValidObj(station) and station.GetPowerGrid then
+        local okG, g = pcall(function() return station:GetPowerGrid() end)
+        if okG and Core.IsValidObj(g) then targetGridAddr = g:GetAddress() end
+    end
+
+    -- Fallback: scan live StationPlatformObject instances belonging to this station / power grid
     local okAll, allPlats = pcall(FindAllOf, "StationPlatformObject")
     if okAll and allPlats then
-        local stAddr = station:GetAddress()
-        local stId = StationData.GetObjectKey(station)
+        local stAddr = Core.IsValidObj(station) and station:GetAddress() or nil
+        local stId = Core.IsValidObj(station) and StationData.GetObjectKey(station) or nil
         for _, p in ipairs(allPlats) do
             if Core.IsValidObj(p) then
                 local belongs = false
-                for _, propName in ipairs({ "Station", "ParentStation", "OwnerStation" }) do
-                    local okS, sVal = pcall(function() return p[propName] end)
-                    if okS and Core.IsValidObj(sVal) and sVal:GetAddress() == stAddr then
+                if targetGridAddr and p.GetStationPowerGrid then
+                    local okPG, pg = pcall(function() return p:GetStationPowerGrid() end)
+                    if okPG and Core.IsValidObj(pg) and pg:GetAddress() == targetGridAddr then
                         belongs = true
-                        break
+                    end
+                end
+                if not belongs and stAddr then
+                    for _, propName in ipairs({ "Station", "ParentStation", "OwnerStation" }) do
+                        local okS, sVal = pcall(function() return p[propName] end)
+                        if okS and Core.IsValidObj(sVal) and sVal:GetAddress() == stAddr then
+                            belongs = true
+                            break
+                        end
                     end
                 end
                 if not belongs and stId then
@@ -282,17 +304,39 @@ function StationData.GetPlatformWorldBounds(platform)
     local actor = StationData.GetObjectActor(platform)
     if Core.IsValidObj(actor) then
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
+        local okRot, rot = pcall(function() return actor:K2_GetActorRotation() end)
         if okLoc and loc and type(loc.X) == "number" then
-            return { cx = loc.X, cy = loc.Y or 0, cz = loc.Z or 0, ex = 600, ey = 600, ez = 300, hasActor = true }
+            local cx, cy, cz = loc.X, loc.Y or 0, loc.Z or 0
+            local yaw = (okRot and rot and type(rot.Yaw) == "number") and rot.Yaw or 0
+            local ex, ey = 600.0, 600.0
+
+            -- Measure true module half-extents from ConnectorComponents if present
+            local conns = StationData.GetPlatformConnectors(platform)
+            if #conns > 0 then
+                local rad = math.rad(-yaw)
+                local cosA, sinA = math.cos(rad), math.sin(rad)
+                local maxLx, maxLy = 0.0, 0.0
+                for _, c in ipairs(conns) do
+                    local dx, dy = c.x - cx, c.y - cy
+                    local lx = math.abs(dx * cosA - dy * sinA)
+                    local ly = math.abs(dx * sinA + dy * cosA)
+                    if lx > maxLx then maxLx = lx end
+                    if ly > maxLy then maxLy = ly end
+                end
+                if maxLx > 200.0 then ex = maxLx end
+                if maxLy > 200.0 then ey = maxLy end
+            end
+
+            return { cx = cx, cy = cy, cz = cz, ex = ex, ey = ey, ez = 300, yaw = yaw, hasActor = true }
         end
     end
 
     local okL, loc = pcall(function() return platform.Location end)
     if okL and loc then
         local x, y, z = Core.GetFPVector(loc)
-        return { cx = x, cy = y, cz = z, ex = 600, ey = 600, ez = 300, hasActor = false }
+        return { cx = x, cy = y, cz = z, ex = 600, ey = 600, ez = 300, yaw = 0, hasActor = false }
     end
-    return { cx = 0, cy = 0, cz = 0, ex = 600, ey = 600, ez = 300, hasActor = false }
+    return { cx = 0, cy = 0, cz = 0, ex = 600, ey = 600, ez = 300, yaw = 0, hasActor = false }
 end
 
 function StationData.GetPlatformConnectors(platform)
@@ -346,7 +390,7 @@ end
 --         currentFloorIndex (matching walkFrame or playerZ),
 --         unitSize (estimated 1x1 module width in Unreal cm).
 function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
-    local plats = StationData.GetStationPlatforms(station)
+    local plats = StationData.GetStationPlatforms(station, walkFrame)
     if #plats == 0 and Core.IsValidObj(walkFrame) then
         plats = { walkFrame }
     end
@@ -442,7 +486,7 @@ function StationData.GetFrameMachines(frame)
                 table.insert(out, m)
             end
         end)
-        return out
+        if #out > 0 then return out end
     end
 
     local okProp, propArr = pcall(function() return frame.Machines end)
@@ -453,8 +497,33 @@ function StationData.GetFrameMachines(frame)
                 table.insert(out, m)
             end
         end)
+        if #out > 0 then return out end
+    end
+
+    local frameAddr = frame:GetAddress()
+    local okAll, allMachines = pcall(FindAllOf, "MachineObject")
+    if okAll and allMachines then
+        for _, m in ipairs(allMachines) do
+            if Core.IsValidObj(m) and m.GetFrame then
+                local okF, mf = pcall(function() return m:GetFrame() end)
+                if okF and Core.IsValidObj(mf) and mf:GetAddress() == frameAddr then
+                    table.insert(out, m)
+                end
+            end
+        end
     end
     return out
+end
+
+function StationData.GetItemIconTexture(item)
+    if not Core.IsValidObj(item) then return nil end
+    for _, prop in ipairs({ "Icon", "Texture", "IconTexture" }) do
+        local ok, tex = pcall(function() return item[prop] end)
+        if ok and Core.IsValidObj(tex) then
+            return tex
+        end
+    end
+    return nil
 end
 
 function StationData.GetMachineCategory(machine)

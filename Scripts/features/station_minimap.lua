@@ -254,16 +254,15 @@ local function GetOrCreateIconWidget(st, index)
     end
 
     local btn = Core.CreateUserWidget(PATHS.WBPButtonClass, st.Hud, st.PC)
-    local itemWidget = Core.CreateUserWidget(PATHS.WBPItemClass, st.Hud, st.PC)
-    if not Core.IsValidObj(btn) or not Core.IsValidObj(itemWidget) then
+    local img = Core.CreateRawWidget(PATHS.ImageClass, st.Outer)
+    if not Core.IsValidObj(btn) or not Core.IsValidObj(img) then
         return nil
     end
 
     pcall(function()
-        itemWidget:SetIconSize(16.0)
         btn:SetBackgroundColour(COLORS.Transparent)
         btn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-        btn:SetContentForSlot(FName("Content"), itemWidget)
+        btn:SetContentForSlot(FName("Content"), img)
     end)
 
     local slot = st.Canvas:AddChildToCanvas(btn)
@@ -273,7 +272,7 @@ local function GetOrCreateIconWidget(st, index)
 
     entry = {
         Widget = btn,
-        ItemWidget = itemWidget,
+        ImageWidget = img,
         Slot = slot,
         Machine = nil,
     }
@@ -286,6 +285,12 @@ local function GetOrCreateIconWidget(st, index)
 
     st.IconPool[index] = entry
     return entry
+end
+
+local function WorldDeltaToMinimap(dx, dy, cosH, sinH, scale, halfMap)
+    local fwd = dx * cosH + dy * sinH
+    local right = -dx * sinH + dy * cosH
+    return halfMap + right * scale, halfMap - fwd * scale
 end
 
 --------------------------------------------------------------------------------
@@ -313,20 +318,33 @@ local function UpdateMinimapState(st)
 
     pcall(function() st.Root:SetVisibility(0) end) -- Visible
 
-    -- Player world coordinates
-    local px, py, pz = 0, 0, 0
+    -- Player world coordinates & facing yaw (so top of minimap = player walking direction)
+    local px, py, pz, playerYaw = 0, 0, 0, 0
     local pawn = pc.Pawn
     if Core.IsValidObj(pawn) then
         local okLoc, loc = pcall(function() return pawn:K2_GetActorLocation() end)
         if okLoc and loc then
-            px = loc.X or 0
-            py = loc.Y or 0
-            pz = loc.Z or 0
+            px = tonumber(loc.X) or 0
+            py = tonumber(loc.Y) or 0
+            pz = tonumber(loc.Z) or 0
+        end
+        local okRot, rot = pcall(function() return pc:GetControlRotation() end)
+        if okRot and rot and type(rot.Yaw) == "number" then
+            playerYaw = rot.Yaw
+        else
+            local okPR, pRot = pcall(function() return pawn:K2_GetActorRotation() end)
+            if okPR and pRot and type(pRot.Yaw) == "number" then
+                playerYaw = pRot.Yaw
+            end
         end
     else
         local b = StationData.GetPlatformWorldBounds(walkFrame)
         px, py, pz = b.cx, b.cy, b.cz
     end
+
+    local hRad = math.rad(playerYaw)
+    local cosH = math.cos(hRad)
+    local sinH = math.sin(hRad)
 
     local floors, curFloorIdx, unitSize = StationData.BuildStationFloorMap(station, walkFrame, pz)
     local curFloor = floors[curFloorIdx]
@@ -358,12 +376,14 @@ local function UpdateMinimapState(st)
             platCount = platCount + 1
             local pEntry = GetOrCreatePlatformWidget(st, platCount)
             if pEntry then
-                local sx = halfMap + dx * scale
-                local sy = halfMap + dy * scale
+                local sx, sy = WorldDeltaToMinimap(dx, dy, cosH, sinH, scale, halfMap)
                 local pw = math.max(12.0, b.ex * 2.0 * scale - 2.0)
                 local ph = math.max(12.0, b.ey * 2.0 * scale - 2.0)
                 SetCanvasSlot(pEntry.Slot, sx, sy, pw, ph, 0.5, 0.5)
-                pcall(function() pEntry.Widget:SetVisibility(0) end)
+                pcall(function()
+                    pEntry.Widget:SetRenderTransformAngle((b.yaw or 0) - playerYaw)
+                    pEntry.Widget:SetVisibility(0)
+                end)
             end
 
             -- Entry points / connectors on this module
@@ -372,11 +392,11 @@ local function UpdateMinimapState(st)
                 connCount = connCount + 1
                 local cEntry = GetOrCreateConnectorWidget(st, connCount)
                 if cEntry then
-                    local csx = halfMap + (c.x - px) * scale
-                    local csy = halfMap + (c.y - py) * scale
+                    local csx, csy = WorldDeltaToMinimap(c.x - px, c.y - py, cosH, sinH, scale, halfMap)
                     local cCol = c.occupied and { R = 0.25, G = 0.78, B = 0.92, A = 0.95 } or { R = 0.90, G = 0.72, B = 0.18, A = 0.90 }
                     pcall(function()
                         cEntry.Widget:SetBrushColor(cCol)
+                        cEntry.Widget:SetRenderTransformAngle((b.yaw or 0) - playerYaw)
                         cEntry.Widget:SetVisibility(0)
                     end)
                     SetCanvasSlot(cEntry.Slot, csx, csy, 8.0, 8.0, 0.5, 0.5)
@@ -386,13 +406,12 @@ local function UpdateMinimapState(st)
             -- Machines on this platform
             local machines = StationData.GetFrameMachines(pe.platform)
             for _, m in ipairs(machines) do
-                local mx, my = StationData.GetMachineWorldPosAndYaw(m, b)
+                local mx, my, _, myaw = StationData.GetMachineWorldPosAndYaw(m, b)
                 local mdx = mx - px
                 local mdy = my - py
                 if math.abs(mdx) <= maxCullDist and math.abs(mdy) <= maxCullDist then
                     local cat = StationData.GetMachineCategory(m)
-                    local msx = halfMap + mdx * scale
-                    local msy = halfMap + mdy * scale
+                    local msx, msy = WorldDeltaToMinimap(mdx, mdy, cosH, sinH, scale, halfMap)
 
                     machCount = machCount + 1
                     local mEntry = GetOrCreateMachineWidget(st, machCount)
@@ -411,6 +430,7 @@ local function UpdateMinimapState(st)
                         end
                         pcall(function()
                             mEntry.Widget:SetBrushColor(col)
+                            mEntry.Widget:SetRenderTransformAngle((myaw or 0) - playerYaw)
                             mEntry.Widget:SetVisibility(0)
                         end)
                         SetCanvasSlot(mEntry.Slot, msx, msy, mw, mh, 0.5, 0.5)
@@ -420,15 +440,18 @@ local function UpdateMinimapState(st)
                     if (cat == "Assembler" or cat == "Container") and not StationData.IsMachineIconHidden(m) then
                         local item = StationData.GetPrimaryItemForMachine(m)
                         if Core.IsValidObj(item) then
-                            iconCount = iconCount + 1
-                            local iEntry = GetOrCreateIconWidget(st, iconCount)
-                            if iEntry then
-                                iEntry.Machine = m
-                                pcall(function()
-                                    iEntry.ItemWidget:SetItem(item)
-                                    iEntry.Widget:SetVisibility(0)
-                                end)
-                                SetCanvasSlot(iEntry.Slot, msx, msy, 20.0, 20.0, 0.5, 0.5)
+                            local tex = StationData.GetItemIconTexture(item)
+                            if Core.IsValidObj(tex) then
+                                iconCount = iconCount + 1
+                                local iEntry = GetOrCreateIconWidget(st, iconCount)
+                                if iEntry then
+                                    iEntry.Machine = m
+                                    pcall(function()
+                                        iEntry.ImageWidget:SetBrushFromTexture(tex, false)
+                                        iEntry.Widget:SetVisibility(0)
+                                    end)
+                                    SetCanvasSlot(iEntry.Slot, msx, msy, 18.0, 18.0, 0.5, 0.5)
+                                end
                             end
                         end
                     end
@@ -467,8 +490,7 @@ local function UpdateMinimapState(st)
                     end
                 end
                 if entry and Core.IsValidObj(entry.Dot) then
-                    local sx = halfMap + pdx * scale
-                    local sy = halfMap + pdy * scale
+                    local sx, sy = WorldDeltaToMinimap(pdx, pdy, cosH, sinH, scale, halfMap)
                     local col = p.IsLocal and COLORS.PlayerDot or (p.IsOnline and { R = 0.25, G = 0.85, B = 0.35, A = 1.0 } or { R = 0.60, G = 0.25, B = 0.25, A = 0.90 })
                     pcall(function()
                         entry.Dot:SetBrushColor(col)
@@ -492,21 +514,25 @@ local function UpdateMinimapState(st)
 end
 
 local function RefreshAllMinimapHuds()
+    local anyValid = false
     for addr, st in pairs(HudStates) do
         if Core.IsValidObj(st.Hud) and Core.IsValidObj(st.Root) then
+            anyValid = true
             UpdateMinimapState(st)
         else
             HudStates[addr] = nil
         end
     end
 
-    local ok, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-    if ok and huds then
-        for _, hud in ipairs(huds) do
-            if Core.IsValidObj(hud) then
-                local st = EnsureMinimapOnHud(hud)
-                if st then
-                    UpdateMinimapState(st)
+    if not anyValid then
+        local ok, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
+        if ok and huds then
+            for _, hud in ipairs(huds) do
+                if Core.IsValidObj(hud) then
+                    local st = EnsureMinimapOnHud(hud)
+                    if st then
+                        UpdateMinimapState(st)
+                    end
                 end
             end
         end
