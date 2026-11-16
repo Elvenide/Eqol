@@ -115,35 +115,45 @@ local function CollectObjectsFromArray(arr, seen, out)
     end)
 end
 
+local LoggedDesignerInfo = false
+
 local function ComputeDesignerPower(designerHud)
     local designer = ResolveDesignerObject(designerHud)
     if not Core.IsValidObj(designer) then return 0.0, 0.0 end
+
+    if not LoggedDesignerInfo then
+        LoggedDesignerInfo = true
+        pcall(function() Core.Log("DesignerPowerStats: designer=" .. designer:GetClass():GetFName():ToString()) end)
+    end
 
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
     if not Core.IsValidObj(frame) then return 0.0, 0.0 end
 
-    -- Normal baseline from constructed PowerGrid
-    local pgGen, pgCons = 0.0, 0.0
-    if frame.GetPowerGrid then
-        local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
-        if okPG and Core.IsValidObj(pg) then
-            pgGen = Core.GetFPFloat(pg.MaxProduction)
-            pgCons = Core.GetFPFloat(pg.MaxConsumption)
-        end
-    end
-
-    -- Augment with scanned machines ONLY on Station frames (calling FindMachines/Machines on Ship Designer frames crashes C++)
     local isStationFrame = false
     pcall(function()
         local clsName = frame:GetClass():GetFName():ToString()
+        if LoggedDesignerInfo then
+            Core.Log("DesignerPowerStats: frame=" .. tostring(clsName))
+            LoggedDesignerInfo = "done"
+        end
         if clsName and string.find(clsName, "Station", 1, true) then
             isStationFrame = true
         end
     end)
 
+    local pgGen, pgCons = 0.0, 0.0
     local objGen, objCons = 0.0, 0.0
+
     if isStationFrame then
+        if frame.GetPowerGrid then
+            local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
+            if okPG and Core.IsValidObj(pg) then
+                pgGen = Core.GetFPFloat(pg.MaxProduction)
+                pgCons = Core.GetFPFloat(pg.MaxConsumption)
+            end
+        end
+
         local seen = {}
         local objects = {}
         if frame.FindMachines then
