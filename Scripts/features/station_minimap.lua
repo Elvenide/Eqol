@@ -26,7 +26,7 @@ local PATHS = {
 local MINIMAP_SIZE = 240.0
 local MODULES_SPAN = 5.0
 local PX_PER_MODULE = MINIMAP_SIZE / MODULES_SPAN -- 48 px per 1x1 module
-local POLL_INTERVAL_MS = 150
+local POLL_INTERVAL_MS = 200
 
 -- Game-matched HUD colors
 local COLORS = {
@@ -254,15 +254,16 @@ local function GetOrCreateIconWidget(st, index)
     end
 
     local btn = Core.CreateUserWidget(PATHS.WBPButtonClass, st.Hud, st.PC)
-    local img = Core.CreateRawWidget(PATHS.ImageClass, st.Outer)
-    if not Core.IsValidObj(btn) or not Core.IsValidObj(img) then
+    local itemWidget = Core.CreateUserWidget(PATHS.WBPItemClass, st.Hud, st.PC)
+    if not Core.IsValidObj(btn) or not Core.IsValidObj(itemWidget) then
         return nil
     end
 
     pcall(function()
+        itemWidget:SetIconSize(18.0)
         btn:SetBackgroundColour(COLORS.Transparent)
         btn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-        btn:SetContentForSlot(FName("Content"), img)
+        btn:SetContentForSlot(FName("Content"), itemWidget)
     end)
 
     local slot = st.Canvas:AddChildToCanvas(btn)
@@ -272,7 +273,7 @@ local function GetOrCreateIconWidget(st, index)
 
     entry = {
         Widget = btn,
-        ImageWidget = img,
+        ItemWidget = itemWidget,
         Slot = slot,
         Machine = nil,
     }
@@ -318,7 +319,7 @@ local function UpdateMinimapState(st)
 
     pcall(function() st.Root:SetVisibility(0) end) -- Visible
 
-    -- Player world coordinates & facing yaw (so top of minimap = player walking direction)
+    -- Player world coordinates & facing yaw (so top of minimap = player walking/looking direction)
     local px, py, pz, playerYaw = 0, 0, 0, 0
     local pawn = pc.Pawn
     if Core.IsValidObj(pawn) then
@@ -328,13 +329,20 @@ local function UpdateMinimapState(st)
             py = tonumber(loc.Y) or 0
             pz = tonumber(loc.Z) or 0
         end
-        local okRot, rot = pcall(function() return pc:GetControlRotation() end)
-        if okRot and rot and type(rot.Yaw) == "number" then
-            playerYaw = rot.Yaw
-        else
-            local okPR, pRot = pcall(function() return pawn:K2_GetActorRotation() end)
-            if okPR and pRot and type(pRot.Yaw) == "number" then
-                playerYaw = pRot.Yaw
+
+        local gotYaw = false
+        local camMgr = pc.PlayerCameraManager
+        if Core.IsValidObj(camMgr) then
+            local okFwd, fwd = pcall(function() return camMgr:GetActorForwardVector() end)
+            if okFwd and fwd and type(fwd.X) == "number" and type(fwd.Y) == "number" then
+                playerYaw = math.deg(math.atan(fwd.Y, fwd.X))
+                gotYaw = true
+            end
+        end
+        if not gotYaw then
+            local okFwd, fwd = pcall(function() return pawn:GetActorForwardVector() end)
+            if okFwd and fwd and type(fwd.X) == "number" and type(fwd.Y) == "number" then
+                playerYaw = math.deg(math.atan(fwd.Y, fwd.X))
             end
         end
     else
@@ -440,18 +448,15 @@ local function UpdateMinimapState(st)
                     if (cat == "Assembler" or cat == "Container") and not StationData.IsMachineIconHidden(m) then
                         local item = StationData.GetPrimaryItemForMachine(m)
                         if Core.IsValidObj(item) then
-                            local tex = StationData.GetItemIconTexture(item)
-                            if Core.IsValidObj(tex) then
-                                iconCount = iconCount + 1
-                                local iEntry = GetOrCreateIconWidget(st, iconCount)
-                                if iEntry then
-                                    iEntry.Machine = m
-                                    pcall(function()
-                                        iEntry.ImageWidget:SetBrushFromTexture(tex, false)
-                                        iEntry.Widget:SetVisibility(0)
-                                    end)
-                                    SetCanvasSlot(iEntry.Slot, msx, msy, 18.0, 18.0, 0.5, 0.5)
-                                end
+                            iconCount = iconCount + 1
+                            local iEntry = GetOrCreateIconWidget(st, iconCount)
+                            if iEntry then
+                                iEntry.Machine = m
+                                pcall(function()
+                                    iEntry.ItemWidget:SetItem(item)
+                                    iEntry.Widget:SetVisibility(0)
+                                end)
+                                SetCanvasSlot(iEntry.Slot, msx, msy, 20.0, 20.0, 0.5, 0.5)
                             end
                         end
                     end

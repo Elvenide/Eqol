@@ -155,6 +155,8 @@ local function ExtractItemFromElevator(elev)
     return nil, nil
 end
 
+local CachedElevators = { time = -999, list = {} }
+
 local function UpdateElevatorLabels()
     local layoutLib = Core.GetCDO(Core.PATHS.WidgetLayoutLibCDO)
     if not Core.IsValidObj(layoutLib) then return end
@@ -171,8 +173,14 @@ local function UpdateElevatorLabels()
         end
     end
 
-    local okElevs, elevators = pcall(FindAllOf, "ItemElevatorObject")
-    if not okElevs or not elevators then return end
+    local now = os.clock()
+    if (now - CachedElevators.time) >= 3.0 then
+        local okElevs, list = pcall(FindAllOf, "ItemElevatorObject")
+        CachedElevators.time = now
+        CachedElevators.list = (okElevs and list) and list or {}
+    end
+    local elevators = CachedElevators.list
+    if #elevators == 0 then return end
 
     local visiblePorts = {}
     for _, elev in ipairs(elevators) do

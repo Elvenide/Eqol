@@ -194,10 +194,24 @@ function StationData.ResolveStationFromFrame(frame, pc)
     return nil
 end
 
+local CachedPlatforms = { key = nil, time = -999, list = {} }
+local CachedMachinesByFrame = {} -- frameAddr -> { time = ..., list = {} }
+local CachedPlayersSnapshot = { time = -999, list = {} }
+
 function StationData.GetStationPlatforms(station, fallbackFrame)
     local result = {}
     local refObj = Core.IsValidObj(station) and station or fallbackFrame
     if not Core.IsValidObj(refObj) then return result end
+
+    local now = os.clock()
+    local cacheKey = tostring(refObj:GetAddress())
+    if CachedPlatforms.key == cacheKey and (now - CachedPlatforms.time) < 3.0 and #CachedPlatforms.list > 0 then
+        local validList = {}
+        for _, p in ipairs(CachedPlatforms.list) do
+            if Core.IsValidObj(p) then table.insert(validList, p) end
+        end
+        if #validList > 0 then return validList end
+    end
 
     local seen = {}
     local function addPlat(p)
@@ -271,6 +285,7 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
         end
     end
 
+    CachedPlatforms = { key = cacheKey, time = now, list = result }
     return result
 end
 
@@ -304,10 +319,18 @@ function StationData.GetPlatformWorldBounds(platform)
     local actor = StationData.GetObjectActor(platform)
     if Core.IsValidObj(actor) then
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
-        local okRot, rot = pcall(function() return actor:K2_GetActorRotation() end)
         if okLoc and loc and type(loc.X) == "number" then
             local cx, cy, cz = loc.X, loc.Y or 0, loc.Z or 0
-            local yaw = (okRot and rot and type(rot.Yaw) == "number") and rot.Yaw or 0
+            local yaw = 0
+            local okFwd, fwd = pcall(function() return actor:GetActorForwardVector() end)
+            if okFwd and fwd and type(fwd.X) == "number" and type(fwd.Y) == "number" then
+                yaw = math.deg(math.atan(fwd.Y, fwd.X))
+            else
+                local okRot, rot = pcall(function() return actor:K2_GetActorRotation() end)
+                if okRot and rot and type(rot.Yaw) == "number" then
+                    yaw = rot.Yaw
+                end
+            end
             local ex, ey = 600.0, 600.0
 
             -- Measure true module half-extents from ConnectorComponents if present
@@ -478,6 +501,17 @@ function StationData.GetFrameMachines(frame)
     local out = {}
     if not Core.IsValidObj(frame) then return out end
 
+    local frameAddr = frame:GetAddress()
+    local now = os.clock()
+    local cached = CachedMachinesByFrame[frameAddr]
+    if cached and (now - cached.time) < 2.0 then
+        local validList = {}
+        for _, m in ipairs(cached.list) do
+            if Core.IsValidObj(m) then table.insert(validList, m) end
+        end
+        return validList
+    end
+
     local okFind, arr = pcall(function() return frame:FindMachines() end)
     if okFind and arr then
         StationData.ForEachArray(arr, function(_, elem)
@@ -500,7 +534,6 @@ function StationData.GetFrameMachines(frame)
         if #out > 0 then return out end
     end
 
-    local frameAddr = frame:GetAddress()
     local okAll, allMachines = pcall(FindAllOf, "MachineObject")
     if okAll and allMachines then
         for _, m in ipairs(allMachines) do
@@ -512,6 +545,7 @@ function StationData.GetFrameMachines(frame)
             end
         end
     end
+    CachedMachinesByFrame[frameAddr] = { time = now, list = out }
     return out
 end
 
@@ -665,6 +699,21 @@ local function ToLuaString(v)
 end
 
 function StationData.GetAllPlayersInfo(localPC)
+    local now = os.clock()
+    if (now - CachedPlayersSnapshot.time) < 2.0 and #CachedPlayersSnapshot.list > 0 then
+        -- Refresh live positions on cached actors without calling FindAllOf
+        for _, p in ipairs(CachedPlayersSnapshot.list) do
+            if Core.IsValidObj(p.Actor) then
+                local okLoc, loc = pcall(function() return p.Actor:K2_GetActorLocation() end)
+                if okLoc and loc and type(loc.X) == "number" then
+                    p.X, p.Y, p.Z = loc.X, loc.Y or 0, loc.Z or 0
+                    p.HasPos = true
+                end
+            end
+        end
+        return CachedPlayersSnapshot.list
+    end
+
     local players = {}
     local pc = localPC or Core.GetLocalPlayerController()
     local localPlayerObj = Core.IsValidObj(pc) and pc.PlayerObject or nil
@@ -814,6 +863,7 @@ function StationData.GetAllPlayersInfo(localPC)
         end
     end
 
+    CachedPlayersSnapshot = { time = now, list = players }
     return players
 end
 
