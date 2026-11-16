@@ -132,8 +132,6 @@ function Feature.RegisterHooks()
 end
 
 function Feature.OnClientRestart()
-    InitializedSnapshot = false
-    KnownOnlinePlayers = {}
     ExecuteInGameThreadWithDelay(1200, PollPlayerPresence)
 end
 

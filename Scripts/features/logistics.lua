@@ -298,6 +298,9 @@ end
 
 local function SetLogisticsCursorMode(pc, win, active)
     if not Core.IsValidObj(pc) then return end
+    pcall(function()
+        pc.bShowMouseCursor = active
+    end)
     local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
     if Core.IsValidObj(widgetSub) then
         pcall(function() widgetSub:SetCursorVisible(active) end)
