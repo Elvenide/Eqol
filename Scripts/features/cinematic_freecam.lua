@@ -15,7 +15,7 @@ local function EnsureSpecHook(pc)
     local cls = pc:GetClass()
     if not Core.IsValidObj(cls) then return end
     local full = cls:GetFullName()
-    local clsPath = full and full:match("^Class (.+)$") or nil
+    local clsPath = full and full:match("^%S+ (.+)$") or nil
     if not clsPath then return end
     local fnPath = clsPath .. ":SetSpectatorMode"
     if Core.TryRegisterHook("Freecam_WatchSetSpectator", fnPath, function(Context, bNew)
@@ -26,7 +26,24 @@ local function EnsureSpecHook(pc)
         Core.Log(string.format("Freecam Hook [SetSpectatorMode] bNew=%s SpectatorModePawn=%s", tostring(val), tostring(pawnValid)))
     end) then
         HookedSpecFn = true
+        Core.Log("Freecam: hooked " .. fnPath)
     end
+
+    pcall(function()
+        local gStatics = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
+        local gi = Core.IsValidObj(gStatics) and gStatics:GetGameInstance(pc) or nil
+        if Core.IsValidObj(gi) then
+            local giCls = gi:GetClass()
+            if Core.IsValidObj(giCls) and giCls.ForEachFunction then
+                giCls:ForEachFunction(function(fn)
+                    local n = fn:GetFName():ToString()
+                    if string.find(n, "Spectat", 1, true) then
+                        Core.Log("Freecam Reflection [GameInstance fn]: " .. n)
+                    end
+                end)
+            end
+        end
+    end)
 end
 
 local function ToggleCinematicFreecam()
