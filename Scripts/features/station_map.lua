@@ -605,18 +605,27 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 3. Render Player marker if player is on this floor
+    -- 3. Render all Player markers & nametags on this floor
     local pc = Core.GetLocalPlayerController()
-    local pawn = Core.IsValidObj(pc) and pc.Pawn or nil
-    if Core.IsValidObj(pawn) then
-        local okLoc, loc = pcall(function() return pawn:K2_GetActorLocation() end)
-        if okLoc and loc and math.abs((loc.Z or 0) - floor.z) <= 250.0 then
-            local pmx, pmy = WorldToMap(loc.X or 0, loc.Y or 0)
+    local allPlayers = StationData.GetAllPlayersInfo(pc)
+    for _, p in ipairs(allPlayers) do
+        if p.HasPos and math.abs(p.Z - floor.z) <= 250.0 then
+            local pmx, pmy = WorldToMap(p.X, p.Y)
             local pDot = Core.CreateRawWidget(PATHS.BorderClass, outer)
             if Core.IsValidObj(pDot) then
-                pcall(function() pDot:SetBrushColor(COLORS.PlayerDot) end)
+                local col = p.IsLocal and COLORS.PlayerDot or (p.IsOnline and { R = 0.25, G = 0.85, B = 0.35, A = 1.0 } or { R = 0.60, G = 0.25, B = 0.25, A = 0.90 })
+                pcall(function() pDot:SetBrushColor(col) end)
                 local pSlot = MapUI.MapCanvas:AddChildToCanvas(pDot)
                 SetCanvasSlot(pSlot, pmx, pmy, 10.0, 10.0, 0.5, 0.5, 45)
+            end
+            local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, MapUI.PC)
+            if Core.IsValidObj(nameTxt) then
+                pcall(function()
+                    nameTxt:SetSize(10)
+                    nameTxt:SetText(Core.MakeText(p.Name))
+                end)
+                local nSlot = MapUI.MapCanvas:AddChildToCanvas(nameTxt)
+                SetCanvasSlot(nSlot, pmx, pmy - 14.0, 120.0, 18.0, 0.5, 1.0, 46)
             end
         end
     end

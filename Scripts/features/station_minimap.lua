@@ -399,6 +399,54 @@ local function UpdateMinimapState(st)
     HidePoolFrom(st.PlatformPool, platCount + 1)
     HidePoolFrom(st.MachinePool, machCount + 1)
     HidePoolFrom(st.IconPool, iconCount + 1)
+
+    -- Render all players on this floor (with nametags)
+    st.PlayerPool = st.PlayerPool or {}
+    local pCount = 0
+    local allPlayers = StationData.GetAllPlayersInfo(pc)
+    for _, p in ipairs(allPlayers) do
+        if p.HasPos and math.abs(p.Z - curFloor.z) <= 250.0 then
+            local pdx = p.X - px
+            local pdy = p.Y - py
+            if math.abs(pdx) <= maxCullDist and math.abs(pdy) <= maxCullDist then
+                pCount = pCount + 1
+                local entry = st.PlayerPool[pCount]
+                if not entry or not Core.IsValidObj(entry.Dot) then
+                    local dot = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
+                    local lbl = Core.CreateUserWidget(PATHS.WBPTextClass, st.Hud, st.PC)
+                    if Core.IsValidObj(dot) and Core.IsValidObj(lbl) then
+                        pcall(function() lbl:SetSize(10) end)
+                        local dSlot = st.Canvas:AddChildToCanvas(dot)
+                        local lSlot = st.Canvas:AddChildToCanvas(lbl)
+                        if Core.IsValidObj(dSlot) then pcall(function() dSlot:SetZOrder(48) end) end
+                        if Core.IsValidObj(lSlot) then pcall(function() lSlot:SetZOrder(49) end) end
+                        entry = { Dot = dot, DotSlot = dSlot, Label = lbl, LabelSlot = lSlot }
+                        st.PlayerPool[pCount] = entry
+                    end
+                end
+                if entry and Core.IsValidObj(entry.Dot) then
+                    local sx = halfMap + pdx * scale
+                    local sy = halfMap + pdy * scale
+                    local col = p.IsLocal and COLORS.PlayerDot or (p.IsOnline and { R = 0.25, G = 0.85, B = 0.35, A = 1.0 } or { R = 0.60, G = 0.25, B = 0.25, A = 0.90 })
+                    pcall(function()
+                        entry.Dot:SetBrushColor(col)
+                        entry.Dot:SetVisibility(0)
+                        entry.Label:SetText(Core.MakeText(p.Name))
+                        entry.Label:SetVisibility(0)
+                    end)
+                    SetCanvasSlot(entry.DotSlot, sx, sy, 8.0, 8.0, 0.5, 0.5)
+                    SetCanvasSlot(entry.LabelSlot, sx, sy - 10.0, 100.0, 16.0, 0.5, 1.0)
+                end
+            end
+        end
+    end
+    for i = pCount + 1, #st.PlayerPool do
+        local e = st.PlayerPool[i]
+        if e then
+            if Core.IsValidObj(e.Dot) then pcall(function() e.Dot:SetVisibility(1) end) end
+            if Core.IsValidObj(e.Label) then pcall(function() e.Label:SetVisibility(1) end) end
+        end
+    end
 end
 
 local function RefreshAllMinimapHuds()
