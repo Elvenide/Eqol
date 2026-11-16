@@ -76,6 +76,13 @@ local function ToggleCinematicFreecam()
     local targetState = FreecamActive
 
     pcall(function() pc:SetSpectatorMode(targetState) end)
+    if Core.IsValidObj(pc.Pawn) then
+        pcall(function()
+            if pc.Pawn.SetSpectatorMode then
+                pc.Pawn:SetSpectatorMode(targetState)
+            end
+        end)
+    end
     ExecuteInGameThreadWithDelay(50, function()
         if Core.IsValidObj(pc) then
             pcall(function() pc:SetHUDHidden(targetState) end)
