@@ -4,8 +4,6 @@ Displays floating nametags above all players—including yourself and offline pl
 
 ## Features
 
-- Shows each player's nickname above their character body.
-- Includes a colored status dot and label:
-  - **Green (`Online`)** for connected players.
-  - **Red (`Offline`)** for disconnected players whose character bodies remain in the world.
-- Automatically hides when the HUD is hidden (for example, during Cinematic Freecam).
+- Renders 3D Minecraft-style world-space nametags directly above each player's head (using their local up vector), with a translucent black background that rotates cleanly to face the viewing camera.
+- Shows each player's nickname and **Green (`Online`)** / **Red (`Offline`)** status.
+- Uses camera-relative visibility and a 25 m max viewing distance, so you can see your own and other players' nametags in 3rd-person, Cinematic Freecam, or Spectator Mode without clutter from across the station.

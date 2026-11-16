@@ -1,6 +1,6 @@
 -- Eqol Feature: Player Nametags with Online/Offline Status
--- Displays floating nametags above all players (including the local player)
--- with a green (Online) or red/grey (Offline) status indicator.
+-- Displays 3D Minecraft-style world-space nametags above players (relative to the viewing camera),
+-- with a translucent black background, camera-facing rotation, and max viewing distance.
 
 local Core = require("core")
 local StationData = require("station_data")
@@ -10,179 +10,159 @@ local Feature = {
 }
 
 local PATHS = {
-    WBPTextClass       = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
-    CanvasPanelClass   = "/Script/UMG.CanvasPanel",
-    BorderClass        = "/Script/UMG.Border",
-    HorizontalBoxClass = "/Script/UMG.HorizontalBox",
-    SizeBoxClass       = "/Script/UMG.SizeBox",
+    WBPTextClass    = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
+    ActorClass      = "/Script/Engine.Actor",
+    WidgetCompClass = "/Script/UMG.WidgetComponent",
 }
 
 local COLORS = {
-    Bg      = { R = 0.025, G = 0.038, B = 0.055, A = 0.78 },
-    Online  = { R = 0.05402, G = 0.7042, B = 0.05281, A = 1.0 },
-    Offline = { R = 0.55, G = 0.22, B = 0.22, A = 0.90 },
+    Bg      = { R = 0.0, G = 0.0, B = 0.0, A = 0.55 },
+    Online  = { R = 0.35, G = 0.95, B = 0.35, A = 1.0 },
+    Offline = { R = 0.90, G = 0.35, B = 0.35, A = 1.0 },
 }
 
-local HudOverlays = {} -- hudAddr -> { Hud, PC, Outer, Canvas, Pool = {} }
+local HEAD_OFFSET   = 115.0  -- cm above actor origin along player's local up vector
+local MAX_VIEW_DIST = 2500.0 -- 25 meters max viewing distance from camera
+local MIN_CAM_DIST  = 120.0  -- hide when camera is inside player's head (1st-person)
+local TAG_SCALE     = 0.25   -- 3D world scale for crisp Minecraft-style proportions
+
+local TagPool = {} -- idx -> { Actor, Comp, TextWidget }
 local PollActive = false
 
-local function EnsureOverlayOnHud(hud)
-    if not Core.IsValidObj(hud) then return nil end
-    local addr = hud:GetAddress()
-    local st = HudOverlays[addr]
-    if st and Core.IsValidObj(st.Canvas) then
-        return st
+local function DestroyTagPool()
+    for i, entry in ipairs(TagPool) do
+        if entry and Core.IsValidObj(entry.Actor) then
+            pcall(function() entry.Actor:K2_DestroyActor() end)
+        end
+        TagPool[i] = nil
     end
-
-    local mainOverlay = hud.MainOverlay
-    if not Core.IsValidObj(mainOverlay) then return nil end
-
-    local outer = Core.GetWidgetOuter(hud)
-    local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
-    local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
-
-    local canvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
-    if not Core.IsValidObj(canvas) then return nil end
-
-    local slot = mainOverlay:AddChildToOverlay(canvas)
-    if Core.IsValidObj(slot) then
-        pcall(function()
-            slot:SetHorizontalAlignment(0) -- Fill
-            slot:SetVerticalAlignment(0)   -- Fill
-        end)
-    end
-
-    st = {
-        Hud = hud,
-        PC = pc,
-        Outer = outer,
-        Canvas = canvas,
-        Pool = {},
-    }
-    HudOverlays[addr] = st
-    return st
 end
 
-local function GetOrCreateTagWidget(st, idx)
-    local entry = st.Pool[idx]
-    if entry and Core.IsValidObj(entry.Root) then
+local function GetOrCreateTagActor(pc, idx)
+    local entry = TagPool[idx]
+    if entry and Core.IsValidObj(entry.Actor) and Core.IsValidObj(entry.Comp) and Core.IsValidObj(entry.TextWidget) then
         return entry
     end
 
-    local bg = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
-    local hBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, st.Outer)
-    local dotBox = Core.CreateRawWidget(PATHS.SizeBoxClass, st.Outer)
-    local dot = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
-    local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, st.Hud, st.PC)
+    local gStatics = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
+    local actorCls = Core.FindOrLoadClass(PATHS.ActorClass)
+    local compCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
+    if not (Core.IsValidObj(gStatics) and Core.IsValidObj(actorCls) and Core.IsValidObj(compCls)) then
+        return nil
+    end
 
-    if not (Core.IsValidObj(bg) and Core.IsValidObj(hBox) and Core.IsValidObj(dotBox) and Core.IsValidObj(dot) and Core.IsValidObj(nameTxt)) then
+    local xform = {
+        Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
+        Translation = { X = 0.0, Y = 0.0, Z = 0.0 },
+        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
+    }
+
+    local okA, actor = pcall(function()
+        local deferred = gStatics:BeginDeferredActorSpawnFromClass(pc, actorCls, xform, 1, pc)
+        if Core.IsValidObj(deferred) then
+            return gStatics:FinishSpawningActor(deferred, xform)
+        end
+        return nil
+    end)
+    if not okA or not Core.IsValidObj(actor) then return nil end
+
+    local okC, comp = pcall(function()
+        return actor:AddComponentByClass(compCls, false, xform, false)
+    end)
+    if not okC or not Core.IsValidObj(comp) then
+        pcall(function() actor:K2_DestroyActor() end)
+        return nil
+    end
+
+    local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, pc, pc)
+    if not Core.IsValidObj(nameTxt) then
+        pcall(function() actor:K2_DestroyActor() end)
         return nil
     end
 
     pcall(function()
-        bg:SetBrushColor(COLORS.Bg)
-        bg:SetPadding({ Left = 7.0, Top = 3.0, Right = 8.0, Bottom = 3.0 })
-        dotBox:SetWidthOverride(8.0)
-        dotBox:SetHeightOverride(8.0)
-        nameTxt:SetSize(12)
+        nameTxt:SetSize(16)
+        nameTxt:SetJustification(1)
+        comp:SetWidgetSpace(0) -- World space
+        comp:SetDrawAtDesiredSize(true)
+        comp:SetPivot({ X = 0.5, Y = 0.5 })
+        comp:SetTwoSided(true)
+        comp:SetBackgroundColor(COLORS.Bg)
+        comp:SetWidget(nameTxt)
+        comp:SetWorldScale3D({ X = TAG_SCALE, Y = TAG_SCALE, Z = TAG_SCALE })
+        comp:SetVisibility(false, false)
     end)
 
-    dotBox:AddChild(dot)
-    local dSlot = hBox:AddChildToHorizontalBox(dotBox)
-    if Core.IsValidObj(dSlot) then
-        pcall(function()
-            dSlot:SetVerticalAlignment(2)
-            dSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 6.0, Bottom = 0.0 })
-        end)
-    end
-
-    local nSlot = hBox:AddChildToHorizontalBox(nameTxt)
-    if Core.IsValidObj(nSlot) then
-        pcall(function() nSlot:SetVerticalAlignment(2) end)
-    end
-
-    bg:AddChild(hBox)
-    local cSlot = st.Canvas:AddChildToCanvas(bg)
-    if Core.IsValidObj(cSlot) then
-        pcall(function()
-            cSlot:SetAutoSize(true)
-            cSlot:SetAlignment({ X = 0.5, Y = 1.0 })
-        end)
-    end
-
     entry = {
-        Root = bg,
-        Dot = dot,
-        NameText = nameTxt,
-        Slot = cSlot,
+        Actor = actor,
+        Comp = comp,
+        TextWidget = nameTxt,
     }
-    st.Pool[idx] = entry
+    TagPool[idx] = entry
     return entry
 end
 
 local function UpdateNametags()
-    local layoutLib = Core.GetCDO(Core.PATHS.WidgetLayoutLibCDO)
-    if not Core.IsValidObj(layoutLib) then return end
-
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
-    local players = StationData.GetAllPlayersInfo(pc)
+    local camMgr = pc.PlayerCameraManager
+    local mathLib = Core.GetCDO("/Script/Engine.Default__KismetMathLibrary")
+    if not (Core.IsValidObj(camMgr) and Core.IsValidObj(mathLib)) then return end
 
-    if next(HudOverlays) == nil then
-        local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-        if okHuds and huds then
-            for _, hud in ipairs(huds) do
-                if Core.IsValidObj(hud) then
-                    EnsureOverlayOnHud(hud)
+    local okCam, camLoc = pcall(function() return camMgr:GetCameraLocation() end)
+    if not okCam or not camLoc then return end
+
+    local players = StationData.GetAllPlayersInfo(pc)
+    local count = 0
+
+    for _, p in ipairs(players) do
+        if p.HasPos and Core.IsValidObj(p.Actor) and not Core.IsValidObj(p.PilotedShip) then
+            -- Use the player's local up vector so nametags always sit above their head in any 3D station orientation
+            local up = { X = 0.0, Y = 0.0, Z = 1.0 }
+            pcall(function()
+                local u = p.Actor:GetActorUpVector()
+                if u and u.X then up = { X = u.X, Y = u.Y, Z = u.Z } end
+            end)
+
+            local tagPos = {
+                X = p.X + up.X * HEAD_OFFSET,
+                Y = p.Y + up.Y * HEAD_OFFSET,
+                Z = p.Z + up.Z * HEAD_OFFSET,
+            }
+
+            local dx = camLoc.X - tagPos.X
+            local dy = camLoc.Y - tagPos.Y
+            local dz = camLoc.Z - tagPos.Z
+            local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+            if dist >= MIN_CAM_DIST and dist <= MAX_VIEW_DIST then
+                count = count + 1
+                local tag = GetOrCreateTagActor(pc, count)
+                if tag then
+                    local statusStr = p.IsOnline and "Online" or "Offline"
+                    local txtCol = p.IsOnline and COLORS.Online or COLORS.Offline
+                    pcall(function()
+                        tag.TextWidget:SetText(Core.MakeText(string.format(" %s (%s) ", p.Name, statusStr)))
+                        if Core.IsValidObj(tag.TextWidget.TextBlock) then
+                            tag.TextWidget.TextBlock:SetColorAndOpacity({ SpecifiedColor = txtCol, ColorUseRule = 0 })
+                        end
+
+                        -- Face the viewing camera cleanly while staying upright relative to the player's local Up
+                        local toCam = { X = dx, Y = dy, Z = dz }
+                        local faceRot = mathLib:MakeRotFromXZ(toCam, up)
+                        tag.Actor:K2_SetActorLocationAndRotation(tagPos, faceRot, false, nil, true)
+                        tag.Comp:SetVisibility(true, false)
+                    end)
                 end
             end
         end
     end
 
-    for addr, st in pairs(HudOverlays) do
-        local hud = st.Hud
-        if Core.IsValidObj(hud) and Core.IsValidObj(st.Canvas) then
-            local okVis, hudVis = pcall(function() return hud:IsVisible() end)
-            local count = 0
-
-            if okVis and hudVis then
-                for _, p in ipairs(players) do
-                    if p.HasPos and not Core.IsValidObj(p.PilotedShip) then
-                        local screenPos = { X = 0.0, Y = 0.0 }
-                        local okProj, projected = pcall(function()
-                            return layoutLib:ProjectWorldLocationToWidgetPosition(
-                                pc,
-                                { X = p.X, Y = p.Y, Z = p.Z + 115.0 },
-                                screenPos,
-                                false
-                            )
-                        end)
-                        if okProj and projected and screenPos.X and screenPos.Y then
-                            count = count + 1
-                            local tag = GetOrCreateTagWidget(st, count)
-                            if tag then
-                                local statusStr = p.IsOnline and "Online" or "Offline"
-                                local dotCol = p.IsOnline and COLORS.Online or COLORS.Offline
-                                pcall(function()
-                                    tag.Dot:SetBrushColor(dotCol)
-                                    tag.NameText:SetText(Core.MakeText(string.format("%s (%s)", p.Name, statusStr)))
-                                    tag.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
-                                    tag.Root:SetVisibility(0)
-                                end)
-                            end
-                        end
-                    end
-                end
-            end
-
-            for i = count + 1, #st.Pool do
-                if Core.IsValidObj(st.Pool[i].Root) then
-                    pcall(function() st.Pool[i].Root:SetVisibility(1) end)
-                end
-            end
-        else
-            HudOverlays[addr] = nil
+    for i = count + 1, #TagPool do
+        local entry = TagPool[i]
+        if entry and Core.IsValidObj(entry.Comp) then
+            pcall(function() entry.Comp:SetVisibility(false, false) end)
         end
     end
 end
@@ -193,27 +173,17 @@ local function StartPoll()
 
     local function Tick()
         pcall(UpdateNametags)
-        ExecuteInGameThreadWithDelay(100, Tick)
+        ExecuteInGameThreadWithDelay(16, Tick)
     end
-    ExecuteInGameThreadWithDelay(100, Tick)
+    ExecuteInGameThreadWithDelay(16, Tick)
 end
-
-Feature.WatchWidgets = {
-    WBP_CharacterHUD_C = function(hud)
-        EnsureOverlayOnHud(hud)
-    end,
-}
 
 function Feature.Init()
     StartPoll()
 end
 
-function Feature.PruneCaches()
-    for addr, st in pairs(HudOverlays) do
-        if not Core.IsValidObj(st.Canvas) then
-            HudOverlays[addr] = nil
-        end
-    end
+function Feature.OnClientRestart()
+    DestroyTagPool()
 end
 
 return Feature
