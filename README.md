@@ -20,3 +20,4 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 - **[Scroll to Rotate Conveyor Belts](docs/conveyor-scroll-rotate.md)** — Use the mouse scroll wheel to rotate conveyor belts while building, in addition to `R`.
 - **[Ship Instant Zero Throttle](docs/ship-zero-throttle.md)** — Instantly set ship throttle/acceleration to `0` with a single keypress (`0`, rebindable).
 - **[Player Nametags](docs/player-nametags.md)** — Floating nametags above all players (including yourself) with Online/Offline status indicators.
+- **[Player Markers on Maps & Minimap](docs/player-map-markers.md)** — Exact player positions and nametags on the World Map, Station Map, and Station Minimap.
