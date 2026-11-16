@@ -59,12 +59,15 @@ local function ToggleCinematicFreecam()
 
     EnsureSpecHook(pc)
     FreecamActive = not FreecamActive
+    local targetState = FreecamActive
 
-    pcall(function() pc:SetSpectatorMode(FreecamActive) end)
-    pcall(function() pc:UpdateSpectatorTransform() end)
-    pcall(function() pc:SetHUDHidden(FreecamActive) end)
-    local pawnValid = Core.IsValidObj(pc.SpectatorModePawn)
-    Core.Log("Cinematic Freecam: " .. (FreecamActive and "ON" or "OFF") .. " (SpectatorModePawn=" .. tostring(pawnValid) .. ")")
+    pcall(function() pc:SetSpectatorMode(targetState) end)
+    ExecuteInGameThreadWithDelay(50, function()
+        if Core.IsValidObj(pc) then
+            pcall(function() pc:SetHUDHidden(targetState) end)
+        end
+    end)
+    Core.Log("Cinematic Freecam: " .. (targetState and "ON" or "OFF"))
 end
 
 function Feature.RegisterHooks()
