@@ -179,10 +179,6 @@ local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
         end
         if dstText.SetSize then dstText:SetSize(sz or fallbackSize or 15) end
 
-        if Core.IsValidObj(srcText) and Core.IsValidObj(srcText.TextBlock) and Core.IsValidObj(dstText.TextBlock) then
-            pcall(function() dstText.TextBlock:SetFont(srcText.TextBlock.Font) end)
-        end
-
         local just = nil
         if Core.IsValidObj(srcText) and srcText.Justification ~= nil then
             just = srcText.Justification
@@ -311,10 +307,17 @@ local function FindStatsContainerPanel(hud)
     return nil, nil, nil, nil
 end
 
+local LoggedHudInit = {}
+
 local function RefreshDesignerPowerStats(hud)
     if not Core.IsValidObj(hud) then return end
     local addr = hud:GetAddress()
     local st = InjectedDesigners[addr]
+
+    if not LoggedHudInit[addr] then
+        LoggedHudInit[addr] = true
+        Core.Log("DesignerPowerStats: RefreshDesignerPowerStats start")
+    end
 
     if not st or not Core.IsValidObj(st.PowerText) then
         local statsPanel, refCol, hullText, hullColVBox = FindStatsContainerPanel(hud)
@@ -377,6 +380,7 @@ local function RefreshDesignerPowerStats(hud)
 
         st = { Hud = hud, PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
         InjectedDesigners[addr] = st
+        Core.Log("DesignerPowerStats: column injected, computing power")
     end
 
     local gen, cons = ComputeDesignerPower(hud)
@@ -397,40 +401,11 @@ end
 -- Feature Lifecycle
 --------------------------------------------------------------------------------
 
-local DesignerPollActive = false
-
-local function StartDesignerPoll()
-    if DesignerPollActive then return end
-    DesignerPollActive = true
-
-    local function Tick()
-        local anyActive = false
-        for addr, st in pairs(InjectedDesigners) do
-            if Core.IsValidObj(st.Hud) and Core.IsValidObj(st.PowerText) then
-                local okVis, vis = pcall(function() return st.Hud:IsVisible() end)
-                if okVis and vis then
-                    anyActive = true
-                    pcall(RefreshDesignerPowerStats, st.Hud)
-                end
-            else
-                InjectedDesigners[addr] = nil
-            end
-        end
-        if anyActive then
-            ExecuteInGameThreadWithDelay(750, Tick)
-        else
-            DesignerPollActive = false
-        end
-    end
-    ExecuteInGameThreadWithDelay(750, Tick)
-end
-
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
         ExecuteInGameThreadWithDelay(150, function()
             if Core.IsValidObj(hud) then
                 RefreshDesignerPowerStats(hud)
-                StartDesignerPoll()
             end
         end)
     end,
