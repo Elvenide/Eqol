@@ -10,36 +10,46 @@ local Feature = {
 local FreecamActive = false
 local LoggedSettingsSpectator = false
 
-Feature.WatchWidgets = {
-    WBP_SettingsMenu_C = function(menu)
-        if LoggedSettingsSpectator or not Core.IsValidObj(menu) then return end
-        LoggedSettingsSpectator = true
-        pcall(function()
-            local cls = menu:GetClass()
-            if Core.IsValidObj(cls) and cls.ForEachFunction then
-                cls:ForEachFunction(function(fn)
+local function LogSpectatorDetails(pc)
+    if LoggedSettingsSpectator or not Core.IsValidObj(pc) then return end
+    LoggedSettingsSpectator = true
+    pcall(function()
+        local cls = pc:GetClass()
+        if Core.IsValidObj(cls) and cls.ForEachProperty then
+            cls:ForEachProperty(function(prop)
+                local n = prop:GetFName():ToString()
+                if string.find(n, "Spectat", 1, true) then
+                    Core.Log("Freecam Reflection [PC prop]: " .. n)
+                end
+            end)
+        end
+        local menuCls = StaticFindObject("/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C")
+        if Core.IsValidObj(menuCls) then
+            if menuCls.ForEachFunction then
+                menuCls:ForEachFunction(function(fn)
                     local n = fn:GetFName():ToString()
                     if string.find(n, "Spectat", 1, true) or string.find(n, "HUD", 1, true) then
                         Core.Log("Freecam Reflection [SettingsMenu fn]: " .. n)
                     end
                 end)
             end
-            if Core.IsValidObj(cls) and cls.ForEachProperty then
-                cls:ForEachProperty(function(prop)
+            if menuCls.ForEachProperty then
+                menuCls:ForEachProperty(function(prop)
                     local n = prop:GetFName():ToString()
                     if string.find(n, "Spectat", 1, true) or string.find(n, "HUD", 1, true) then
                         Core.Log("Freecam Reflection [SettingsMenu prop]: " .. n)
                     end
                 end)
             end
-        end)
-    end,
-}
+        end
+    end)
+end
 
 local function ToggleCinematicFreecam()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
+    LogSpectatorDetails(pc)
     FreecamActive = not FreecamActive
 
     pcall(function() pc:SetSpectatorMode(FreecamActive) end)
