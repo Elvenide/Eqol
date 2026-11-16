@@ -14,7 +14,7 @@ View your entire space station floor-by-floor in 2D, toggle item icons, remotely
   - Use the **vertical numbered floor buttons** on the right side (`1`, `2`, `3`, …) to switch between floors.
 - **Machine & Conveyor Item Icons**:
   - Assemblers, refineries, containers, and conveyor belts display icons for the item they are producing, storing, or moving.
-  - **Click any item icon** to toggle its visibility on or off in **both** the Station Map and the [Station Minimap](station-minimap.md).
+  - **Click any item icon** to toggle its visibility on or off.
 - **Remote Machine Building (`B`)**:
   - Press **`B`** (or click **Build (B)**) while in the Station Map to open the regular machine building menu.
   - Select any machine to enter placement mode, press **`R`** to rotate 90°, and click on a station module to build it remotely—**all normal inventory material requirements still apply**.

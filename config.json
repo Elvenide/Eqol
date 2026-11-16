@@ -1,3 +1,7 @@
 {
-    "PowerOverviewKey": "P"
+    "CinematicFreecamKey": "F9",
+    "LogisticsKey": "L",
+    "PowerOverviewKey": "P",
+    "ShipPerspectiveKey": "V",
+    "ShipZeroThrottleKey": "Zero"
 }

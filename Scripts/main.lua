@@ -19,7 +19,6 @@ local Core = require("core")
 
 -- Feature modules (one script file per feature)
 Core.RegisterFeature(require("features.power_overview"))
-Core.RegisterFeature(require("features.station_minimap"))
 Core.RegisterFeature(require("features.station_map"))
 Core.RegisterFeature(require("features.logistics"))
 Core.RegisterFeature(require("features.designer_power_stats"))
