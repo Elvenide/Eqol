@@ -123,7 +123,32 @@ local function ComputeDesignerPower(designerHud)
 
     if not LoggedDesignerInfo then
         LoggedDesignerInfo = true
-        pcall(function() Core.Log("DesignerPowerStats: designer=" .. designer:GetClass():GetFName():ToString()) end)
+        pcall(function()
+            local dCls = designer:GetClass()
+            Core.Log("DesignerPowerStats: designer=" .. dCls:GetFName():ToString())
+            if dCls.ForEachFunction then
+                dCls:ForEachFunction(function(fn)
+                    local n = fn:GetFName():ToString()
+                    if string.find(n, "Place", 1, true) or string.find(n, "Build", 1, true)
+                        or string.find(n, "Module", 1, true) or string.find(n, "Block", 1, true)
+                        or string.find(n, "Power", 1, true) or string.find(n, "Stat", 1, true)
+                        or string.find(n, "Plan", 1, true) or string.find(n, "Grid", 1, true) then
+                        Core.Log("DesignerPowerStats [Designer fn]: " .. n)
+                    end
+                end)
+            end
+            local hCls = designerHud:GetClass()
+            if Core.IsValidObj(hCls) and hCls.ForEachFunction then
+                hCls:ForEachFunction(function(fn)
+                    local n = fn:GetFName():ToString()
+                    if string.find(n, "Stat", 1, true) or string.find(n, "Refresh", 1, true)
+                        or string.find(n, "Update", 1, true) or string.find(n, "Hull", 1, true)
+                        or string.find(n, "Mass", 1, true) then
+                        Core.Log("DesignerPowerStats [HUD fn]: " .. n)
+                    end
+                end)
+            end
+        end)
     end
 
     local frame = nil
@@ -133,7 +158,7 @@ local function ComputeDesignerPower(designerHud)
     local isStationFrame = false
     pcall(function()
         local clsName = frame:GetClass():GetFName():ToString()
-        if LoggedDesignerInfo then
+        if LoggedDesignerInfo == true then
             Core.Log("DesignerPowerStats: frame=" .. tostring(clsName))
             LoggedDesignerInfo = "done"
         end
@@ -146,7 +171,6 @@ local function ComputeDesignerPower(designerHud)
     local objGen, objCons = 0.0, 0.0
 
     if isStationFrame then
-        Core.Log("DesignerPowerStats: calling GetPowerGrid")
         if frame.GetPowerGrid then
             local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
             if okPG and Core.IsValidObj(pg) then
@@ -154,7 +178,6 @@ local function ComputeDesignerPower(designerHud)
                 pgCons = Core.GetFPFloat(pg.MaxConsumption)
             end
         end
-        Core.Log(string.format("DesignerPowerStats: GetPowerGrid done (gen=%.1f cons=%.1f)", pgGen, pgCons))
     end
 
     return math.max(objGen, pgGen), math.max(objCons, pgCons)
