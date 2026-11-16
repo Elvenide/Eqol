@@ -589,7 +589,9 @@ function Core.EnsureKeybindHooks()
         "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Setup",
         function(Context)
             local menu = Context:get()
-            if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+            ExecuteInGameThreadWithDelay(1, function()
+                if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+            end)
         end
     )
     Core.TryRegisterHook(
@@ -597,7 +599,45 @@ function Core.EnsureKeybindHooks()
         "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Refresh",
         function(Context)
             local menu = Context:get()
-            if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+            ExecuteInGameThreadWithDelay(1, function()
+                if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+            end)
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_SettingsMenu_RefreshInGame",
+        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:RefreshInGame",
+        function(Context)
+            local menu = Context:get()
+            ExecuteInGameThreadWithDelay(1, function()
+                if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+            end)
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_InputRemap_LoadSettings",
+        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:LoadSettings",
+        function(Context)
+            local row = Context:get()
+            ExecuteInGameThread(function()
+                if not Core.IsValidObj(row) then return end
+                local okN, mName = pcall(function() return row.MappingName:ToString() end)
+                local bs = okN and RegisteredKeybinds[mName] or nil
+                if bs then SyncKeybindRow(bs, row) end
+            end)
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_InputRemap_RefreshDisplayKey",
+        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:RefreshDisplayKey",
+        function(Context)
+            local row = Context:get()
+            ExecuteInGameThread(function()
+                if not Core.IsValidObj(row) then return end
+                local okN, mName = pcall(function() return row.MappingName:ToString() end)
+                local bs = okN and RegisteredKeybinds[mName] or nil
+                if bs then SyncKeybindRow(bs, row) end
+            end)
         end
     )
     Core.TryRegisterHook(
