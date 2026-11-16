@@ -30,6 +30,7 @@ Core.RegisterFeature(require("features.ship_zero_throttle"))
 Core.RegisterFeature(require("features.player_nametags"))
 Core.RegisterFeature(require("features.player_map_markers"))
 Core.RegisterFeature(require("features.player_alerts"))
+Core.RegisterFeature(require("features.elevator_labels"))
 
 -- Startup
 Core.InitAll()
