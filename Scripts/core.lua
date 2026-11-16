@@ -325,7 +325,37 @@ function Core.InitAll()
     end
 end
 
+function Core.SpawnActor(worldContext, classPath, loc, rot)
+    local cls = Core.FindOrLoadClass(classPath)
+    if not Core.IsValidObj(cls) then
+        Core.Log("Core.SpawnActor: failed to find/load class " .. tostring(classPath))
+        return nil
+    end
+
+    local world = nil
+    if Core.IsValidObj(worldContext) and worldContext.GetWorld then
+        pcall(function() world = worldContext:GetWorld() end)
+    end
+    if not Core.IsValidObj(world) and UEHelpers and UEHelpers.GetWorld then
+        pcall(function() world = UEHelpers.GetWorld() end)
+    end
+    if not Core.IsValidObj(world) then
+        Core.Log("Core.SpawnActor: no valid UWorld")
+        return nil
+    end
+
+    local pos = loc or { X = 0.0, Y = 0.0, Z = 0.0 }
+    local ang = rot or { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
+    local ok, actor = pcall(function() return world:SpawnActor(cls, pos, ang) end)
+    if ok and Core.IsValidObj(actor) then
+        return actor
+    end
+    Core.Log("Core.SpawnActor: SpawnActor failed for " .. tostring(classPath))
+    return nil
+end
+
 function Core.EnsureAllHooks()
+    Core.EnsureKeybindHooks()
     for _, feature in ipairs(Features) do
         if type(feature.RegisterHooks) == "function" then
             feature.RegisterHooks(Core)
@@ -580,6 +610,7 @@ function Core.EnsureKeybindHooks()
         SharedRemapHooksDone = true
         WatchedWidgetClasses["WBP_SettingsMenu_C"] = WatchedWidgetClasses["WBP_SettingsMenu_C"] or {}
         table.insert(WatchedWidgetClasses["WBP_SettingsMenu_C"], function(menu)
+            Core.EnsureKeybindHooks()
             EnsureMenuKeybindRows(menu)
         end)
     end
