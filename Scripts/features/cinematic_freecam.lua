@@ -10,12 +10,15 @@ local Feature = {
 local FreecamActive = false
 local FreecamActor = nil
 local PrevViewTarget = nil
+local ControlledPawn = nil
+local PrevOwnerNoSee = nil
 local TickRunning = false
 local TrackedHuds = {} -- addr -> hud
 local BaseCamRot = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
 local PrevCtrlRot = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
 local YawOffset = 0.0
 local PitchOffset = 0.0
+local LoggedBuiltInSpectator = false
 
 local BASE_SPEED = 900.0   -- units/sec (~9 m/s)
 local FAST_MULT  = 3.0
@@ -144,6 +147,15 @@ end
 
 local function DisableFreecam(pc)
     FreecamActive = false
+    if Core.IsValidObj(ControlledPawn) and Core.IsValidObj(pc) then
+        pcall(function() ControlledPawn:EnableInput(pc) end)
+        if PrevOwnerNoSee ~= nil and Core.IsValidObj(ControlledPawn.Mesh) then
+            pcall(function() ControlledPawn.Mesh:SetOwnerNoSee(PrevOwnerNoSee) end)
+        end
+    end
+    ControlledPawn = nil
+    PrevOwnerNoSee = nil
+
     if Core.IsValidObj(pc) then
         local target = Core.IsValidObj(PrevViewTarget) and PrevViewTarget or pc.Pawn
         if Core.IsValidObj(target) then
@@ -159,9 +171,27 @@ local function DisableFreecam(pc)
     PrevViewTarget = nil
 end
 
+local function LogBuiltInSpectatorHints(pc)
+    if LoggedBuiltInSpectator or not Core.IsValidObj(pc) then return end
+    LoggedBuiltInSpectator = true
+    pcall(function()
+        local cls = pc:GetClass()
+        if Core.IsValidObj(cls) and cls.ForEachFunction then
+            cls:ForEachFunction(function(fn)
+                local n = fn:GetFName():ToString()
+                if string.find(n, "Spectat", 1, true) or string.find(n, "Freecam", 1, true) or string.find(n, "HUD", 1, true) then
+                    Core.Log("Freecam Reflection [PC fn]: " .. n)
+                end
+            end)
+        end
+    end)
+end
+
 local function ToggleCinematicFreecam()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
+
+    LogBuiltInSpectatorHints(pc)
 
     if FreecamActive then
         DisableFreecam(pc)
@@ -177,6 +207,16 @@ local function ToggleCinematicFreecam()
     end
 
     FreecamActive = true
+    ControlledPawn = pc.Pawn
+    if Core.IsValidObj(ControlledPawn) then
+        pcall(function() ControlledPawn:DisableInput(pc) end)
+        if Core.IsValidObj(ControlledPawn.Mesh) then
+            pcall(function()
+                PrevOwnerNoSee = ControlledPawn.Mesh.bOwnerNoSee
+                ControlledPawn.Mesh:SetOwnerNoSee(false)
+            end)
+        end
+    end
     pcall(function() pc:SetViewTargetWithBlend(FreecamActor, 0.0, 0, 0.0, false) end)
     pcall(function() pc:SetIgnoreMoveInput(true) end)
     SetHudHiddenState(pc, true)
