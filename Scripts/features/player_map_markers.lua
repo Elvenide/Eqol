@@ -1,6 +1,6 @@
 -- Eqol Feature: World Map Player Markers & Nametags
--- Renders exact player positions and nametags on WBP_SolarSystemMap_C without
--- mutating WBP_PanningCanvas's internal Canvas child list.
+-- Renders exact player positions and nametags on WBP_SolarSystemMap_C using
+-- event-driven hooks (no background FindAllOf polling to avoid GC races on map close).
 
 local Core = require("core")
 local StationData = require("station_data")
@@ -15,8 +15,7 @@ local PATHS = {
     BorderClass      = "/Script/UMG.Border",
 }
 
-local MapOverlays = {} -- mapAddr -> { Overlay, Pool }
-local PollActive = false
+local MapOverlays = {} -- mapAddr -> { SolarMap, PanningCanvas, Outer, PC, Canvas, Pool }
 
 local function EnsureMapOverlay(solarMap)
     if not Core.IsValidObj(solarMap) then return nil end
@@ -124,39 +123,34 @@ local function RefreshWorldMapPlayers(solarMap)
     end
 end
 
-local function StartPoll()
-    if PollActive then return end
-    PollActive = true
-    local function Tick()
-        local ok, maps = pcall(FindAllOf, "WBP_SolarSystemMap_C")
-        if ok and maps then
-            for _, m in ipairs(maps) do
-                if Core.IsValidObj(m) then
-                    pcall(RefreshWorldMapPlayers, m)
-                end
-            end
-        end
-        ExecuteInGameThreadWithDelay(200, Tick)
-    end
-    ExecuteInGameThreadWithDelay(200, Tick)
-end
-
 Feature.WatchWidgets = {
     WBP_SolarSystemMap_C = function(m)
         RefreshWorldMapPlayers(m)
     end,
 }
 
-function Feature.Init()
-    StartPoll()
+function Feature.RegisterHooks()
+    for _, fnName in ipairs({
+        "GenerateSystemMap",
+        "GenerateSectorMap",
+        "SetScale",
+        "BndEvt__WBP_SolarSystemMap_WBP_PanningCanvas_K2Node_ComponentBoundEvent_0_OnOffsetChanged__DelegateSignature",
+    }) do
+        Core.TryRegisterHook(
+            "SolarSystemMap_" .. fnName,
+            "/Game/Blueprints/Widgets/HUDs/Map/WBP_SolarSystemMap.WBP_SolarSystemMap_C:" .. fnName,
+            function(Context)
+                local m = Context:get()
+                if Core.IsValidObj(m) then
+                    pcall(RefreshWorldMapPlayers, m)
+                end
+            end
+        )
+    end
 end
 
 function Feature.PruneCaches()
-    for addr, st in pairs(MapOverlays) do
-        if not Core.IsValidObj(st.Canvas) then
-            MapOverlays[addr] = nil
-        end
-    end
+    MapOverlays = {}
 end
 
 return Feature

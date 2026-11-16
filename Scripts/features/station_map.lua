@@ -745,6 +745,14 @@ local function OpenStationMap()
     pcall(function()
         mapBg:SetBrushColor(COLORS.PanelBg)
         mapCanvas:SetClipping(1)
+        local attached = false
+        if Core.IsValidObj(win.Content) then
+            local okC = pcall(function() win.Content:AddChild(rootVBox) end)
+            if okC then attached = true end
+        end
+        if not attached and Core.IsValidObj(win.ContentBorder) then
+            pcall(function() win.ContentBorder:AddChild(rootVBox) end)
+        end
         win:SetContentForSlot(FName("Content"), rootVBox)
     end)
 
@@ -756,6 +764,9 @@ local function OpenStationMap()
             pcall(function()
                 txt:SetSize(12)
                 txt:SetText(Core.MakeText(labelStr))
+                if Core.IsValidObj(btn.Content) then
+                    btn.Content:AddChild(txt)
+                end
                 btn:SetContentForSlot(FName("Content"), txt)
             end)
             HookWBPButton(btn, onClick)
@@ -883,15 +894,25 @@ local function EnsureStationButtonOnMapHud(mapHud)
     local okPC, owningPC = pcall(function() return mapHud:GetOwningPlayer() end)
     local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
 
+    local outer = Core.GetWidgetOuter(mapHud)
+    local sBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
     local btn = Core.CreateUserWidget(PATHS.WBPButtonClass, mapHud, pc)
     local lbl = Core.CreateUserWidget(PATHS.WBPTextClass, mapHud, pc)
-    if not (Core.IsValidObj(btn) and Core.IsValidObj(lbl)) then return end
+    if not (Core.IsValidObj(sBox) and Core.IsValidObj(btn) and Core.IsValidObj(lbl)) then return end
 
     pcall(function()
+        sBox:SetWidthOverride(110.0)
+        sBox:SetHeightOverride(34.0)
         lbl:SetSize(13)
         lbl:SetText(Core.MakeText("Station"))
+        if Core.IsValidObj(btn.Content) then
+            btn.Content:AddChild(lbl)
+        end
         btn:SetContentForSlot(FName("Content"), lbl)
+        btn:SetVisibility(0)
+        sBox:SetVisibility(0)
     end)
+    sBox:AddChild(btn)
 
     HookWBPButton(btn, OpenStationMap)
 
@@ -905,10 +926,11 @@ local function EnsureStationButtonOnMapHud(mapHud)
         end
     end)
 
-    local slot = container:AddChildToGrid(btn, 0, colIdx)
+    local slot = container:AddChildToGrid(sBox, 0, colIdx)
     if Core.IsValidObj(slot) and Core.IsValidObj(mapHud.SystemButton) and Core.IsValidObj(mapHud.SystemButton.Slot) then
         pcall(function()
             slot:SetPadding(mapHud.SystemButton.Slot.Padding)
+            slot:SetVerticalAlignment(2)
         end)
     end
 
