@@ -44,27 +44,17 @@ local function GetOrCreateTagActor(pc, idx)
         return entry
     end
 
-    local gStatics = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
-    local actorCls = Core.FindOrLoadClass(PATHS.ActorClass)
     local compCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
-    if not (Core.IsValidObj(gStatics) and Core.IsValidObj(actorCls) and Core.IsValidObj(compCls)) then
-        return nil
-    end
+    if not Core.IsValidObj(compCls) then return nil end
+
+    local actor = Core.SpawnActor(pc, PATHS.ActorClass, { X = 0.0, Y = 0.0, Z = 0.0 }, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
+    if not Core.IsValidObj(actor) then return nil end
 
     local xform = {
         Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
         Translation = { X = 0.0, Y = 0.0, Z = 0.0 },
         Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
     }
-
-    local okA, actor = pcall(function()
-        local deferred = gStatics:BeginDeferredActorSpawnFromClass(pc, actorCls, xform, 1, pc)
-        if Core.IsValidObj(deferred) then
-            return gStatics:FinishSpawningActor(deferred, xform)
-        end
-        return nil
-    end)
-    if not okA or not Core.IsValidObj(actor) then return nil end
 
     local okC, comp = pcall(function()
         return actor:AddComponentByClass(compCls, false, xform, false)
@@ -73,6 +63,8 @@ local function GetOrCreateTagActor(pc, idx)
         pcall(function() actor:K2_DestroyActor() end)
         return nil
     end
+
+    pcall(function() actor:K2_SetRootComponent(comp) end)
 
     local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, pc, pc)
     if not Core.IsValidObj(nameTxt) then
@@ -151,7 +143,7 @@ local function UpdateNametags()
                         -- Face the viewing camera cleanly while staying upright relative to the player's local Up
                         local toCam = { X = dx, Y = dy, Z = dz }
                         local faceRot = mathLib:MakeRotFromXZ(toCam, up)
-                        tag.Actor:K2_SetActorLocationAndRotation(tagPos, faceRot, false, nil, true)
+                        tag.Comp:K2_SetWorldLocationAndRotation(tagPos, faceRot, false, nil, true)
                         tag.Comp:SetVisibility(true, false)
                     end)
                 end
