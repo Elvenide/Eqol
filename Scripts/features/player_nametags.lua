@@ -143,7 +143,7 @@ local function UpdateNametags()
                         -- Face the viewing camera cleanly while staying upright relative to the player's local Up
                         local toCam = { X = dx, Y = dy, Z = dz }
                         local faceRot = mathLib:MakeRotFromXZ(toCam, up)
-                        tag.Comp:K2_SetWorldLocationAndRotation(tagPos, faceRot, false, nil, true)
+                        tag.Comp:K2_SetWorldLocationAndRotation(tagPos, faceRot, false, {}, true)
                         tag.Comp:SetVisibility(true, false)
                     end)
                 end
