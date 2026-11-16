@@ -12,10 +12,20 @@ local FreecamActor = nil
 local PrevViewTarget = nil
 local TickRunning = false
 local TrackedHuds = {} -- addr -> hud
+local BaseCamRot = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
+local PrevCtrlRot = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
+local YawOffset = 0.0
+local PitchOffset = 0.0
 
 local BASE_SPEED = 900.0   -- units/sec (~9 m/s)
 local FAST_MULT  = 3.0
 local SLOW_MULT  = 0.25
+
+local function NormalizeAngle(deg)
+    local a = (deg or 0.0) % 360.0
+    if a > 180.0 then a = a - 360.0 end
+    return a
+end
 
 local function IsDown(pc, keyName)
     local ok, down = pcall(function() return pc:IsInputKeyDown({ KeyName = FName(keyName) }) end)
@@ -58,6 +68,13 @@ local function SpawnFreecamActor(pc)
 
     local actor = Core.SpawnActor(pc, "/Script/Engine.CameraActor", camLoc, camRot)
     if Core.IsValidObj(actor) then
+        BaseCamRot = { Pitch = camRot.Pitch, Yaw = camRot.Yaw, Roll = camRot.Roll }
+        YawOffset = 0.0
+        PitchOffset = 0.0
+        pcall(function()
+            local c = pc:GetControlRotation()
+            if c then PrevCtrlRot = { Pitch = c.Pitch or 0, Yaw = c.Yaw or 0, Roll = c.Roll or 0 } end
+        end)
         pcall(function() actor:K2_SetActorLocationAndRotation(camLoc, camRot, false, {}, true) end)
     end
     return actor
@@ -82,7 +99,15 @@ local function StartFreecamTick()
         local mathLib = Core.GetCDO("/Script/Engine.Default__KismetMathLibrary")
         if Core.IsValidObj(pc) and Core.IsValidObj(mathLib) then
             pcall(function()
-                local rot = pc:GetControlRotation()
+                local curCtrl = pc:GetControlRotation()
+                local dYaw = NormalizeAngle((curCtrl.Yaw or 0.0) - PrevCtrlRot.Yaw)
+                local dPitch = NormalizeAngle((curCtrl.Pitch or 0.0) - PrevCtrlRot.Pitch)
+                PrevCtrlRot = { Pitch = curCtrl.Pitch or 0.0, Yaw = curCtrl.Yaw or 0.0, Roll = curCtrl.Roll or 0.0 }
+
+                YawOffset = YawOffset + dYaw
+                PitchOffset = math.max(-89.0, math.min(89.0, PitchOffset + dPitch))
+
+                local rot = mathLib:ComposeRotators({ Pitch = PitchOffset, Yaw = YawOffset, Roll = 0.0 }, BaseCamRot)
                 FreecamActor:K2_SetActorRotation(rot, false)
 
                 local fwd = mathLib:GetForwardVector(rot)
