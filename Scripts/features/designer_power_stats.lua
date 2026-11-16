@@ -102,7 +102,7 @@ local function ResolveDesignerObject(designerHud)
 end
 
 local function CollectObjectsFromArray(arr, seen, out)
-    if not arr then return end
+    if not arr or type(arr.GetArrayNum) ~= "function" then return end
     StationData.ForEachArray(arr, function(_, elem)
         local obj = Core.UnwrapArrayElem(elem)
         if Core.IsValidObj(obj) then
@@ -121,46 +121,33 @@ local function ComputeDesignerPower(designerHud)
 
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
+    if not Core.IsValidObj(frame) then return 0.0, 0.0 end
 
+    -- Normal baseline from constructed PowerGrid
     local pgGen, pgCons = 0.0, 0.0
-    if Core.IsValidObj(frame) then
-        local pg = nil
-        if frame.GetPowerGrid then
-            pcall(function() pg = frame:GetPowerGrid() end)
-        end
-        if Core.IsValidObj(pg) then
+    if frame.GetPowerGrid then
+        local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
+        if okPG and Core.IsValidObj(pg) then
             pgGen = Core.GetFPFloat(pg.MaxProduction)
             pgCons = Core.GetFPFloat(pg.MaxConsumption)
         end
     end
 
+    -- Augment with scanned machines on the frame (including placed/unconstructed solar panels & machines)
     local seen = {}
     local objects = {}
-    if Core.IsValidObj(frame) then
+    if frame.FindMachines then
         local okFind, arr = pcall(function() return frame:FindMachines() end)
         if okFind and arr then CollectObjectsFromArray(arr, seen, objects) end
-        for _, prop in ipairs({ "Machines", "Blocks", "GridBlocks", "PlacedBlocks" }) do
-            local okP, pArr = pcall(function() return frame[prop] end)
-            if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
-        end
     end
-    for _, prop in ipairs({ "Blocks", "PlacedBlocks", "PreviewBlocks", "GhostBlocks" }) do
-        local okP, pArr = pcall(function() return designer[prop] end)
+    if #objects == 0 then
+        local okP, pArr = pcall(function() return frame.Machines end)
         if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
     end
 
     local objGen, objCons = 0.0, 0.0
     for _, obj in ipairs(objects) do
         local g, c = ComputePowerFromObject(obj)
-        if g == 0 and c == 0 then
-            for _, dataProp in ipairs({ "BlockData", "Data", "Item" }) do
-                local okD, dataObj = pcall(function() return obj[dataProp] end)
-                if okD and Core.IsValidObj(dataObj) then
-                    g, c = ComputePowerFromObject(dataObj)
-                    if g ~= 0 or c ~= 0 then break end
-                end
-            end
-        end
         objGen = objGen + g
         objCons = objCons + c
     end
@@ -420,12 +407,12 @@ local function StartDesignerPoll()
             end
         end
         if anyActive then
-            ExecuteInGameThreadWithDelay(250, Tick)
+            ExecuteInGameThreadWithDelay(750, Tick)
         else
             DesignerPollActive = false
         end
     end
-    ExecuteInGameThreadWithDelay(250, Tick)
+    ExecuteInGameThreadWithDelay(750, Tick)
 end
 
 Feature.WatchWidgets = {
