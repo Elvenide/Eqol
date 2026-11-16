@@ -1,5 +1,6 @@
 -- Eqol Feature: Designer Power Generation & Consumption Stats
--- Displays total Power Gen and Power Cons alongside Hull/Mass in Ship Designer and Station Designer.
+-- Displays total Power Generation and Power Consumption alongside Mass/Hull/Dimensions
+-- in Ship Designer and Station Designer, matching the exact native column styling.
 
 local Core = require("core")
 local StationData = require("station_data")
@@ -9,15 +10,17 @@ local Feature = {
 }
 
 local PATHS = {
-    WBPTextClass       = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
-    HorizontalBoxClass = "/Script/UMG.HorizontalBox",
-    VerticalBoxClass   = "/Script/UMG.VerticalBox",
+    WBPTextClass     = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
+    VerticalBoxClass = "/Script/UMG.VerticalBox",
+    BorderClass      = "/Script/UMG.Border",
+    SizeBoxClass     = "/Script/UMG.SizeBox",
 }
 
 local COLORS = {
-    Green = { R = 0.05402, G = 0.7042, B = 0.05281, A = 1.0 },
-    Amber = { R = 0.8917,  G = 0.6242, B = 0.0,     A = 1.0 },
-    Red   = { R = 0.5177,  G = 0.0,    B = 0.04122, A = 1.0 },
+    GoldAccent = { R = 0.94, G = 0.65, B = 0.05, A = 1.0 },
+    WhiteValue = { R = 0.95, G = 0.96, B = 0.98, A = 1.0 },
+    RedValue   = { R = 1.00, G = 0.35, B = 0.35, A = 1.0 },
+    GreenValue = { R = 0.30, G = 0.90, B = 0.40, A = 1.0 },
 }
 
 local InjectedDesigners = {} -- hudAddr -> { GenText, ConsText }
@@ -34,7 +37,6 @@ local function ComputePowerFromObject(obj)
     local gen, cons = 0.0, 0.0
     if not Core.IsValidObj(obj) then return gen, cons end
 
-    -- MachineObject methods / properties
     if obj.GetDisplayMaxPower then
         local okMax, maxP = pcall(function() return obj:GetDisplayMaxPower() end)
         local okCur, curP = pcall(function() return obj:GetDisplayPower() end)
@@ -72,18 +74,41 @@ local function ComputePowerFromObject(obj)
     return gen, cons
 end
 
+local function ResolveDesignerObject(designerHud)
+    if not Core.IsValidObj(designerHud) then return nil end
+
+    -- WBP_DesignerHUD_C stores ["Designer Pawn"] -> BPC_Designer -> Designer
+    local designer = nil
+    pcall(function()
+        local pawn = designerHud["Designer Pawn"]
+        if Core.IsValidObj(pawn) and Core.IsValidObj(pawn.BPC_Designer) then
+            designer = pawn.BPC_Designer.Designer
+        end
+    end)
+    if Core.IsValidObj(designer) then return designer end
+
+    pcall(function() designer = designerHud.Designer end)
+    if Core.IsValidObj(designer) then return designer end
+
+    local pc = Core.GetLocalPlayerController()
+    if Core.IsValidObj(pc) and Core.IsValidObj(pc.Pawn) then
+        pcall(function()
+            if Core.IsValidObj(pc.Pawn.BPC_Designer) then
+                designer = pc.Pawn.BPC_Designer.Designer
+            end
+        end)
+    end
+    return designer
+end
+
 local function ComputeDesignerPower(designerHud)
     local totalGen, totalCons = 0.0, 0.0
-    if not Core.IsValidObj(designerHud) then return totalGen, totalCons end
-
-    local designer = nil
-    pcall(function() designer = designerHud.Designer end)
+    local designer = ResolveDesignerObject(designerHud)
     if not Core.IsValidObj(designer) then return totalGen, totalCons end
 
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
     if Core.IsValidObj(frame) then
-        -- Prefer PowerGrid directly if available on the preview frame
         local pg = nil
         if frame.GetPowerGrid then
             pcall(function() pg = frame:GetPowerGrid() end)
@@ -107,77 +132,86 @@ local function ComputeDesignerPower(designerHud)
     return totalGen, totalCons
 end
 
-local function FindStatsListPanel(statsContainer)
-    if not Core.IsValidObj(statsContainer) then return nil end
-    local vBoxCls = Core.FindOrLoadClass("/Script/UMG.VerticalBox")
-    local gridCls = Core.FindOrLoadClass("/Script/UMG.GridPanel")
-
-    local function isListPanel(obj)
-        if not Core.IsValidObj(obj) then return false end
-        if Core.IsValidObj(vBoxCls) and obj:IsA(vBoxCls) then return true end
-        if Core.IsValidObj(gridCls) and obj:IsA(gridCls) then return true end
-        return false
-    end
-
-    local okChild, child = pcall(function() return statsContainer:GetChildAt(0) end)
-    if not okChild or not Core.IsValidObj(child) then return nil end
-    if isListPanel(child) then return child end
-
-    local okSub, sub = pcall(function() return child:GetChildAt(0) end)
-    if okSub and isListPanel(sub) then return sub end
-
-    return child
+local function CopyTextStyle(dstText, srcText, overrideColor)
+    if not Core.IsValidObj(dstText) then return end
+    pcall(function()
+        if Core.IsValidObj(srcText) then
+            dstText.Size = srcText.Size
+            dstText.Strength = srcText.Strength
+            dstText.Justification = srcText.Justification
+            if dstText.SetSize then dstText:SetSize(srcText.Size) end
+            if dstText.SetJustification then dstText:SetJustification(srcText.Justification) end
+        else
+            dstText.Size = 14
+            dstText.Justification = 1 -- Center
+            if dstText.SetSize then dstText:SetSize(14) end
+            if dstText.SetJustification then dstText:SetJustification(1) end
+        end
+        if overrideColor then
+            dstText.bOverrideColour = true
+            dstText.Colour = overrideColor
+            if dstText.SetColour then dstText:SetColour(overrideColor) end
+        elseif Core.IsValidObj(srcText) then
+            dstText.bOverrideColour = srcText.bOverrideColour
+            dstText.Colour = srcText.Colour
+            if dstText.SetColour then dstText:SetColour(srcText.Colour) end
+        end
+        if dstText.PreConstruct then dstText:PreConstruct(false) end
+    end)
 end
 
-local function CreateStatRow(hud, pc, outer, parentPanel, labelStr)
-    local rowBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, refLabelText, refValueText, labelStr)
+    local colVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local lblTxt = Core.CreateUserWidget(PATHS.WBPTextClass, hud, pc)
+    local divBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+    local divLine = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local valTxt = Core.CreateUserWidget(PATHS.WBPTextClass, hud, pc)
-    if not (Core.IsValidObj(rowBox) and Core.IsValidObj(lblTxt) and Core.IsValidObj(valTxt)) then
+
+    if not (Core.IsValidObj(colVBox) and Core.IsValidObj(lblTxt) and Core.IsValidObj(divBox)
+        and Core.IsValidObj(divLine) and Core.IsValidObj(valTxt)) then
         return nil
     end
 
-    pcall(function()
-        lblTxt:SetSize(12)
-        lblTxt:SetText(Core.MakeText(labelStr))
-        valTxt:SetSize(12)
-        valTxt:SetText(Core.MakeText("0 kW"))
-    end)
+    CopyTextStyle(lblTxt, refLabelText, COLORS.GoldAccent)
+    CopyTextStyle(valTxt, refValueText, COLORS.WhiteValue)
 
-    local s1 = rowBox:AddChildToHorizontalBox(lblTxt)
+    pcall(function()
+        lblTxt:SetText(Core.MakeText(labelStr))
+        valTxt:SetText(Core.MakeText("0 kW"))
+        divBox:SetHeightOverride(2.0)
+        divLine:SetBrushColor(COLORS.GoldAccent)
+    end)
+    divBox:AddChild(divLine)
+
+    local s1 = colVBox:AddChildToVerticalBox(lblTxt)
     if Core.IsValidObj(s1) then
         pcall(function()
-            s1:SetSize({ Value = 1.0, SizeRule = 1 })
-            s1:SetVerticalAlignment(2)
+            s1:SetHorizontalAlignment(2) -- HAlign_Center
+            s1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 })
         end)
     end
-    local s2 = rowBox:AddChildToHorizontalBox(valTxt)
+    local s2 = colVBox:AddChildToVerticalBox(divBox)
     if Core.IsValidObj(s2) then
         pcall(function()
-            s2:SetVerticalAlignment(2)
-            s2:SetPadding({ Left = 12.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            s2:SetHorizontalAlignment(0) -- HAlign_Fill
+            s2:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 })
         end)
     end
+    local s3 = colVBox:AddChildToVerticalBox(valTxt)
+    if Core.IsValidObj(s3) then
+        pcall(function() s3:SetHorizontalAlignment(2) end) -- HAlign_Center
+    end
 
-    local vBoxCls = Core.FindOrLoadClass("/Script/UMG.VerticalBox")
-    local gridCls = Core.FindOrLoadClass("/Script/UMG.GridPanel")
-
-    if Core.IsValidObj(vBoxCls) and parentPanel:IsA(vBoxCls) then
-        local okV, vSlot = pcall(function() return parentPanel:AddChildToVerticalBox(rowBox) end)
-        if okV and Core.IsValidObj(vSlot) then
-            pcall(function() vSlot:SetPadding({ Left = 0.0, Top = 4.0, Right = 0.0, Bottom = 0.0 }) end)
-        end
-    elseif Core.IsValidObj(gridCls) and parentPanel:IsA(gridCls) then
-        local rowIdx = 4
+    local hSlot = statsHBox:AddChildToHorizontalBox(colVBox)
+    if Core.IsValidObj(hSlot) then
         pcall(function()
-            local ch = parentPanel:GetAllChildren()
-            local cnt = 0
-            StationData.ForEachArray(ch, function() cnt = cnt + 1 end)
-            rowIdx = cnt
+            hSlot:SetVerticalAlignment(2) -- VAlign_Center
+            if Core.IsValidObj(refColVBox) and Core.IsValidObj(refColVBox.Slot) then
+                hSlot:SetPadding(refColVBox.Slot.Padding)
+            else
+                hSlot:SetPadding({ Left = 24.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            end
         end)
-        pcall(function() parentPanel:AddChildToGrid(rowBox, rowIdx, 0) end)
-    else
-        pcall(function() parentPanel:AddChild(rowBox) end)
     end
 
     return valTxt
@@ -189,15 +223,27 @@ local function RefreshDesignerPowerStats(hud)
     local st = InjectedDesigners[addr]
 
     if not st or not Core.IsValidObj(st.GenText) or not Core.IsValidObj(st.ConsText) then
-        local panel = FindStatsListPanel(hud.StatsContainer)
-        if not Core.IsValidObj(panel) then return end
+        local hullText = hud.HullText
+        if not Core.IsValidObj(hullText) then return end
+
+        local hullColVBox = hullText:GetParent()
+        if not Core.IsValidObj(hullColVBox) then return end
+
+        local statsHBox = hullColVBox:GetParent()
+        if not Core.IsValidObj(statsHBox) then return end
+
+        local hBoxCls = Core.FindOrLoadClass("/Script/UMG.HorizontalBox")
+        if Core.IsValidObj(hBoxCls) and not statsHBox:IsA(hBoxCls) then return end
+
+        local refLabelText = nil
+        pcall(function() refLabelText = hullColVBox:GetChildAt(0) end)
 
         local outer = Core.GetWidgetOuter(hud)
         local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
         local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
 
-        local genTxt = CreateStatRow(hud, pc, outer, panel, "Power Gen")
-        local consTxt = CreateStatRow(hud, pc, outer, panel, "Power Cons")
+        local genTxt = CreateDesignerStatColumn(hud, pc, outer, statsHBox, hullColVBox, refLabelText, hullText, "Power Generation")
+        local consTxt = CreateDesignerStatColumn(hud, pc, outer, statsHBox, hullColVBox, refLabelText, hullText, "Power Consumption")
         if not (Core.IsValidObj(genTxt) and Core.IsValidObj(consTxt)) then return end
 
         st = { GenText = genTxt, ConsText = consTxt }
@@ -208,12 +254,11 @@ local function RefreshDesignerPowerStats(hud)
     pcall(function()
         st.GenText:SetText(Core.MakeText(FormatPower(gen)))
         st.ConsText:SetText(Core.MakeText(FormatPower(cons)))
-        if st.GenText.SetColour then
-            st.GenText:SetColour(COLORS.Green)
-        end
-        if st.ConsText.SetColour then
-            st.ConsText:SetColour((cons > gen and cons > 0) and COLORS.Red or COLORS.Amber)
-        end
+        local consColor = (cons > gen and cons > 0) and COLORS.RedValue or COLORS.WhiteValue
+        st.ConsText.bOverrideColour = true
+        st.ConsText.Colour = consColor
+        if st.ConsText.SetColour then st.ConsText:SetColour(consColor) end
+        if st.ConsText.PreConstruct then st.ConsText:PreConstruct(false) end
     end)
 end
 
