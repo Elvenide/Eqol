@@ -348,11 +348,8 @@ local function AddItemRateChip(parentHBox, window, pc, outer, item, rate, tintCo
         itemW:SetItem(item)
         rateTxt:SetSize(12)
         rateTxt:SetText(Core.MakeText(FormatRate(rate)))
-        if tintColor then
-            rateTxt.bOverrideColour = true
-            rateTxt.Colour = tintColor
-            if rateTxt.SetColour then rateTxt:SetColour(tintColor) end
-            if rateTxt.PreConstruct then rateTxt:PreConstruct(false) end
+        if tintColor and Core.IsValidObj(rateTxt.TextBlock) then
+            rateTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = tintColor, ColorUseRule = 0 })
         end
     end)
 
@@ -411,14 +408,6 @@ local function OpenLogisticsWindow()
     local rootBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
     if not (Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
-
-    -- Keep WBP_WindowBase's native ContentBorder dark translucent background and flush alignment with the yellow header tab
-    pcall(function()
-        if Core.IsValidObj(win.ContentBorder) then
-            win.ContentBorder:SetBrushColor({ R = 0.012, G = 0.016, B = 0.024, A = 0.88 })
-            win.ContentBorder:SetPadding({ Left = 16.0, Top = 12.0, Right = 16.0, Bottom = 12.0 })
-        end
-    end)
 
     local attached = false
     if Core.IsValidObj(win.Content) then
@@ -500,12 +489,15 @@ local function OpenLogisticsWindow()
 
             if Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(statusBar) and Core.IsValidObj(statusSize) then
                 -- Determine bottleneck status: consuming faster than station produces?
+                -- Only flag items that are produced by a station machine (pRate > 0) or have a crafting recipe
                 local hasDeficit = false
                 for _, inp in ipairs(entry.Inputs) do
                     local k = GetItemKey(inp.Item)
                     local pRate = prodRates[k] or 0.0
                     local cRate = consRates[k] or 0.0
-                    if cRate > pRate + 0.001 then
+                    local hasRecipe = false
+                    pcall(function() hasRecipe = Core.IsValidObj(inp.Item.Recipe) end)
+                    if (pRate > 0.001 or hasRecipe) and cRate > pRate + 0.001 then
                         hasDeficit = true
                         break
                     end
