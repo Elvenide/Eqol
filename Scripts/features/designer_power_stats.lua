@@ -202,19 +202,71 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
         pcall(function() s3:SetHorizontalAlignment(2) end) -- HAlign_Center
     end
 
-    local hSlot = statsHBox:AddChildToHorizontalBox(colVBox)
-    if Core.IsValidObj(hSlot) then
+    local hBoxCls = Core.FindOrLoadClass("/Script/UMG.HorizontalBox")
+    local gridCls = Core.FindOrLoadClass("/Script/UMG.GridPanel")
+
+    if Core.IsValidObj(hBoxCls) and statsHBox:IsA(hBoxCls) then
+        local okH, hSlot = pcall(function() return statsHBox:AddChildToHorizontalBox(colVBox) end)
+        if okH and Core.IsValidObj(hSlot) then
+            pcall(function()
+                hSlot:SetVerticalAlignment(2) -- VAlign_Center
+                if Core.IsValidObj(refColVBox) and Core.IsValidObj(refColVBox.Slot) then
+                    hSlot:SetPadding(refColVBox.Slot.Padding)
+                else
+                    hSlot:SetPadding({ Left = 24.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                end
+            end)
+        end
+    elseif Core.IsValidObj(gridCls) and statsHBox:IsA(gridCls) then
+        local colIdx = 3
         pcall(function()
-            hSlot:SetVerticalAlignment(2) -- VAlign_Center
-            if Core.IsValidObj(refColVBox) and Core.IsValidObj(refColVBox.Slot) then
-                hSlot:SetPadding(refColVBox.Slot.Padding)
-            else
-                hSlot:SetPadding({ Left = 24.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-            end
+            local ch = statsHBox:GetAllChildren()
+            local cnt = 0
+            StationData.ForEachArray(ch, function() cnt = cnt + 1 end)
+            colIdx = cnt
         end)
+        local okG, gSlot = pcall(function() return statsHBox:AddChildToGrid(colVBox, 0, colIdx) end)
+        if okG and Core.IsValidObj(gSlot) then
+            pcall(function()
+                gSlot:SetVerticalAlignment(2)
+                gSlot:SetPadding({ Left = 24.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            end)
+        end
+    else
+        pcall(function() statsHBox:AddChild(colVBox) end)
     end
 
     return valTxt
+end
+
+local function FindStatsContainerPanel(hud)
+    local hullText = hud.HullText
+    local hullColVBox = Core.IsValidObj(hullText) and hullText:GetParent() or nil
+    local hBoxCls = Core.FindOrLoadClass("/Script/UMG.HorizontalBox")
+    local gridCls = Core.FindOrLoadClass("/Script/UMG.GridPanel")
+
+    -- Walk up from HullText to find the HorizontalBox or GridPanel holding the stat columns
+    local cur = hullColVBox
+    for _ = 1, 4 do
+        if not Core.IsValidObj(cur) then break end
+        local parent = nil
+        pcall(function() parent = cur:GetParent() end)
+        if Core.IsValidObj(parent) then
+            if (Core.IsValidObj(hBoxCls) and parent:IsA(hBoxCls)) or (Core.IsValidObj(gridCls) and parent:IsA(gridCls)) then
+                return parent, cur, hullText
+            end
+        end
+        cur = parent
+    end
+
+    -- Fallback: drill down from StatsContainer
+    if Core.IsValidObj(hud.StatsContainer) then
+        local okC, ch = pcall(function() return hud.StatsContainer:GetChildAt(0) end)
+        if okC and Core.IsValidObj(ch) then
+            return ch, hullColVBox, hullText
+        end
+    end
+    return nil, nil, nil
 end
 
 local function RefreshDesignerPowerStats(hud)
@@ -223,27 +275,20 @@ local function RefreshDesignerPowerStats(hud)
     local st = InjectedDesigners[addr]
 
     if not st or not Core.IsValidObj(st.GenText) or not Core.IsValidObj(st.ConsText) then
-        local hullText = hud.HullText
-        if not Core.IsValidObj(hullText) then return end
-
-        local hullColVBox = hullText:GetParent()
-        if not Core.IsValidObj(hullColVBox) then return end
-
-        local statsHBox = hullColVBox:GetParent()
-        if not Core.IsValidObj(statsHBox) then return end
-
-        local hBoxCls = Core.FindOrLoadClass("/Script/UMG.HorizontalBox")
-        if Core.IsValidObj(hBoxCls) and not statsHBox:IsA(hBoxCls) then return end
+        local statsPanel, refCol, hullText = FindStatsContainerPanel(hud)
+        if not Core.IsValidObj(statsPanel) then return end
 
         local refLabelText = nil
-        pcall(function() refLabelText = hullColVBox:GetChildAt(0) end)
+        if Core.IsValidObj(refCol) then
+            pcall(function() refLabelText = refCol:GetChildAt(0) end)
+        end
 
         local outer = Core.GetWidgetOuter(hud)
         local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
         local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
 
-        local genTxt = CreateDesignerStatColumn(hud, pc, outer, statsHBox, hullColVBox, refLabelText, hullText, "Power Generation")
-        local consTxt = CreateDesignerStatColumn(hud, pc, outer, statsHBox, hullColVBox, refLabelText, hullText, "Power Consumption")
+        local genTxt = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Generation")
+        local consTxt = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power Consumption")
         if not (Core.IsValidObj(genTxt) and Core.IsValidObj(consTxt)) then return end
 
         st = { GenText = genTxt, ConsText = consTxt }
