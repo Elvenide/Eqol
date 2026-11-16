@@ -136,27 +136,15 @@ local function CopyTextStyle(dstText, srcText, overrideColor)
     if not Core.IsValidObj(dstText) then return end
     pcall(function()
         if Core.IsValidObj(srcText) then
-            dstText.Size = srcText.Size
-            dstText.Strength = srcText.Strength
-            dstText.Justification = srcText.Justification
             if dstText.SetSize then dstText:SetSize(srcText.Size) end
             if dstText.SetJustification then dstText:SetJustification(srcText.Justification) end
         else
-            dstText.Size = 14
-            dstText.Justification = 1 -- Center
             if dstText.SetSize then dstText:SetSize(14) end
             if dstText.SetJustification then dstText:SetJustification(1) end
         end
-        if overrideColor then
-            dstText.bOverrideColour = true
-            dstText.Colour = overrideColor
-            if dstText.SetColour then dstText:SetColour(overrideColor) end
-        elseif Core.IsValidObj(srcText) then
-            dstText.bOverrideColour = srcText.bOverrideColour
-            dstText.Colour = srcText.Colour
-            if dstText.SetColour then dstText:SetColour(srcText.Colour) end
+        if overrideColor and Core.IsValidObj(dstText.TextBlock) then
+            dstText.TextBlock:SetColorAndOpacity({ SpecifiedColor = overrideColor, ColorUseRule = 0 })
         end
-        if dstText.PreConstruct then dstText:PreConstruct(false) end
     end)
 end
 
@@ -300,10 +288,9 @@ local function RefreshDesignerPowerStats(hud)
         st.GenText:SetText(Core.MakeText(FormatPower(gen)))
         st.ConsText:SetText(Core.MakeText(FormatPower(cons)))
         local consColor = (cons > gen and cons > 0) and COLORS.RedValue or COLORS.WhiteValue
-        st.ConsText.bOverrideColour = true
-        st.ConsText.Colour = consColor
-        if st.ConsText.SetColour then st.ConsText:SetColour(consColor) end
-        if st.ConsText.PreConstruct then st.ConsText:PreConstruct(false) end
+        if Core.IsValidObj(st.ConsText.TextBlock) then
+            st.ConsText.TextBlock:SetColorAndOpacity({ SpecifiedColor = consColor, ColorUseRule = 0 })
+        end
     end)
 end
 
