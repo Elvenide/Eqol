@@ -4,8 +4,8 @@ View your entire space station floor-by-floor in 2D, toggle item icons, remotely
 
 ## Opening the Station Map
 
-1. Open the regular **Map** UI.
-2. Click the **Station** button in the top view-selector bar.
+- Press **`N`** (default) while on foot in a space station to toggle the **Station Map** window.
+- You can rebind this key in **Settings → Controls** under **Station Map** (stored in `Eqol/config.json` as `"StationMapKey"`).
 
 ## Features
 

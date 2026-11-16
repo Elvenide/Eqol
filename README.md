@@ -11,7 +11,7 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 ## Features
 
 - **[Power Overview Hotkey & Summary Bars](docs/power-overview.md)** — Open the Power Overview from anywhere in a station or ship (`P`, rebindable in Settings → Controls) and view Production, Consumption, and Power Satisfaction progress bars at a glance.
-- **[Full Station Map UI](docs/station-map.md)** — Floor-by-floor 2D station view accessible from the Map UI, with conveyor/machine item icons, remote machine building (`B`), and single/multi-machine copy-and-paste.
+- **[Full Station Map UI](docs/station-map.md)** — Floor-by-floor 2D station view (`N`, rebindable in Settings → Controls), with conveyor/machine item icons, remote machine building (`B`), and single/multi-machine copy-and-paste.
 - **[Logistics UI Screen](docs/logistics.md)** — Icon-heavy station storage overview and machine production/consumption rate monitor with bottleneck indicators (`L`, rebindable in Settings → Controls, with bottom-right HUD indicator).
 - **[Designer Power Stats](docs/designer-power-stats.md)** — Displays total Power Generation and Power Consumption alongside Hull and Mass in the Ship Designer and Station Designer.
 - **[Cinematic Freecam](docs/cinematic-freecam.md)** — Single keybind (`F9`, rebindable) to toggle Spectator Mode and Hide HUD together.

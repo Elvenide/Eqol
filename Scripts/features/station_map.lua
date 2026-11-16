@@ -622,6 +622,25 @@ end
 -- Window Open / Close & Toolbar Actions
 --------------------------------------------------------------------------------
 
+local function SetStationMapCursorMode(pc, win, active)
+    if not Core.IsValidObj(pc) then return end
+    pcall(function() pc.bShowMouseCursor = active end)
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if Core.IsValidObj(widgetSub) then
+        pcall(function() widgetSub:SetCursorVisible(active) end)
+    end
+    local wbl = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
+    if Core.IsValidObj(wbl) then
+        pcall(function()
+            if active then
+                wbl:SetInputMode_GameAndUIEx(pc, win, 0, false, false)
+            else
+                wbl:SetInputMode_GameOnly(pc, false)
+            end
+        end)
+    end
+end
+
 local function CloseStationMap()
     InteractionMode = "Select"
     PendingBuildable = nil
@@ -632,6 +651,7 @@ local function CloseStationMap()
     end
     ActiveMapWin = nil
     MapUI = nil
+    SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
 end
 
 local function CopySelectedMachines()
@@ -726,6 +746,7 @@ local function OpenStationMap()
         win:SetWindowName(Core.MakeText("Station Map"))
         win:AddToViewport(50)
     end)
+    SetStationMapCursorMode(pc, win, true)
 
     -- Root layout inside WBP_WindowBase.Content
     local rootVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
@@ -879,63 +900,12 @@ local function OpenStationMap()
     RefreshStationMapCanvas()
 end
 
---------------------------------------------------------------------------------
--- WBP_MapHUD_C "Station" Button Injection
---------------------------------------------------------------------------------
-
-local function EnsureStationButtonOnMapHud(mapHud)
-    if not Core.IsValidObj(mapHud) then return end
-    local addr = mapHud:GetAddress()
-    if Core.IsValidObj(MapHudInjected[addr]) then return end
-
-    local container = mapHud.ViewSelectContainer
-    if not Core.IsValidObj(container) then return end
-
-    local okPC, owningPC = pcall(function() return mapHud:GetOwningPlayer() end)
-    local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
-
-    local outer = Core.GetWidgetOuter(mapHud)
-    local sBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-    local btn = Core.CreateUserWidget(PATHS.WBPButtonClass, mapHud, pc)
-    local lbl = Core.CreateUserWidget(PATHS.WBPTextClass, mapHud, pc)
-    if not (Core.IsValidObj(sBox) and Core.IsValidObj(btn) and Core.IsValidObj(lbl)) then return end
-
-    pcall(function()
-        sBox:SetWidthOverride(110.0)
-        sBox:SetHeightOverride(34.0)
-        lbl:SetSize(13)
-        lbl:SetText(Core.MakeText("Station"))
-        if Core.IsValidObj(btn.Content) then
-            btn.Content:AddChild(lbl)
-        end
-        btn:SetContentForSlot(FName("Content"), lbl)
-        btn:SetVisibility(0)
-        sBox:SetVisibility(0)
-    end)
-    sBox:AddChild(btn)
-
-    HookWBPButton(btn, OpenStationMap)
-
-    local colIdx = 3
-    pcall(function()
-        local children = container:GetAllChildren()
-        if children then
-            local count = 0
-            StationData.ForEachArray(children, function() count = count + 1 end)
-            colIdx = count
-        end
-    end)
-
-    local slot = container:AddChildToGrid(sBox, 0, colIdx)
-    if Core.IsValidObj(slot) and Core.IsValidObj(mapHud.SystemButton) and Core.IsValidObj(mapHud.SystemButton.Slot) then
-        pcall(function()
-            slot:SetPadding(mapHud.SystemButton.Slot.Padding)
-            slot:SetVerticalAlignment(2)
-        end)
+local function ToggleStationMap()
+    if Core.IsValidObj(ActiveMapWin) then
+        CloseStationMap()
+    else
+        OpenStationMap()
     end
-
-    MapHudInjected[addr] = btn
-    Core.Log("Injected Station Map button into WBP_MapHUD_C")
 end
 
 --------------------------------------------------------------------------------
@@ -987,13 +957,14 @@ end
 -- Feature Lifecycle
 --------------------------------------------------------------------------------
 
-Feature.WatchWidgets = {
-    WBP_MapHUD_C = function(mapHud)
-        EnsureStationButtonOnMapHud(mapHud)
-    end,
-}
-
 function Feature.Init()
+    Core.RegisterConfigurableKeybind({
+        ConfigKey   = "StationMapKey",
+        DefaultKey  = "N",
+        MappingName = "Eqol_StationMap",
+        Label       = "Station Map",
+        OnPress     = ToggleStationMap,
+    })
     EnsureMapKeybinds()
     StationData.OnIconVisibilityChanged(function()
         if Core.IsValidObj(ActiveMapWin) then
@@ -1004,12 +975,12 @@ end
 
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
-        "MapHUD_OnMapOpened",
-        "/Game/Blueprints/Widgets/HUDs/Map/WBP_MapHUD.WBP_MapHUD_C:OnMapOpened",
+        "WindowBase_CloseWindow_StationMap",
+        "/Game/Blueprints/Widgets/Basic/WBP_WindowBase.WBP_WindowBase_C:BndEvt__WBP_WindowBase_WBP_WindowHeader_K2Node_ComponentBoundEvent_1_CloseWindow__DelegateSignature",
         function(Context)
-            local mapHud = Context:get()
-            if Core.IsValidObj(mapHud) then
-                EnsureStationButtonOnMapHud(mapHud)
+            local w = Context:get()
+            if Core.IsValidObj(w) and Core.IsValidObj(ActiveMapWin) and w:GetAddress() == ActiveMapWin:GetAddress() then
+                CloseStationMap()
             end
         end
     )
@@ -1035,14 +1006,6 @@ function Feature.RegisterHooks()
             end
         end
     )
-
-    -- Inject into any already-constructed WBP_MapHUD_C
-    local ok, list = pcall(FindAllOf, "WBP_MapHUD_C")
-    if ok and list then
-        for _, m in ipairs(list) do
-            if Core.IsValidObj(m) then EnsureStationButtonOnMapHud(m) end
-        end
-    end
 end
 
 function Feature.PruneCaches()
