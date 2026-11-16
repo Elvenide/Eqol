@@ -58,7 +58,7 @@ local function SpawnFreecamActor(pc)
 
     local actor = Core.SpawnActor(pc, "/Script/Engine.CameraActor", camLoc, camRot)
     if Core.IsValidObj(actor) then
-        pcall(function() actor:K2_SetActorRotation(camRot, false) end)
+        pcall(function() actor:K2_SetActorLocationAndRotation(camLoc, camRot, false, {}, true) end)
     end
     return actor
 end
@@ -106,7 +106,7 @@ local function StartFreecamTick()
                         Y = curLoc.Y + (fwd.Y * moveF + right.Y * moveR + up.Y * moveU) * step,
                         Z = curLoc.Z + (fwd.Z * moveF + right.Z * moveR + up.Z * moveU) * step,
                     }
-                    FreecamActor:K2_SetActorLocation(newLoc, false, nil, true)
+                    FreecamActor:K2_SetActorLocation(newLoc, false, {}, true)
                 end
             end)
         end
