@@ -8,11 +8,35 @@ local Feature = {
 }
 
 local FreecamActive = false
+local LoggedSpectatorSig = false
+
+local function LogSpectatorReflection(pc)
+    if LoggedSpectatorSig or not Core.IsValidObj(pc) then return end
+    LoggedSpectatorSig = true
+    pcall(function()
+        local cls = pc:GetClass()
+        if Core.IsValidObj(cls) and cls.ForEachFunction then
+            cls:ForEachFunction(function(fn)
+                local n = fn:GetFName():ToString()
+                if n == "SetSpectatorMode" or n == "UpdateSpectatorTransform" then
+                    local params = {}
+                    if fn.ForEachProperty then
+                        fn:ForEachProperty(function(prop)
+                            params[#params + 1] = prop:GetFName():ToString() .. ":" .. prop:GetClass():GetFName():ToString()
+                        end)
+                    end
+                    Core.Log("Freecam Sig [" .. n .. "]: " .. table.concat(params, ", "))
+                end
+            end)
+        end
+    end)
+end
 
 local function ToggleCinematicFreecam()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
+    LogSpectatorReflection(pc)
     FreecamActive = not FreecamActive
 
     pcall(function() pc:SetSpectatorMode(FreecamActive) end)
