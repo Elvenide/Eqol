@@ -23,6 +23,7 @@ Core.RegisterFeature(require("features.station_minimap"))
 Core.RegisterFeature(require("features.station_map"))
 Core.RegisterFeature(require("features.logistics"))
 Core.RegisterFeature(require("features.designer_power_stats"))
+Core.RegisterFeature(require("features.cinematic_freecam"))
 
 -- Startup
 Core.InitAll()
