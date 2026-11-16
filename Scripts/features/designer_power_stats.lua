@@ -146,6 +146,7 @@ local function ComputeDesignerPower(designerHud)
     local objGen, objCons = 0.0, 0.0
 
     if isStationFrame then
+        Core.Log("DesignerPowerStats: calling GetPowerGrid")
         if frame.GetPowerGrid then
             local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
             if okPG and Core.IsValidObj(pg) then
@@ -153,17 +154,7 @@ local function ComputeDesignerPower(designerHud)
                 pgCons = Core.GetFPFloat(pg.MaxConsumption)
             end
         end
-
-        local seen = {}
-        local objects = {}
-        local okP, pArr = pcall(function() return frame.Machines end)
-        if okP and pArr then CollectObjectsFromArray(pArr, seen, objects) end
-
-        for _, obj in ipairs(objects) do
-            local g, c = ComputePowerFromObject(obj)
-            objGen = objGen + g
-            objCons = objCons + c
-        end
+        Core.Log(string.format("DesignerPowerStats: GetPowerGrid done (gen=%.1f cons=%.1f)", pgGen, pgCons))
     end
 
     return math.max(objGen, pgGen), math.max(objCons, pgCons)
