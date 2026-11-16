@@ -346,4 +346,307 @@ function Core.DispatchWidgetConstructed(widget, clsName)
     end
 end
 
+--------------------------------------------------------------------------------
+-- Reusable Configurable Keybind & Settings -> Controls Row Helper
+--------------------------------------------------------------------------------
+
+local UE_TO_UE4SS_KEY = {
+    BackSpace         = Key and Key.BACKSPACE,
+    Tab               = Key and Key.TAB,
+    Enter             = Key and Key.RETURN,
+    Return            = Key and Key.RETURN,
+    Pause             = Key and Key.PAUSE,
+    CapsLock          = Key and Key.CAPS_LOCK,
+    Escape            = Key and Key.ESCAPE,
+    SpaceBar          = Key and Key.SPACE,
+    PageUp            = Key and Key.PAGE_UP,
+    PageDown          = Key and Key.PAGE_DOWN,
+    End               = Key and Key.END,
+    Home              = Key and Key.HOME,
+    Left              = Key and Key.LEFT_ARROW,
+    Up                = Key and Key.UP_ARROW,
+    Right             = Key and Key.RIGHT_ARROW,
+    Down              = Key and Key.DOWN_ARROW,
+    Insert            = Key and Key.INS,
+    Delete            = Key and Key.DEL,
+    Zero              = Key and Key.ZERO,
+    One               = Key and Key.ONE,
+    Two               = Key and Key.TWO,
+    Three             = Key and Key.THREE,
+    Four              = Key and Key.FOUR,
+    Five              = Key and Key.FIVE,
+    Six               = Key and Key.SIX,
+    Seven             = Key and Key.SEVEN,
+    Eight             = Key and Key.EIGHT,
+    Nine              = Key and Key.NINE,
+    NumPadZero        = Key and Key.NUM_ZERO,
+    NumPadOne         = Key and Key.NUM_ONE,
+    NumPadTwo         = Key and Key.NUM_TWO,
+    NumPadThree       = Key and Key.NUM_THREE,
+    NumPadFour        = Key and Key.NUM_FOUR,
+    NumPadFive        = Key and Key.NUM_FIVE,
+    NumPadSix         = Key and Key.NUM_SIX,
+    NumPadSeven       = Key and Key.NUM_SEVEN,
+    NumPadEight       = Key and Key.NUM_EIGHT,
+    NumPadNine        = Key and Key.NUM_NINE,
+    Semicolon         = Key and Key.OEM_ONE,
+    Equals            = Key and Key.OEM_PLUS,
+    Comma             = Key and Key.OEM_COMMA,
+    Hyphen            = Key and Key.OEM_MINUS,
+    Period            = Key and Key.OEM_PERIOD,
+    Slash             = Key and Key.OEM_TWO,
+    Tilde             = Key and Key.OEM_THREE,
+    LeftBracket       = Key and Key.OEM_FOUR,
+    Backslash         = Key and Key.OEM_FIVE,
+    RightBracket      = Key and Key.OEM_SIX,
+    Apostrophe        = Key and Key.OEM_SEVEN,
+}
+
+local RegisteredKeybinds = {}   -- mappingName -> bindingState
+local SharedKeyHandlers = {}    -- ue4ssKey -> true
+local SharedRemapHooksDone = false
+
+local function ResolveUE4SSKey(keyName)
+    if not keyName or keyName == "" or keyName == "None" or not Key then return nil end
+    if UE_TO_UE4SS_KEY[keyName] then return UE_TO_UE4SS_KEY[keyName] end
+    local upper = string.upper(keyName)
+    return Key[upper]
+end
+
+local function MakeInputChord(keyName)
+    local resolvedName = (keyName and keyName ~= "") and keyName or "None"
+    return {
+        Key = { KeyName = FName(resolvedName) },
+        bShift = false,
+        bCtrl = false,
+        bAlt = false,
+        bCmd = false,
+    }
+end
+
+function Core.IsSelectingAnyRegisteredKeybind()
+    for _, bs in pairs(RegisteredKeybinds) do
+        for addr, row in pairs(bs.TrackedRows) do
+            if Core.IsValidObj(row) then
+                local sel = row.InputKeySelector
+                if Core.IsValidObj(sel) then
+                    local okS, selecting = pcall(function() return sel:GetIsSelectingKey() end)
+                    if okS and selecting then return true end
+                end
+            else
+                bs.TrackedRows[addr] = nil
+            end
+        end
+    end
+    return false
+end
+
+local function SyncKeybindRow(bs, row)
+    if not Core.IsValidObj(row) then return end
+    row.MappingName = FName(bs.MappingName)
+    local lbl = Core.MakeText(bs.Label)
+    row.InputActionText = lbl
+    if Core.IsValidObj(row.WBP_SettingEntryBody) then
+        pcall(function() row.WBP_SettingEntryBody:SetText(lbl) end)
+    end
+    if Core.IsValidObj(row.InputKeySelector) then
+        pcall(function() row.InputKeySelector:SetSelectedKey(MakeInputChord(Core.Config[bs.ConfigKey])) end)
+    end
+end
+
+local function ApplyKeybindState(bs, keyName, shouldSave)
+    local normalized = (keyName and keyName ~= "") and keyName or "None"
+    Core.Config[bs.ConfigKey] = normalized
+    if shouldSave then Core.WriteConfig() end
+    if type(bs.OnChanged) == "function" then
+        pcall(bs.OnChanged, normalized)
+    end
+
+    local ue4ssKey = ResolveUE4SSKey(normalized)
+    bs.ActiveUe4ssKey = ue4ssKey
+    bs.FallbackWasDown = false
+
+    if ue4ssKey ~= nil then
+        if not SharedKeyHandlers[ue4ssKey] then
+            SharedKeyHandlers[ue4ssKey] = true
+            RegisterKeyBind(ue4ssKey, function()
+                for _, entry in pairs(RegisteredKeybinds) do
+                    if entry.ActiveUe4ssKey == ue4ssKey then
+                        ExecuteInGameThread(function()
+                            if not Core.IsSelectingAnyRegisteredKeybind()
+                                and not Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
+                                and not Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
+                                and not Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
+                            then
+                                entry.OnPress()
+                            end
+                        end)
+                    end
+                end
+            end)
+        end
+    elseif not bs.FallbackPollActive and normalized ~= "None" then
+        bs.FallbackPollActive = true
+        local function PollTick()
+            local cur = Core.Config[bs.ConfigKey]
+            if bs.ActiveUe4ssKey ~= nil or cur == "None" or cur == "" then
+                bs.FallbackPollActive = false
+                return
+            end
+            local pc = Core.GetLocalPlayerController()
+            if Core.IsValidObj(pc) then
+                local okD, down = pcall(function() return pc:IsInputKeyDown({ KeyName = FName(cur) }) end)
+                if okD and down and not bs.FallbackWasDown then
+                    bs.FallbackWasDown = true
+                    bs.OnPress()
+                elseif not okD or not down then
+                    bs.FallbackWasDown = false
+                end
+            end
+            ExecuteInGameThreadWithDelay(33, PollTick)
+        end
+        ExecuteInGameThreadWithDelay(33, PollTick)
+    end
+end
+
+local function EnsureMenuKeybindRows(menu)
+    if not Core.IsValidObj(menu) then return end
+    local scrollBox = menu.ControlSettings
+    if not Core.IsValidObj(scrollBox) then return end
+    local menuAddr = menu:GetAddress()
+    local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
+
+    for _, bs in pairs(RegisteredKeybinds) do
+        local existing = bs.MenuRows[menuAddr]
+        if Core.IsValidObj(existing) then
+            local okHas, hasChild = pcall(function() return scrollBox:HasChild(existing) end)
+            if okHas and hasChild then
+                SyncKeybindRow(bs, existing)
+                goto continue_kb
+            end
+        end
+
+        local row = Core.CreateUserWidget("/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C", menu, pc)
+        if Core.IsValidObj(row) then
+            bs.MenuRows[menuAddr] = row
+            bs.TrackedRows[row:GetAddress()] = row
+            row.MappingName = FName(bs.MappingName)
+            local slot = scrollBox:AddChild(row)
+            if Core.IsValidObj(slot) then
+                local refRow = Core.IsValidObj(menu.StatusWindow) and menu.StatusWindow or menu.Statistics
+                if Core.IsValidObj(refRow) and Core.IsValidObj(refRow.Slot) then
+                    pcall(function()
+                        slot:SetPadding(refRow.Slot.Padding)
+                        slot:SetHorizontalAlignment(refRow.Slot.HorizontalAlignment)
+                        slot:SetVerticalAlignment(refRow.Slot.VerticalAlignment)
+                    end)
+                end
+            end
+            SyncKeybindRow(bs, row)
+        end
+        ::continue_kb::
+    end
+end
+
+function Core.EnsureKeybindHooks()
+    if not SharedRemapHooksDone then
+        SharedRemapHooksDone = true
+        WatchedWidgetClasses["WBP_SettingsMenu_C"] = WatchedWidgetClasses["WBP_SettingsMenu_C"] or {}
+        table.insert(WatchedWidgetClasses["WBP_SettingsMenu_C"], function(menu)
+            EnsureMenuKeybindRows(menu)
+        end)
+    end
+
+    Core.TryRegisterHook(
+        "Core_SettingsMenu_Setup",
+        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Setup",
+        function(Context)
+            local menu = Context:get()
+            if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_SettingsMenu_Refresh",
+        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Refresh",
+        function(Context)
+            local menu = Context:get()
+            if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_InputRemap_OnKeySelected",
+        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_InputKeySelector_K2Node_ComponentBoundEvent_0_OnKeySelected__DelegateSignature",
+        function(Context, SelectedKeyParam)
+            local row = Context:get()
+            if not Core.IsValidObj(row) then return end
+            local okN, mName = pcall(function() return row.MappingName:ToString() end)
+            local bs = okN and RegisteredKeybinds[mName] or nil
+            if not bs then return end
+
+            local okKey, keyName = pcall(function()
+                local chord = (type(SelectedKeyParam.get) == "function") and SelectedKeyParam:get() or SelectedKeyParam
+                return chord.Key.KeyName:ToString()
+            end)
+            if okKey and keyName and keyName ~= "" and keyName ~= "None" then
+                ApplyKeybindState(bs, keyName, true)
+            end
+            SyncKeybindRow(bs, row)
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_InputRemap_Revert",
+        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_RevertToDefaultButton_K2Node_ComponentBoundEvent_1_OnButtonPressedEvent__DelegateSignature",
+        function(Context)
+            local row = Context:get()
+            if not Core.IsValidObj(row) then return end
+            local okN, mName = pcall(function() return row.MappingName:ToString() end)
+            local bs = okN and RegisteredKeybinds[mName] or nil
+            if not bs then return end
+            ApplyKeybindState(bs, bs.DefaultKey, true)
+            SyncKeybindRow(bs, row)
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_InputRemap_Clear",
+        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_ClearMappingButton_K2Node_ComponentBoundEvent_2_OnButtonPressedEvent__DelegateSignature",
+        function(Context)
+            local row = Context:get()
+            if not Core.IsValidObj(row) then return end
+            local okN, mName = pcall(function() return row.MappingName:ToString() end)
+            local bs = okN and RegisteredKeybinds[mName] or nil
+            if not bs then return end
+            ApplyKeybindState(bs, "None", true)
+            SyncKeybindRow(bs, row)
+        end
+    )
+
+    local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
+    if okMenus and menus then
+        for _, m in ipairs(menus) do
+            if Core.IsValidObj(m) then EnsureMenuKeybindRows(m) end
+        end
+    end
+end
+
+function Core.RegisterConfigurableKeybind(opts)
+    local bs = {
+        ConfigKey = opts.ConfigKey,
+        DefaultKey = opts.DefaultKey,
+        MappingName = opts.MappingName,
+        Label = opts.Label,
+        OnPress = opts.OnPress,
+        OnChanged = opts.OnChanged,
+        ActiveUe4ssKey = nil,
+        FallbackPollActive = false,
+        FallbackWasDown = false,
+        MenuRows = {},
+        TrackedRows = {},
+    }
+    RegisteredKeybinds[bs.MappingName] = bs
+    Core.ReadConfig({ [bs.ConfigKey] = bs.DefaultKey })
+    ApplyKeybindState(bs, Core.Config[bs.ConfigKey], false)
+    Core.EnsureKeybindHooks()
+    return bs
+end
+
 return Core
