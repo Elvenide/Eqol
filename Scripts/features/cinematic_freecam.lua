@@ -8,54 +8,44 @@ local Feature = {
 }
 
 local FreecamActive = false
-local LoggedSettingsSpectator = false
+local HookedSpecFn = false
 
-local function LogSpectatorDetails(pc)
-    if LoggedSettingsSpectator or not Core.IsValidObj(pc) then return end
-    LoggedSettingsSpectator = true
-    pcall(function()
-        local cls = pc:GetClass()
-        if Core.IsValidObj(cls) and cls.ForEachProperty then
-            cls:ForEachProperty(function(prop)
-                local n = prop:GetFName():ToString()
-                if string.find(n, "Spectat", 1, true) then
-                    Core.Log("Freecam Reflection [PC prop]: " .. n)
-                end
-            end)
-        end
-        local menuCls = StaticFindObject("/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C")
-        if Core.IsValidObj(menuCls) then
-            if menuCls.ForEachFunction then
-                menuCls:ForEachFunction(function(fn)
-                    local n = fn:GetFName():ToString()
-                    if string.find(n, "Spectat", 1, true) or string.find(n, "HUD", 1, true) then
-                        Core.Log("Freecam Reflection [SettingsMenu fn]: " .. n)
-                    end
-                end)
-            end
-            if menuCls.ForEachProperty then
-                menuCls:ForEachProperty(function(prop)
-                    local n = prop:GetFName():ToString()
-                    if string.find(n, "Spectat", 1, true) or string.find(n, "HUD", 1, true) then
-                        Core.Log("Freecam Reflection [SettingsMenu prop]: " .. n)
-                    end
-                end)
-            end
-        end
-    end)
+local function EnsureSpecHook(pc)
+    if HookedSpecFn or not Core.IsValidObj(pc) then return end
+    local cls = pc:GetClass()
+    if not Core.IsValidObj(cls) then return end
+    local full = cls:GetFullName()
+    local clsPath = full and full:match("^Class (.+)$") or nil
+    if not clsPath then return end
+    local fnPath = clsPath .. ":SetSpectatorMode"
+    if Core.TryRegisterHook("Freecam_WatchSetSpectator", fnPath, function(Context, bNew)
+        local ctrl = Context:get()
+        local val = nil
+        pcall(function() val = (type(bNew.get) == "function") and bNew:get() or bNew end)
+        local pawnValid = Core.IsValidObj(ctrl) and Core.IsValidObj(ctrl.SpectatorModePawn)
+        Core.Log(string.format("Freecam Hook [SetSpectatorMode] bNew=%s SpectatorModePawn=%s", tostring(val), tostring(pawnValid)))
+    end) then
+        HookedSpecFn = true
+    end
 end
 
 local function ToggleCinematicFreecam()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
-    LogSpectatorDetails(pc)
+    EnsureSpecHook(pc)
     FreecamActive = not FreecamActive
 
     pcall(function() pc:SetSpectatorMode(FreecamActive) end)
     pcall(function() pc:UpdateSpectatorTransform() end)
     pcall(function() pc:SetHUDHidden(FreecamActive) end)
-    Core.Log("Cinematic Freecam: " .. (FreecamActive and "ON" or "OFF"))
+    local pawnValid = Core.IsValidObj(pc.SpectatorModePawn)
+    Core.Log("Cinematic Freecam: " .. (FreecamActive and "ON" or "OFF") .. " (SpectatorModePawn=" .. tostring(pawnValid) .. ")")
+end
+
+function Feature.RegisterHooks()
+    local pc = Core.GetLocalPlayerController()
+    if Core.IsValidObj(pc) then EnsureSpecHook(pc) end
 end
 
 function Feature.Init()
