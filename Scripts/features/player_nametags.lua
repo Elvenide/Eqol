@@ -129,52 +129,60 @@ local function UpdateNametags()
 
     local players = StationData.GetAllPlayersInfo(pc)
 
-    local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-    if not okHuds or not huds then return end
+    if next(HudOverlays) == nil then
+        local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
+        if okHuds and huds then
+            for _, hud in ipairs(huds) do
+                if Core.IsValidObj(hud) then
+                    EnsureOverlayOnHud(hud)
+                end
+            end
+        end
+    end
 
-    for _, hud in ipairs(huds) do
-        if Core.IsValidObj(hud) then
-            local st = EnsureOverlayOnHud(hud)
-            if st then
-                local okVis, hudVis = pcall(function() return hud:IsVisible() end)
-                local count = 0
+    for addr, st in pairs(HudOverlays) do
+        local hud = st.Hud
+        if Core.IsValidObj(hud) and Core.IsValidObj(st.Canvas) then
+            local okVis, hudVis = pcall(function() return hud:IsVisible() end)
+            local count = 0
 
-                if okVis and hudVis then
-                    for _, p in ipairs(players) do
-                        if p.HasPos and not Core.IsValidObj(p.PilotedShip) then
-                            local screenPos = {}
-                            local okProj, projected = pcall(function()
-                                return layoutLib:ProjectWorldLocationToWidgetPosition(
-                                    pc,
-                                    { X = p.X, Y = p.Y, Z = p.Z + 115.0 },
-                                    screenPos,
-                                    false
-                                )
-                            end)
-                            if okProj and projected and screenPos.X and screenPos.Y then
-                                count = count + 1
-                                local tag = GetOrCreateTagWidget(st, count)
-                                if tag then
-                                    local statusStr = p.IsOnline and "Online" or "Offline"
-                                    local dotCol = p.IsOnline and COLORS.Online or COLORS.Offline
-                                    pcall(function()
-                                        tag.Dot:SetBrushColor(dotCol)
-                                        tag.NameText:SetText(Core.MakeText(string.format("%s (%s)", p.Name, statusStr)))
-                                        tag.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
-                                        tag.Root:SetVisibility(0)
-                                    end)
-                                end
+            if okVis and hudVis then
+                for _, p in ipairs(players) do
+                    if p.HasPos and not Core.IsValidObj(p.PilotedShip) then
+                        local screenPos = { X = 0.0, Y = 0.0 }
+                        local okProj, projected = pcall(function()
+                            return layoutLib:ProjectWorldLocationToWidgetPosition(
+                                pc,
+                                { X = p.X, Y = p.Y, Z = p.Z + 115.0 },
+                                screenPos,
+                                false
+                            )
+                        end)
+                        if okProj and projected and screenPos.X and screenPos.Y then
+                            count = count + 1
+                            local tag = GetOrCreateTagWidget(st, count)
+                            if tag then
+                                local statusStr = p.IsOnline and "Online" or "Offline"
+                                local dotCol = p.IsOnline and COLORS.Online or COLORS.Offline
+                                pcall(function()
+                                    tag.Dot:SetBrushColor(dotCol)
+                                    tag.NameText:SetText(Core.MakeText(string.format("%s (%s)", p.Name, statusStr)))
+                                    tag.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
+                                    tag.Root:SetVisibility(0)
+                                end)
                             end
                         end
                     end
                 end
+            end
 
-                for i = count + 1, #st.Pool do
-                    if Core.IsValidObj(st.Pool[i].Root) then
-                        pcall(function() st.Pool[i].Root:SetVisibility(1) end)
-                    end
+            for i = count + 1, #st.Pool do
+                if Core.IsValidObj(st.Pool[i].Root) then
+                    pcall(function() st.Pool[i].Root:SetVisibility(1) end)
                 end
             end
+        else
+            HudOverlays[addr] = nil
         end
     end
 end
@@ -185,9 +193,9 @@ local function StartPoll()
 
     local function Tick()
         pcall(UpdateNametags)
-        ExecuteInGameThreadWithDelay(33, Tick)
+        ExecuteInGameThreadWithDelay(100, Tick)
     end
-    ExecuteInGameThreadWithDelay(33, Tick)
+    ExecuteInGameThreadWithDelay(100, Tick)
 end
 
 Feature.WatchWidgets = {

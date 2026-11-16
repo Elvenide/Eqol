@@ -197,48 +197,56 @@ local function UpdateElevatorLabels()
         end
     end
 
-    local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-    if not okHuds or not huds then return end
+    if next(HudOverlays) == nil then
+        local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
+        if okHuds and huds then
+            for _, hud in ipairs(huds) do
+                if Core.IsValidObj(hud) then
+                    EnsureOverlayOnHud(hud)
+                end
+            end
+        end
+    end
 
-    for _, hud in ipairs(huds) do
-        if Core.IsValidObj(hud) then
-            local st = EnsureOverlayOnHud(hud)
-            if st then
-                local okVis, hudVis = pcall(function() return hud:IsVisible() end)
-                local count = 0
+    for addr, st in pairs(HudOverlays) do
+        local hud = st.Hud
+        if Core.IsValidObj(hud) and Core.IsValidObj(st.Canvas) then
+            local okVis, hudVis = pcall(function() return hud:IsVisible() end)
+            local count = 0
 
-                if okVis and hudVis and not pc.bShowMouseCursor then
-                    for _, port in ipairs(visiblePorts) do
-                        local screenPos = {}
-                        local okProj, projected = pcall(function()
-                            return layoutLib:ProjectWorldLocationToWidgetPosition(
-                                pc,
-                                { X = port.X, Y = port.Y, Z = port.Z },
-                                screenPos,
-                                false
-                            )
-                        end)
-                        if okProj and projected and screenPos.X and screenPos.Y then
-                            count = count + 1
-                            local lbl = GetOrCreateLabelWidget(st, count)
-                            if lbl then
-                                pcall(function()
-                                    lbl.ItemWidget:SetItem(port.Item)
-                                    lbl.LabelText:SetText(Core.MakeText(port.Label))
-                                    lbl.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
-                                    lbl.Root:SetVisibility(0)
-                                end)
-                            end
+            if okVis and hudVis and not pc.bShowMouseCursor then
+                for _, port in ipairs(visiblePorts) do
+                    local screenPos = { X = 0.0, Y = 0.0 }
+                    local okProj, projected = pcall(function()
+                        return layoutLib:ProjectWorldLocationToWidgetPosition(
+                            pc,
+                            { X = port.X, Y = port.Y, Z = port.Z },
+                            screenPos,
+                            false
+                        )
+                    end)
+                    if okProj and projected and screenPos.X and screenPos.Y then
+                        count = count + 1
+                        local lbl = GetOrCreateLabelWidget(st, count)
+                        if lbl then
+                            pcall(function()
+                                lbl.ItemWidget:SetItem(port.Item)
+                                lbl.LabelText:SetText(Core.MakeText(port.Label))
+                                lbl.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
+                                lbl.Root:SetVisibility(0)
+                            end)
                         end
                     end
                 end
+            end
 
-                for i = count + 1, #st.Pool do
-                    if Core.IsValidObj(st.Pool[i].Root) then
-                        pcall(function() st.Pool[i].Root:SetVisibility(1) end)
-                    end
+            for i = count + 1, #st.Pool do
+                if Core.IsValidObj(st.Pool[i].Root) then
+                    pcall(function() st.Pool[i].Root:SetVisibility(1) end)
                 end
             end
+        else
+            HudOverlays[addr] = nil
         end
     end
 end
@@ -248,9 +256,9 @@ local function StartPoll()
     PollActive = true
     local function Tick()
         pcall(UpdateElevatorLabels)
-        ExecuteInGameThreadWithDelay(66, Tick)
+        ExecuteInGameThreadWithDelay(120, Tick)
     end
-    ExecuteInGameThreadWithDelay(66, Tick)
+    ExecuteInGameThreadWithDelay(120, Tick)
 end
 
 Feature.WatchWidgets = {
