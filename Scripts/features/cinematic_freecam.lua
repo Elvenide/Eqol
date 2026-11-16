@@ -20,10 +20,17 @@ local function EnsureSpecHook(pc)
     local fnPath = clsPath .. ":SetSpectatorMode"
     if Core.TryRegisterHook("Freecam_WatchSetSpectator", fnPath, function(Context, bNew)
         local ctrl = Context:get()
-        local val = nil
-        pcall(function() val = (type(bNew.get) == "function") and bNew:get() or bNew end)
-        local pawnValid = Core.IsValidObj(ctrl) and Core.IsValidObj(ctrl.SpectatorModePawn)
-        Core.Log(string.format("Freecam Hook [SetSpectatorMode] bNew=%s SpectatorModePawn=%s", tostring(val), tostring(pawnValid)))
+        local val = bNew
+        pcall(function()
+            if type(bNew.get) == "function" then val = bNew:get() end
+        end)
+        ExecuteInGameThreadWithDelay(100, function()
+            if Core.IsValidObj(ctrl) then
+                local sp = Core.IsValidObj(ctrl.SpectatorModePawn)
+                local pName = Core.IsValidObj(ctrl.Pawn) and ctrl.Pawn:GetClass():GetFName():ToString() or "nil"
+                Core.Log(string.format("Freecam Post [SetSpectatorMode(%s)] SpectatorModePawn=%s Pawn=%s", tostring(val), tostring(sp), pName))
+            end
+        end)
     end) then
         HookedSpecFn = true
         Core.Log("Freecam: hooked " .. fnPath)
