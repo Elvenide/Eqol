@@ -27,8 +27,7 @@ local function StartSpectatorMoveTick()
         end
 
         local pc = Core.GetLocalPlayerController()
-        local mathLib = Core.GetCDO("/Script/Engine.Default__KismetMathLibrary")
-        if Core.IsValidObj(pc) and Core.IsValidObj(pc.Pawn) and Core.IsValidObj(mathLib) then
+        if Core.IsValidObj(pc) and Core.IsValidObj(pc.Pawn) then
             local moveF = (IsDown(pc, "W") and 1 or 0) - (IsDown(pc, "S") and 1 or 0)
             local moveR = (IsDown(pc, "D") and 1 or 0) - (IsDown(pc, "A") and 1 or 0)
             local moveU = ((IsDown(pc, "SpaceBar") or IsDown(pc, "E")) and 1 or 0)
@@ -36,18 +35,13 @@ local function StartSpectatorMoveTick()
 
             if moveF ~= 0 or moveR ~= 0 or moveU ~= 0 then
                 pcall(function()
-                    local camMgr = pc.PlayerCameraManager
-                    local rot = Core.IsValidObj(camMgr) and camMgr:GetCameraRotation() or pc:GetControlRotation()
-                    local fwd = mathLib:GetForwardVector(rot)
-                    local right = mathLib:GetRightVector(rot)
-                    local up = mathLib:GetUpVector(rot)
-                    local mult = 1.0
-                    if IsDown(pc, "LeftShift") then mult = 3.0 end
-                    if IsDown(pc, "LeftAlt") then mult = 0.25 end
+                    local speed = 12.0
+                    if IsDown(pc, "LeftShift") then speed = 36.0 end
+                    if IsDown(pc, "LeftAlt") then speed = 3.0 end
                     local vec = {
-                        X = (fwd.X * moveF + right.X * moveR + up.X * moveU) * mult,
-                        Y = (fwd.Y * moveF + right.Y * moveR + up.Y * moveU) * mult,
-                        Z = (fwd.Z * moveF + right.Z * moveR + up.Z * moveU) * mult,
+                        X = moveF * speed,
+                        Y = moveR * speed,
+                        Z = moveU * speed,
                     }
                     if pc.Pawn.AddSpectatorInput then
                         pc.Pawn:AddSpectatorInput(vec)
