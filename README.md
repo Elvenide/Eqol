@@ -18,3 +18,4 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 - **[Cinematic Freecam](docs/cinematic-freecam.md)** — Single keybind (`F9`, rebindable) to toggle Spectator Mode and Hide HUD together.
 - **[Ship 3rd-Person Perspective & Scroll Zoom](docs/ship-camera.md)** — Toggle 1st/3rd-person ship camera (`V`, rebindable) and adjust distance with the mouse scroll wheel.
 - **[Scroll to Rotate Conveyor Belts](docs/conveyor-scroll-rotate.md)** — Use the mouse scroll wheel to rotate conveyor belts while building, in addition to `R`.
+- **[Ship Instant Zero Throttle](docs/ship-zero-throttle.md)** — Instantly set ship throttle/acceleration to `0` with a single keypress (`0`, rebindable).
