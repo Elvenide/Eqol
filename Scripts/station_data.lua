@@ -567,4 +567,161 @@ function StationData.GetMachineDisplayName(machine)
     return "Machine"
 end
 
+--------------------------------------------------------------------------------
+-- Player Discovery & Online/Offline Status
+--------------------------------------------------------------------------------
+
+function StationData.GetAllPlayersInfo(localPC)
+    local players = {}
+    local pc = localPC or Core.GetLocalPlayerController()
+    local localPlayerObj = Core.IsValidObj(pc) and pc.PlayerObject or nil
+    local localAddr = Core.IsValidObj(localPlayerObj) and localPlayerObj:GetAddress() or nil
+
+    -- Build ConnectedPlayer lookup for nicknames & online status
+    local connectedByPlayerAddr = {}
+    local connectedById = {}
+    local okConn, connList = pcall(FindAllOf, "ConnectedPlayer")
+    if okConn and connList then
+        for _, cp in ipairs(connList) do
+            if Core.IsValidObj(cp) then
+                local cpName = nil
+                for _, prop in ipairs({ "Nickname", "AccountNickname", "PlayerName", "DisplayName" }) do
+                    local okN, n = pcall(function()
+                        local v = cp[prop]
+                        return (v and type(v.ToString) == "function") and v:ToString() or tostring(v)
+                    end)
+                    if okN and n and n ~= "" and n ~= "nil" then
+                        cpName = n
+                        break
+                    end
+                end
+                local po = nil
+                pcall(function() po = cp.PlayerObject end)
+                if Core.IsValidObj(po) then
+                    connectedByPlayerAddr[po:GetAddress()] = { Name = cpName, Connected = cp }
+                end
+                local pid = nil
+                pcall(function() pid = cp.PlayerID or cp.UserID or cp.ID end)
+                if pid ~= nil then
+                    connectedById[tostring(pid)] = { Name = cpName, Connected = cp }
+                end
+            end
+        end
+    end
+
+    local okPO, poList = pcall(FindAllOf, "DMSPlayerObject")
+    if not okPO or not poList then return players end
+
+    for _, po in ipairs(poList) do
+        if Core.IsValidObj(po) then
+            local addr = po:GetAddress()
+            local isLocal = (localAddr ~= nil and addr == localAddr)
+            local connInfo = connectedByPlayerAddr[addr]
+            if not connInfo then
+                local okUid, uid = pcall(function() return po.UserID or po.ID end)
+                if okUid and uid ~= nil then
+                    connInfo = connectedById[tostring(uid)]
+                end
+            end
+
+            -- Determine online status
+            local isOnline = isLocal or (connInfo ~= nil)
+            if not isOnline then
+                for _, prop in ipairs({ "bIsOnline", "bOnline", "bConnected", "bIsConnected" }) do
+                    local okB, bVal = pcall(function() return po[prop] end)
+                    if okB and type(bVal) == "boolean" then
+                        isOnline = bVal
+                        break
+                    end
+                end
+            end
+            if not isOnline then
+                local okCtrl, ctrl = pcall(function() return po.Controller or po.PlayerController end)
+                if okCtrl and Core.IsValidObj(ctrl) then
+                    isOnline = true
+                end
+            end
+
+            -- Resolve nickname
+            local name = connInfo and connInfo.Name or nil
+            if (not name or name == "") and isLocal and Core.IsValidObj(pc) then
+                local okAcc, acc = pcall(function() return pc:GetAccountNickname() end)
+                if okAcc and acc and tostring(acc) ~= "" then
+                    name = tostring(acc)
+                end
+            end
+            if not name or name == "" then
+                for _, prop in ipairs({ "DisplayName", "PlayerName", "Nickname", "AccountNickname" }) do
+                    local okN, n = pcall(function()
+                        local v = po[prop]
+                        return (v and type(v.ToString) == "function") and v:ToString() or tostring(v)
+                    end)
+                    if okN and n and n ~= "" and n ~= "nil" then
+                        name = n
+                        break
+                    end
+                end
+            end
+            if not name or name == "" then
+                name = isLocal and "You" or "Player"
+            end
+
+            -- Resolve world position & actor
+            local actor = StationData.GetObjectActor(po)
+            if not Core.IsValidObj(actor) and isLocal and Core.IsValidObj(pc) then
+                local okPawn, pawn = pcall(function() return pc.Pawn end)
+                if okPawn and Core.IsValidObj(pawn) then actor = pawn end
+            end
+            if not Core.IsValidObj(actor) then
+                pcall(function() actor = po.Character or po.Pawn end)
+            end
+            local px, py, pz = 0, 0, 0
+            local hasPos = false
+            if Core.IsValidObj(actor) then
+                local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
+                if okLoc and loc then
+                    px, py, pz = loc.X or 0, loc.Y or 0, loc.Z or 0
+                    hasPos = true
+                end
+            elseif Core.IsValidObj(po.PilotedShip) then
+                local shipActor = StationData.GetObjectActor(po.PilotedShip)
+                if Core.IsValidObj(shipActor) then
+                    local okLoc, loc = pcall(function() return shipActor:K2_GetActorLocation() end)
+                    if okLoc and loc then
+                        px, py, pz = loc.X or 0, loc.Y or 0, loc.Z or 0
+                        hasPos = true
+                    end
+                end
+            end
+            if not hasPos then
+                local okL, loc = pcall(function() return po.Location end)
+                if okL and loc and loc.X ~= nil then
+                    px, py, pz = loc.X or 0, loc.Y or 0, loc.Z or 0
+                    hasPos = true
+                end
+            end
+
+            local frame = nil
+            pcall(function() frame = po:GetFrame() end)
+
+            table.insert(players, {
+                Key = StationData.GetObjectKey(po) or tostring(addr),
+                PlayerObject = po,
+                Actor = actor,
+                Name = name,
+                IsLocal = isLocal,
+                IsOnline = isOnline,
+                X = px,
+                Y = py,
+                Z = pz,
+                HasPos = hasPos,
+                Frame = frame,
+                PilotedShip = po.PilotedShip,
+            })
+        end
+    end
+
+    return players
+end
+
 return StationData
