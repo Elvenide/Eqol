@@ -22,3 +22,4 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 - **[Player Nametags](docs/player-nametags.md)** — Floating nametags above all players (including yourself) with Online/Offline status indicators.
 - **[Player Markers on Maps & Minimap](docs/player-map-markers.md)** — Exact player positions and nametags on the World Map, Station Map, and Station Minimap.
 - **[Player Join & Leave Alerts](docs/player-alerts.md)** — Native HUD alerts when players (including the host) join or leave the game.
+- **[Item Elevator Port Labels](docs/elevator-labels.md)** — Floating item icons and names above nearby item elevator ports showing what items are in each port.
