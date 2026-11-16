@@ -78,47 +78,29 @@ local function ComputeDesignerPower(designerHud)
 
     local designer = nil
     pcall(function() designer = designerHud.Designer end)
-    if not Core.IsValidObj(designer) then
-        local okAll, list = pcall(FindAllOf, "Designer")
-        if okAll and list and Core.IsValidObj(list[1]) then
-            designer = list[1]
-        end
-    end
     if not Core.IsValidObj(designer) then return totalGen, totalCons end
 
-    -- 1. Check live preview frame machines if available
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
     if Core.IsValidObj(frame) then
+        -- Prefer PowerGrid directly if available on the preview frame
+        local pg = nil
+        if frame.GetPowerGrid then
+            pcall(function() pg = frame:GetPowerGrid() end)
+        end
+        if Core.IsValidObj(pg) then
+            local maxP = Core.GetFPFloat(pg.MaxProduction)
+            local maxC = Core.GetFPFloat(pg.MaxConsumption)
+            if maxP > 0 or maxC > 0 then
+                return maxP, maxC
+            end
+        end
+
         local machines = StationData.GetFrameMachines(frame)
         for _, m in ipairs(machines) do
             local g, c = ComputePowerFromObject(m)
             totalGen = totalGen + g
             totalCons = totalCons + c
-        end
-    end
-
-    -- 2. Check BuildBlueprint entries/machines/blocks
-    local bp = nil
-    pcall(function() bp = designer:GetBlueprintForSaving() end)
-    if not Core.IsValidObj(bp) then
-        pcall(function() bp = designer.Blueprint end)
-    end
-    if Core.IsValidObj(bp) then
-        for _, arrName in ipairs({ "Machines", "Blocks", "Entries" }) do
-            local okArr, arr = pcall(function() return bp[arrName] end)
-            if okArr and arr then
-                StationData.ForEachArray(arr, function(_, elem)
-                    local entry = Core.UnwrapArrayElem(elem) or elem
-                    if entry then
-                        local target = nil
-                        pcall(function() target = entry.Buildable or entry.Block or entry.Machine end)
-                        local g, c = ComputePowerFromObject(target or entry)
-                        totalGen = totalGen + g
-                        totalCons = totalCons + c
-                    end
-                end)
-            end
         end
     end
 
@@ -241,12 +223,16 @@ end
 
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
-        RefreshDesignerPowerStats(hud)
+        ExecuteInGameThreadWithDelay(150, function()
+            if Core.IsValidObj(hud) then
+                RefreshDesignerPowerStats(hud)
+            end
+        end)
     end,
 }
 
 function Feature.RegisterHooks()
-    for _, fnName in ipairs({ "Setup", "Refresh", "RefreshStats" }) do
+    for _, fnName in ipairs({ "Refresh", "RefreshStats" }) do
         Core.TryRegisterHook(
             "DesignerHUD_" .. fnName,
             "/Game/Blueprints/Widgets/HUDs/WBP_DesignerHUD.WBP_DesignerHUD_C:" .. fnName,
@@ -257,13 +243,6 @@ function Feature.RegisterHooks()
                 end
             end
         )
-    end
-
-    local ok, list = pcall(FindAllOf, "WBP_DesignerHUD_C")
-    if ok and list then
-        for _, hud in ipairs(list) do
-            if Core.IsValidObj(hud) then RefreshDesignerPowerStats(hud) end
-        end
     end
 end
 
