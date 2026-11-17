@@ -33,6 +33,7 @@ local LastHudScan      = -10.0
 local HudOverlays      = {} -- hudAddr -> { Hud, PC, Outer, Canvas, Pool = {} }
 local LoggedShafts     = {} -- bottomAddr -> true
 local HooksRegistered  = false
+local PollActive       = false
 
 local function ExtractArray(tarr)
     local out = {}
@@ -134,6 +135,11 @@ local function GetSimObjWorldPos(simObj)
             end)
             return { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }, yaw, actor
         end
+    end
+
+    local okM, mx, my, mz, mYaw = pcall(StationData.GetMachineWorldPosAndYaw, simObj, nil)
+    if okM and type(mx) == "number" then
+        return { X = mx, Y = my or 0.0, Z = mz or 0.0 }, mYaw or 0.0, nil
     end
 
     local worldUtils = Core.GetCDO(PATHS.WorldUtilsCDO)
@@ -380,6 +386,12 @@ local function RefreshCachedWorldPorts()
                             end
                         end
 
+                        if not LoggedShafts[bAddr .. ":cols"] then
+                            LoggedShafts[bAddr .. ":cols"] = true
+                            Core.Log(string.format("[ElevatorLabels] Shaft 0x%X: ItemColumns=%d active=%d",
+                                tonumber(bAddr) or 0, colCount, #activeCols))
+                        end
+
                         if #activeCols > 0 then
                             local okStack, stackRaw = pcall(function() return bottomElev.ElevatorStack end)
                             local stack, stackCount = {}, 0
@@ -460,8 +472,9 @@ local function EnsureHudOverlay(hud)
     local mainOverlay = hud.MainOverlay
     if not Core.IsValidObj(mainOverlay) then return nil end
 
-    local outer = Core.GetWidgetOuter(mainOverlay)
-    local pc = Core.GetLocalPlayerController()
+    local outer = Core.GetWidgetOuter(hud)
+    local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
+    local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
     local canvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     if not Core.IsValidObj(canvas) then return nil end
 
@@ -472,7 +485,7 @@ local function EnsureHudOverlay(hud)
             slot:SetVerticalAlignment(0)   -- Fill
         end)
     end
-    pcall(function() canvas:SetVisibility(3) end) -- HitTestInvisible
+    pcall(function() canvas:SetVisibility(4) end) -- SelfHitTestInvisible
 
     st = {
         Hud = hud,
@@ -538,11 +551,15 @@ local function UpdateElevatorPortIcons()
 
     if next(HudOverlays) == nil then
         local now = os.clock()
-        if now - LastHudScan >= 2.0 then
+        if now - LastHudScan >= 1.5 then
             LastHudScan = now
-            local okHud, hud = pcall(FindFirstOf, "WBP_CharacterHUD_C")
-            if okHud and Core.IsValidObj(hud) then
-                EnsureHudOverlay(hud)
+            local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
+            if okHuds and huds then
+                for _, hud in ipairs(huds) do
+                    if Core.IsValidObj(hud) then
+                        EnsureHudOverlay(hud)
+                    end
+                end
             end
         end
     end
@@ -552,8 +569,10 @@ local function UpdateElevatorPortIcons()
     if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
         menuOpen = true
     end
+    local showCursor = false
+    pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
 
-    if menuOpen then
+    if menuOpen or showCursor then
         for addr, st in pairs(HudOverlays) do
             if Core.IsValidObj(st.Hud) and Core.IsValidObj(st.Canvas) then
                 HideAllPool(st)
@@ -592,8 +611,8 @@ local function UpdateElevatorPortIcons()
         if not (Core.IsValidObj(st.Hud) and Core.IsValidObj(st.Canvas)) then
             HudOverlays[addr] = nil
         else
-            local okVis, hudVis = pcall(function() return st.Hud:GetVisibility() end)
-            if okVis and hudVis ~= 0 and hudVis ~= 3 and hudVis ~= 4 then
+            local okVis, hudVis = pcall(function() return st.Hud:IsVisible() end)
+            if not okVis or not hudVis then
                 HideAllPool(st)
             else
                 local used = 0
@@ -624,6 +643,11 @@ local function UpdateElevatorPortIcons()
                                 entry.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
                                 entry.ItemWidget:SetVisibility(3) -- HitTestInvisible
                             end)
+                            if not LoggedShafts["firstRender"] then
+                                LoggedShafts["firstRender"] = true
+                                Core.Log(string.format("[ElevatorLabels] First icon rendered at screen=(%.1f,%.1f) dist=%.1f size=%d ports=%d",
+                                    tonumber(screenPos.X) or 0.0, tonumber(screenPos.Y) or 0.0, p.Dist, iconPx, #ports))
+                            end
                         end
                     end
                 end
@@ -662,19 +686,30 @@ function Feature.RegisterHooks()
             end
         end
     )
+end
 
-    Core.TryRegisterHook(
-        "ElevatorLabels_Tick",
-        "/Script/MainSequence.DMSPlayerController:ReceiveTick",
-        function()
-            UpdateElevatorPortIcons()
-        end
-    )
+local function StartPoll()
+    if PollActive then return end
+    PollActive = true
+    local function Tick()
+        pcall(UpdateElevatorPortIcons)
+        ExecuteInGameThreadWithDelay(16, Tick)
+    end
+    ExecuteInGameThreadWithDelay(16, Tick)
 end
 
 function Feature.Init()
     Feature.RegisterHooks()
+    StartPoll()
     Core.Log("[ElevatorLabels] Initialized (UElevatorObject.ItemColumns port icons).")
+end
+
+function Feature.PruneCaches()
+    for addr, st in pairs(HudOverlays) do
+        if not Core.IsValidObj(st.Canvas) then
+            HudOverlays[addr] = nil
+        end
+    end
 end
 
 return Feature
