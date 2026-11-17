@@ -17,6 +17,57 @@ local POD_MAX_XY_DIST_SQ = 240.0 * 240.0
 local POD_MIN_DZ = -160.0
 local POD_MAX_DZ = 360.0
 
+local CachedElevators = {}      -- addr -> elevActor
+local CachedChats = {}          -- addr -> WBP_Chat_C
+local LastElevatorScanClock = -10.0
+local LastChatScanClock = -10.0
+local LastExitBuildClock = -10.0
+
+local function RefreshElevatorCache()
+    LastElevatorScanClock = os.clock()
+    local nextMap = {}
+    local okActors, elevActors = pcall(FindAllOf, "Elevator")
+    if okActors and elevActors then
+        for _, elevActor in ipairs(elevActors) do
+            if Core.IsValidObj(elevActor) then
+                nextMap[elevActor:GetAddress()] = elevActor
+            end
+        end
+    end
+    CachedElevators = nextMap
+end
+
+local function RefreshChatCache()
+    LastChatScanClock = os.clock()
+    local nextChats = {}
+    local okChats, chats = pcall(FindAllOf, "WBP_Chat_C")
+    if okChats and chats then
+        for _, chat in ipairs(chats) do
+            if Core.IsValidObj(chat) then
+                nextChats[chat:GetAddress()] = chat
+            end
+        end
+    end
+    CachedChats = nextChats
+end
+
+local function IsChatOpenFast()
+    if os.clock() - LastChatScanClock > 10.0 and next(CachedChats) == nil then
+        RefreshChatCache()
+    end
+    for addr, chat in pairs(CachedChats) do
+        if Core.IsValidObj(chat) then
+            local okOpen, isOpen = pcall(function() return chat.IsOpen == true end)
+            if okOpen and isOpen then
+                return true
+            end
+        else
+            CachedChats[addr] = nil
+        end
+    end
+    return false
+end
+
 local function ResolveBottomElevator(elevObj)
     if not Core.IsValidObj(elevObj) then return nil end
     local bottom = elevObj
@@ -104,24 +155,60 @@ local function ExtractElevatorObjectFromActor(elevActor, podActor)
     return eObj
 end
 
-local function FindActivePlayerElevator(pc)
-    -- Check 1: Open WBP_Elevator_C UI
-    local okWidgets, widgets = pcall(FindAllOf, "WBP_Elevator_C")
-    if okWidgets and widgets then
-        for _, w in ipairs(widgets) do
-            if Core.IsValidObj(w) then
-                local okVis, isVis = pcall(function() return w:IsVisible() end)
-                if okVis and isVis and Core.IsValidObj(w.ElevatorObject) then
-                    return w.ElevatorObject, w
+local function CheckCachedElevatorsNearPawn(pLoc)
+    local bestElevObj = nil
+    local bestDistSq = math.huge
+
+    for addr, elevActor in pairs(CachedElevators) do
+        if Core.IsValidObj(elevActor) then
+            local pod = nil
+            pcall(function() pod = elevActor.PodActor end)
+            if Core.IsValidObj(pod) then
+                local okPodLoc, podLoc = pcall(function() return pod:K2_GetActorLocation() end)
+                if okPodLoc and podLoc then
+                    local dx = (pLoc.X or 0.0) - (podLoc.X or 0.0)
+                    local dy = (pLoc.Y or 0.0) - (podLoc.Y or 0.0)
+                    local dz = (pLoc.Z or 0.0) - (podLoc.Z or 0.0)
+                    local xySq = dx * dx + dy * dy
+                    if xySq <= POD_MAX_XY_DIST_SQ and dz >= POD_MIN_DZ and dz <= POD_MAX_DZ then
+                        local eObj = ExtractElevatorObjectFromActor(elevActor, pod)
+                        if Core.IsValidObj(eObj) and xySq < bestDistSq then
+                            bestDistSq = xySq
+                            bestElevObj = eObj
+                        end
+                    end
                 end
             end
+        else
+            CachedElevators[addr] = nil
         end
     end
 
+    return bestElevObj
+end
+
+local function FindActivePlayerElevator(pc, skipMenuChecks)
+    -- Check 1: O(1) check against WidgetSubsystem.CurrentWindow (avoids any FindAllOf scans)
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
+        local win = widgetSub.CurrentWindow
+        local okCls, winClsName = pcall(function() return win:GetClass():GetFName():ToString() end)
+        if okCls and winClsName == "WBP_Elevator_C" then
+            local okVis, isVis = pcall(function() return win:IsVisible() end)
+            if okVis and isVis and Core.IsValidObj(win.ElevatorObject) then
+                return win.ElevatorObject, win
+            end
+        end
+        -- Another native UI window owns input (Settings, Pause, Rename, ElevatorConfig, Codex, etc.)
+        return nil, nil
+    end
+
     -- Check 2: Player standing inside an elevator pod in normal gameplay
-    local showCursor = false
-    pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
-    if showCursor then return nil, nil end
+    if not skipMenuChecks then
+        local showCursor = false
+        pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
+        if showCursor then return nil, nil end
+    end
 
     local isPiloting = false
     pcall(function()
@@ -136,81 +223,26 @@ local function FindActivePlayerElevator(pc)
     local okLoc, pLoc = pcall(function() return pawn:K2_GetActorLocation() end)
     if not okLoc or not pLoc then return nil, nil end
 
-    local bestElevObj = nil
-    local bestDistSq = math.huge
-
-    local okActors, elevActors = pcall(FindAllOf, "Elevator")
-    if okActors and elevActors then
-        for _, elevActor in ipairs(elevActors) do
-            if Core.IsValidObj(elevActor) then
-                local pod = nil
-                pcall(function() pod = elevActor.PodActor end)
-                if Core.IsValidObj(pod) then
-                    local okPodLoc, podLoc = pcall(function() return pod:K2_GetActorLocation() end)
-                    if okPodLoc and podLoc then
-                        local dx = (pLoc.X or 0.0) - (podLoc.X or 0.0)
-                        local dy = (pLoc.Y or 0.0) - (podLoc.Y or 0.0)
-                        local dz = (pLoc.Z or 0.0) - (podLoc.Z or 0.0)
-                        local xySq = dx * dx + dy * dy
-                        if xySq <= POD_MAX_XY_DIST_SQ and dz >= POD_MIN_DZ and dz <= POD_MAX_DZ then
-                            local eObj = ExtractElevatorObjectFromActor(elevActor, pod)
-                            if Core.IsValidObj(eObj) and xySq < bestDistSq then
-                                bestDistSq = xySq
-                                bestElevObj = eObj
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
+    local bestElevObj = CheckCachedElevatorsNearPawn(pLoc)
     if Core.IsValidObj(bestElevObj) then
         return bestElevObj, nil
     end
 
-    -- Fallback: check bottom ElevatorObject instances using actor + GetElevatorPodHeight()
-    local okObjs, elevObjs = pcall(FindAllOf, "ElevatorObject")
-    if okObjs and elevObjs then
-        for _, eObj in ipairs(elevObjs) do
-            if Core.IsValidObj(eObj) then
-                local isBottom = false
-                pcall(function()
-                    if eObj.IsBottomElevator then
-                        isBottom = (eObj:IsBottomElevator() == true)
-                    end
-                end)
-                if isBottom then
-                    local eActor = StationData.GetObjectActor(eObj)
-                    if Core.IsValidObj(eActor) then
-                        local okELoc, eLoc = pcall(function() return eActor:K2_GetActorLocation() end)
-                        if okELoc and eLoc then
-                            local podH = 0.0
-                            pcall(function()
-                                if eObj.GetElevatorPodHeight then
-                                    local h = eObj:GetElevatorPodHeight()
-                                    if type(h) == "number" then podH = h end
-                                end
-                            end)
-                            local dx = (pLoc.X or 0.0) - (eLoc.X or 0.0)
-                            local dy = (pLoc.Y or 0.0) - (eLoc.Y or 0.0)
-                            local dz = (pLoc.Z or 0.0) - ((eLoc.Z or 0.0) + podH)
-                            local xySq = dx * dx + dy * dy
-                            if xySq <= POD_MAX_XY_DIST_SQ and math.abs(dz) <= 320.0 and xySq < bestDistSq then
-                                bestDistSq = xySq
-                                bestElevObj = eObj
-                            end
-                        end
-                    end
-                end
-            end
+    -- Refresh cache only if we missed and cooldown expired (e.g. newly built elevator)
+    if os.clock() - LastElevatorScanClock >= 1.5 then
+        RefreshElevatorCache()
+        bestElevObj = CheckCachedElevatorsNearPawn(pLoc)
+        if Core.IsValidObj(bestElevObj) then
+            return bestElevObj, nil
         end
     end
 
-    return bestElevObj, nil
+    return nil, nil
 end
 
 local function ExitBuildingModeIfInElevator(pc)
+    local now = os.clock()
+    if now - LastExitBuildClock < 0.03 then return end
     if not Core.IsValidObj(pc) then
         pc = Core.GetLocalPlayerController()
     end
@@ -219,6 +251,7 @@ local function ExitBuildingModeIfInElevator(pc)
     local elevObj = FindActivePlayerElevator(pc)
     if not Core.IsValidObj(elevObj) then return end
 
+    LastExitBuildClock = now
     pcall(function() pc:ExitBuildingMode() end)
     ExecuteInGameThreadWithDelay(1, function()
         if Core.IsValidObj(pc) then
@@ -226,6 +259,14 @@ local function ExitBuildingModeIfInElevator(pc)
         end
     end)
 end
+
+Feature.WatchWidgets = {
+    WBP_Chat_C = function(chat)
+        if Core.IsValidObj(chat) then
+            CachedChats[chat:GetAddress()] = chat
+        end
+    end,
+}
 
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
@@ -249,69 +290,83 @@ end
 local function GoToElevatorFloor(floorNum)
     Feature.RegisterHooks()
 
-    if Core.IsSelectingAnyRegisteredKeybind()
-        or Core.IsAnyTextInputFocused()
-        or Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
-        or Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
-        or Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
-        or Core.IsAnyWidgetClassVisible("WBP_ElevatorConfig_C")
-    then
+    if Core.IsSelectingAnyRegisteredKeybind() or IsChatOpenFast() then
         return
     end
 
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
-    local elevObj, openWidget = FindActivePlayerElevator(pc)
+    local elevObj, openWidget = FindActivePlayerElevator(pc, false)
     if not Core.IsValidObj(elevObj) then return end
-
-    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
-    if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
-        if not Core.IsValidObj(openWidget)
-            or widgetSub.CurrentWindow:GetAddress() ~= openWidget:GetAddress()
-        then
-            return
-        end
-    end
-
-    pcall(function() pc:ExitBuildingMode() end)
-    ExecuteInGameThreadWithDelay(1, function()
-        if Core.IsValidObj(pc) then
-            pcall(function() pc:ExitBuildingMode() end)
-        end
-    end)
 
     local bottomElev, stackIdx = ResolveStackIndexForFloor(elevObj, floorNum)
     if not Core.IsValidObj(bottomElev) or stackIdx == nil then return end
 
     if Core.IsValidObj(openWidget) and openWidget.OnFloorPressed then
         pcall(function() openWidget:OnFloorPressed(stackIdx) end)
-        return
-    end
+    else
+        local setConfigCDO = Core.GetCDO(PATHS.SetConfigInputCDO)
+        if not Core.IsValidObj(setConfigCDO) then return end
 
-    local setConfigCDO = Core.GetCDO(PATHS.SetConfigInputCDO)
-    if not Core.IsValidObj(setConfigCDO) then return end
-
-    local okCmd, cmd = pcall(function()
-        return setConfigCDO:CreateInputSetConfig(stackIdx, 0)
-    end)
-    if not okCmd or not Core.IsValidObj(cmd) then
-        okCmd, cmd = pcall(function()
-            return setConfigCDO:CreateInputSetConfig(stackIdx)
+        local okCmd, cmd = pcall(function()
+            return setConfigCDO:CreateInputSetConfig(stackIdx, 0)
         end)
+        if not okCmd or not Core.IsValidObj(cmd) then
+            okCmd, cmd = pcall(function()
+                return setConfigCDO:CreateInputSetConfig(stackIdx)
+            end)
+        end
+
+        if okCmd and Core.IsValidObj(cmd) then
+            pcall(function() pc:AddInputCommand(bottomElev.ID, cmd) end)
+        end
     end
 
-    if okCmd and Core.IsValidObj(cmd) then
-        pcall(function() pc:AddInputCommand(bottomElev.ID, cmd) end)
-    end
+    LastExitBuildClock = os.clock()
+    pcall(function() pc:ExitBuildingMode() end)
+    ExecuteInGameThreadWithDelay(1, function()
+        if Core.IsValidObj(pc) then
+            pcall(function() pc:ExitBuildingMode() end)
+        end
+    end)
 end
 
 function Feature.OnClientRestart()
     Feature.RegisterHooks()
+    ExecuteInGameThreadWithDelay(300, function()
+        RefreshElevatorCache()
+        RefreshChatCache()
+    end)
+end
+
+function Feature.OnMapLoad()
+    Feature.RegisterHooks()
+    ExecuteInGameThreadWithDelay(300, function()
+        RefreshElevatorCache()
+        RefreshChatCache()
+    end)
+end
+
+function Feature.PruneCaches()
+    for addr, actor in pairs(CachedElevators) do
+        if not Core.IsValidObj(actor) then
+            CachedElevators[addr] = nil
+        end
+    end
+    for addr, chat in pairs(CachedChats) do
+        if not Core.IsValidObj(chat) then
+            CachedChats[addr] = nil
+        end
+    end
 end
 
 function Feature.Init()
     Feature.RegisterHooks()
+    ExecuteInGameThreadWithDelay(300, function()
+        RefreshElevatorCache()
+        RefreshChatCache()
+    end)
     if not Key then return end
 
     local bindings = {
