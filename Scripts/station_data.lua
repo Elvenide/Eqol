@@ -39,19 +39,27 @@ end
 
 function StationData.ForEachArray(arr, fn)
     if not arr then return end
-    local usedForEach = pcall(function()
+    local okLen, len = pcall(function()
+        return arr.GetArrayNum and arr:GetArrayNum() or #arr
+    end)
+    if not okLen or type(len) ~= "number" then
+        okLen, len = pcall(function() return #arr end)
+    end
+    if okLen and type(len) == "number" then
+        for i = 1, len do
+            local okElem, elem = pcall(function() return arr[i] end)
+            if okElem and elem ~= nil then
+                fn(i, elem)
+            end
+        end
+        return
+    end
+
+    pcall(function()
         arr:ForEach(function(idx, elem)
             fn(idx, elem)
         end)
     end)
-    if usedForEach then return end
-
-    local okLen, len = pcall(function() return #arr end)
-    if okLen and type(len) == "number" then
-        for i = 1, len do
-            fn(i, arr[i])
-        end
-    end
 end
 
 function StationData.GetObjectKey(obj)

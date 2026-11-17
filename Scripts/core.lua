@@ -68,15 +68,9 @@ function Core.GetFPFloat(fpNum)
     if not fpNum then return 0.0 end
     if type(fpNum) == "number" then return fpNum end
     if type(fpNum) ~= "userdata" then return 0.0 end
-    local okUObj, isUObj = pcall(function() return type(fpNum.IsValid) == "function" end)
-    if okUObj and isUObj then return 0.0 end
-
-    local fpMath = Core.GetCDO(Core.PATHS.FPMathCDO)
-    if Core.IsValidObj(fpMath) then
-        local ok, val = pcall(function() return fpMath:GetFloat(fpNum) end)
-        if ok and type(val) == "number" then
-            return val
-        end
+    local okV, raw = pcall(function() return fpNum.Value end)
+    if okV and type(raw) == "number" then
+        return raw / 65536.0
     end
     return 0.0
 end
@@ -87,15 +81,11 @@ function Core.GetFPVector(fpVec)
         return fpVec.X, fpVec.Y, tonumber(fpVec.Z) or 0.0
     end
     if type(fpVec) ~= "userdata" then return 0.0, 0.0, 0.0 end
-    local okUObj, isUObj = pcall(function() return type(fpVec.IsValid) == "function" end)
-    if okUObj and isUObj then return 0.0, 0.0, 0.0 end
-
-    local fpMath = Core.GetCDO(Core.PATHS.FPMathCDO)
-    if Core.IsValidObj(fpMath) then
-        local ok, vec = pcall(function() return fpMath:GetVector(fpVec) end)
-        if ok and vec and type(vec.X) == "number" then
-            return vec.X, vec.Y, tonumber(vec.Z) or 0.0
-        end
+    local okV, x, y, z = pcall(function()
+        return Core.GetFPFloat(fpVec.X), Core.GetFPFloat(fpVec.Y), Core.GetFPFloat(fpVec.Z)
+    end)
+    if okV and type(x) == "number" and type(y) == "number" then
+        return x, y, tonumber(z) or 0.0
     end
     return 0.0, 0.0, 0.0
 end
@@ -372,23 +362,17 @@ function Core.EnsureAllHooks()
     end
 end
 
-local TrackedTextInputs = {} -- widgetAddr -> { Input = widget, Owner = ownerWindowOrNil }
+local TrackedTextInputs = {} -- widgetAddr -> { Input = widget, Owner = ownerWindowOrNil, ExplicitFocus = bool }
 local TextInputFocusWatcherActive = false
 local SuppressedCharacterInput = false
 local SuppressedCharacterInputPC = nil
 
 local function IsWidgetTreeVisible(w, ownerWin)
     if not Core.IsValidObj(w) then return false end
-    if Core.IsValidObj(ownerWin) then
-        local okVP, inVp = pcall(function()
-            return not ownerWin.IsInViewport or ownerWin:IsInViewport()
-        end)
-        if okVP and not inVp then return false end
-        local okOV, oVis = pcall(function() return ownerWin:IsVisible() end)
-        if okOV and not oVis then return false end
-    end
+
     local cur = w
-    for _ = 1, 20 do
+    local root = w
+    for _ = 1, 32 do
         if not Core.IsValidObj(cur) then break end
         local okV, vis = pcall(function() return cur:IsVisible() end)
         if okV and not vis then
@@ -396,9 +380,25 @@ local function IsWidgetTreeVisible(w, ownerWin)
         end
         local okP, parent = pcall(function() return cur:GetParent() end)
         if not okP or not Core.IsValidObj(parent) then
+            root = cur
             break
         end
         cur = parent
+    end
+
+    if Core.IsValidObj(ownerWin) then
+        local okOV, oVis = pcall(function() return ownerWin:IsVisible() end)
+        if okOV and not oVis then return false end
+        local okOP, oParent = pcall(function() return ownerWin:GetParent() end)
+        if (not okOP or not Core.IsValidObj(oParent)) and ownerWin.IsInViewport then
+            local okVP, inVp = pcall(function() return ownerWin:IsInViewport() end)
+            if okVP and not inVp then return false end
+        end
+    end
+
+    if Core.IsValidObj(root) and root.IsInViewport then
+        local okRVP, rInVp = pcall(function() return root:IsInViewport() end)
+        if okRVP and not rInVp then return false end
     end
     return true
 end
@@ -414,12 +414,26 @@ local function IsWidgetOrChildFocused(w, pc)
         end
     end
     if Core.IsValidObj(pc) then
-        local okU, resU = pcall(function()
-            return w.HasUserFocus and w:HasUserFocus(pc)
-        end)
-        if okU and resU == true then
-            return true
+        for _, pcCheck in ipairs({ "HasUserFocus", "HasUserFocusedDescendants" }) do
+            local okU, resU = pcall(function()
+                return w[pcCheck] and w[pcCheck](w, pc)
+            end)
+            if okU and resU == true then
+                return true
+            end
         end
+    end
+    return false
+end
+
+local function IsWidgetOrBoxHovered(w, box)
+    if Core.IsValidObj(w) and w.IsHovered then
+        local okH, h = pcall(function() return w:IsHovered() end)
+        if okH and h == true then return true end
+    end
+    if Core.IsValidObj(box) and box.IsHovered then
+        local okH, h = pcall(function() return box:IsHovered() end)
+        if okH and h == true then return true end
     end
     return false
 end
@@ -428,6 +442,7 @@ local function IsTrackedInputFocused(entry, pc)
     local w = entry and entry.Input or nil
     if not Core.IsValidObj(w) then return false end
     if not IsWidgetTreeVisible(w, entry.Owner) then return false end
+    if entry.ExplicitFocus == true then return true end
 
     if IsWidgetOrChildFocused(w, pc) then return true end
     local okBox, box = pcall(function() return w.EditableTextBox_80 end)
@@ -485,12 +500,35 @@ local function EnsureTextInputFocusWatcher()
             return
         end
 
+        local pc = Core.GetLocalPlayerController()
+        local mouseDown = false
+        if Core.IsValidObj(pc) then
+            local okMD, md = pcall(function()
+                return pc:IsInputKeyDown({ KeyName = FName("LeftMouseButton") })
+            end)
+            mouseDown = okMD and md == true
+        end
+
         local anyVisible = false
         for addr, entry in pairs(TrackedTextInputs) do
             if not Core.IsValidObj(entry.Input) then
                 TrackedTextInputs[addr] = nil
-            elseif IsWidgetTreeVisible(entry.Input, entry.Owner) then
-                anyVisible = true
+            else
+                local vis = IsWidgetTreeVisible(entry.Input, entry.Owner)
+                if not vis then
+                    entry.ExplicitFocus = false
+                else
+                    anyVisible = true
+                    local box = nil
+                    pcall(function() box = entry.Input.EditableTextBox_80 end)
+                    if IsWidgetOrChildFocused(entry.Input, pc)
+                        or (Core.IsValidObj(box) and IsWidgetOrChildFocused(box, pc))
+                    then
+                        entry.ExplicitFocus = true
+                    elseif mouseDown then
+                        entry.ExplicitFocus = IsWidgetOrBoxHovered(entry.Input, box)
+                    end
+                end
             end
         end
 
@@ -506,6 +544,7 @@ function Core.RegisterTextInput(textInputWidget, ownerWindow)
     TrackedTextInputs[textInputWidget:GetAddress()] = {
         Input = textInputWidget,
         Owner = Core.IsValidObj(ownerWindow) and ownerWindow or nil,
+        ExplicitFocus = false,
     }
     Core.EnsureKeybindHooks()
     EnsureTextInputFocusWatcher()
@@ -904,9 +943,30 @@ function Core.EnsureKeybindHooks()
         end
     )
     Core.TryRegisterHook(
+        "Core_TextInput_OnChanged",
+        "/Game/Blueprints/Widgets/Basic/WBP_TextInput.WBP_TextInput_C:BndEvt__WBP_TextInput_EditableTextBox_80_K2Node_ComponentBoundEvent_0_OnEditableTextBoxChangedEvent__DelegateSignature",
+        function(Context)
+            local inputWidget = Context:get()
+            if Core.IsValidObj(inputWidget) then
+                local entry = TrackedTextInputs[inputWidget:GetAddress()]
+                if entry and IsWidgetTreeVisible(inputWidget, entry.Owner) then
+                    entry.ExplicitFocus = true
+                    SyncCharacterInputSuppression()
+                end
+            end
+        end
+    )
+    Core.TryRegisterHook(
         "Core_TextInput_OnCommitted",
         "/Game/Blueprints/Widgets/Basic/WBP_TextInput.WBP_TextInput_C:BndEvt__WBP_TextInput_EditableTextBox_80_K2Node_ComponentBoundEvent_1_OnEditableTextBoxCommittedEvent__DelegateSignature",
-        function()
+        function(Context)
+            local inputWidget = Context:get()
+            if Core.IsValidObj(inputWidget) then
+                local entry = TrackedTextInputs[inputWidget:GetAddress()]
+                if entry then
+                    entry.ExplicitFocus = false
+                end
+            end
             ExecuteInGameThreadWithDelay(1, SyncCharacterInputSuppression)
         end
     )
