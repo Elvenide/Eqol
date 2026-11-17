@@ -115,11 +115,6 @@ local function GetOrCreateIconActor(pc, idx)
         return nil
     end
 
-    local okRoot, errRoot = pcall(function() actor:K2_SetRootComponent(comp) end)
-    if not okRoot then
-        LogOnce("err:root" .. idx, "Step[IconPool#%d] K2_SetRootComponent warning: %s", idx, tostring(errRoot))
-    end
-
     local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, pc, pc)
     if not Core.IsValidObj(itemW) then
         LogOnce("err:itemW" .. idx, "Step[IconPool#%d] FAILED CreateUserWidget(%s)", idx, PATHS.WBPItemClass)
@@ -292,6 +287,193 @@ end
 local function FormatLocalPos(lp)
     if not lp then return "nil" end
     return string.format("(%.1f,%.1f,%.1f)", lp.lx, lp.ly, lp.lz)
+end
+
+local function SafeCompWorldAndLocal(comp, pos, fw, rt, up)
+    local lp = SafeCompLocalPos(comp, pos, fw, rt, up)
+    if not lp then return nil end
+    local rotStr = ""
+    pcall(function()
+        local f = comp.GetForwardVector and comp:GetForwardVector() or nil
+        if f and type(f.X) == "number" then
+            local fx = f.X * fw.X + f.Y * fw.Y + f.Z * fw.Z
+            local fy = f.X * rt.X + f.Y * rt.Y + f.Z * rt.Z
+            local fz = f.X * up.X + f.Y * up.Y + f.Z * up.Z
+            rotStr = string.format(" fw=(%.2f,%.2f,%.2f)", fx, fy, fz)
+        end
+    end)
+    return FormatLocalPos(lp) .. rotStr
+end
+
+local function LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCount)
+    if LoggedShafts[bAddr .. ":fullGeo"] then return end
+    LoggedShafts[bAddr .. ":fullGeo"] = true
+
+    -- 1. All Inputs & Outputs of bottomElev
+    local function fmtVecArr(arrRaw)
+        local arr, n = ExtractArray(arrRaw)
+        local parts = {}
+        for i = 1, n do
+            local v = arr[i]
+            if v then
+                local s = nil
+                pcall(function()
+                    s = string.format("#%d=(%.1f,%.1f,%.1f)", i, tonumber(v.X) or 0, tonumber(v.Y) or 0, tonumber(v.Z) or 0)
+                end)
+                parts[#parts + 1] = s or ("#" .. i .. "=err")
+            end
+        end
+        return n, table.concat(parts, " ")
+    end
+
+    local okIn, inRaw = pcall(function() return bottomElev.Inputs end)
+    local inN, inStr = 0, "nil"
+    if okIn and inRaw then inN, inStr = fmtVecArr(inRaw) end
+
+    local okOut, outRaw = pcall(function() return bottomElev.Outputs end)
+    local outN, outStr = 0, "nil"
+    if okOut and outRaw then outN, outStr = fmtVecArr(outRaw) end
+
+    local locPropStr = "nil"
+    pcall(function()
+        local l = bottomElev.Location
+        if l then
+            local x, y, z = Core.GetFPVector(l)
+            locPropStr = string.format("(%.1f,%.1f,%.1f)", x, y, z)
+        end
+    end)
+    Core.Log(string.format("[ElevatorLabels] Geo[%s] objLoc=%s Inputs(%d)=[%s] Outputs(%d)=[%s]",
+        bHex, locPropStr, inN, inStr, outN, outStr))
+
+    -- 2. All doors/calls/widgets + StaticMeshComponents on first loaded stop actor
+    local refFrame = nil
+    for sIdx = 1, stackCount do
+        if stopFrames[sIdx] and stopFrames[sIdx].HasActor then
+            refFrame = stopFrames[sIdx]
+            break
+        end
+    end
+    if refFrame and Core.IsValidObj(refFrame.Actor) then
+        local a = refFrame.Actor
+        local p, fw, rt, up = refFrame.Pos, refFrame.Fw, refFrame.Rt, refFrame.Up
+        local doorNames = { "BPC_Door", "BPC_Door1", "BPC_Door2", "BPC_Door3", "CallInteraction", "CallInteraction1", "CallInteraction2", "CallInteraction3", "Widget", "Widget1", "Widget2", "Widget3" }
+        local compParts = {}
+        for _, cname in ipairs(doorNames) do
+            local okP, cobj = pcall(function() return a[cname] end)
+            if okP and Core.IsValidObj(cobj) then
+                local desc = SafeCompWorldAndLocal(cobj, p, fw, rt, up)
+                if desc then
+                    compParts[#compParts + 1] = cname .. "=" .. desc
+                end
+            end
+        end
+        Core.Log(string.format("[ElevatorLabels] Geo[%s] NamedComps: %s", bHex, table.concat(compParts, " | ")))
+
+        local smParts = {}
+        pcall(function()
+            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            if not Core.IsValidObj(smCls) or not a.K2_GetComponentsByClass then return end
+            local list, n = ExtractArray(a:K2_GetComponentsByClass(smCls))
+            for i = 1, n do
+                local c = list[i]
+                if Core.IsValidObj(c) then
+                    local smName = "none"
+                    local extStr = ""
+                    pcall(function()
+                        local sm = c.StaticMesh
+                        if Core.IsValidObj(sm) then
+                            smName = SafeObjName(sm)
+                            local eb = sm.ExtendedBounds
+                            if eb and eb.BoxExtent then
+                                extStr = string.format(" ext=(%.0f,%.0f,%.0f)",
+                                    tonumber(eb.BoxExtent.X) or 0, tonumber(eb.BoxExtent.Y) or 0, tonumber(eb.BoxExtent.Z) or 0)
+                            end
+                        end
+                    end)
+                    local lp = SafeCompLocalPos(c, p, fw, rt, up)
+                    smParts[#smParts + 1] = string.format("%s(%s%s)@%s", SafeObjName(c), smName, extStr, FormatLocalPos(lp))
+                end
+            end
+        end)
+        Core.Log(string.format("[ElevatorLabels] Geo[%s] StaticMeshes(%d): %s", bHex, #smParts, table.concat(smParts, "; ")))
+    end
+
+    -- 3. Nearby ConveyorBelts relative to shaft stops (proves exact port X/Y/Z in actor frame)
+    if refFrame then
+        local belts = nil
+        local okB, bList = pcall(FindAllOf, "ConveyorBeltObject")
+        if okB and bList and #bList > 0 then
+            belts = bList
+        else
+            local okM, mList = pcall(FindAllOf, "MachineObject")
+            if okM and mList then
+                belts = {}
+                for _, m in ipairs(mList) do
+                    if StationData.GetMachineCategory(m) == "Conveyor" then
+                        belts[#belts + 1] = m
+                    end
+                end
+            end
+        end
+        if belts then
+            local nearBelts = {}
+            for _, b in ipairs(belts) do
+                if Core.IsValidObj(b) then
+                    local bAct = StationData.GetObjectActor and StationData.GetObjectActor(b) or nil
+                    local bx, by, bz = nil, nil, nil
+                    local bFw = nil
+                    if Core.IsValidObj(bAct) then
+                        pcall(function()
+                            local l = bAct:K2_GetActorLocation()
+                            if l and type(l.X) == "number" then bx, by, bz = l.X, l.Y, l.Z end
+                            local f = bAct:GetActorForwardVector()
+                            if f and type(f.X) == "number" then bFw = { X = f.X, Y = f.Y, Z = f.Z } end
+                        end)
+                    end
+                    if not bx then
+                        local okPos, mx, my, mz = pcall(StationData.GetMachineWorldPosAndYaw, b, nil)
+                        if okPos and type(mx) == "number" then bx, by, bz = mx, my, mz end
+                    end
+                    if bx then
+                        local bestS, bestD2, bestF = nil, nil, nil
+                        for sIdx = 1, stackCount do
+                            local f = stopFrames[sIdx]
+                            if f then
+                                local dx, dy, dz = bx - f.Pos.X, by - f.Pos.Y, bz - f.Pos.Z
+                                local d2 = dx * dx + dy * dy + dz * dz
+                                if d2 <= (1500.0 * 1500.0) and (not bestD2 or d2 < bestD2) then
+                                    bestD2, bestS, bestF = d2, sIdx, f
+                                end
+                            end
+                        end
+                        if bestF then
+                            local dx, dy, dz = bx - bestF.Pos.X, by - bestF.Pos.Y, bz - bestF.Pos.Z
+                            local lx = dx * bestF.Fw.X + dy * bestF.Fw.Y + dz * bestF.Fw.Z
+                            local ly = dx * bestF.Rt.X + dy * bestF.Rt.Y + dz * bestF.Rt.Z
+                            local lz = dx * bestF.Up.X + dy * bestF.Up.Y + dz * bestF.Up.Z
+                            local fStr = ""
+                            if bFw then
+                                local flx = bFw.X * bestF.Fw.X + bFw.Y * bestF.Fw.Y + bFw.Z * bestF.Fw.Z
+                                local fly = bFw.X * bestF.Rt.X + bFw.Y * bestF.Rt.Y + bFw.Z * bestF.Rt.Z
+                                fStr = string.format(" bFw=(%.2f,%.2f)", flx, fly)
+                            end
+                            local curItem = StationData.GetPrimaryItemForMachine and StationData.GetPrimaryItemForMachine(b) or nil
+                            nearBelts[#nearBelts + 1] = {
+                                d2 = bestD2,
+                                line = string.format("stop#%d d=%.0f local=(%.1f,%.1f,%.1f)%s item=%s",
+                                    bestS, math.sqrt(bestD2), lx, ly, lz, fStr, SafeObjName(curItem))
+                            }
+                        end
+                    end
+                end
+            end
+            table.sort(nearBelts, function(a, b) return a.d2 < b.d2 end)
+            local limit = math.min(#nearBelts, 12)
+            local out = {}
+            for i = 1, limit do out[i] = nearBelts[i].line end
+            Core.Log(string.format("[ElevatorLabels] Geo[%s] NearBelts(%d/%d): %s", bHex, #nearBelts, #belts, table.concat(out, " | ")))
+        end
+    end
 end
 
 local function GetActorStaticMeshDiag(actor)
@@ -644,6 +826,7 @@ local function RefreshCachedWorldPorts()
                             end
 
                             local bHex = string.format("0x%X", tonumber(bAddr) or 0)
+                            LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCount)
                             for _, colInfo in ipairs(activeCols) do
                                 local localPort = ResolvePortLocalFromInputs(bottomElev, colInfo.Idx1, bAddr)
                                 if localPort then
