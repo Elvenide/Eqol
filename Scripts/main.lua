@@ -33,7 +33,6 @@ Core.RegisterFeature(require("features.elevator_labels"))
 Core.RegisterFeature(require("features.elevator_hotkeys"))
 Core.RegisterFeature(require("features.codex_search"))
 Core.RegisterFeature(require("features.research_enhancements"))
-Core.RegisterFeature(require("features.assembler_input_rates"))
 Core.RegisterFeature(require("features.splitter_balancer_tweaks"))
 
 -- Startup

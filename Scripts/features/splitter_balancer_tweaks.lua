@@ -1,7 +1,7 @@
--- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 1/2 Height
+-- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 2/3 Height
 -- 1. Allows players to walk through splitters and belt balancers (ignores Pawn/movement channels +
 --    MoveIgnoreActors) while keeping WorldStatic/WorldDynamic/Trace channels blocking for building placement.
--- 2. Scales splitter and belt balancer housing meshes to 1/2 height (0.50x Z), anchored at floor Z.
+-- 2. Scales splitter and belt balancer housing meshes to 2/3 height (~0.67x Z), anchored at floor Z.
 
 local Core = require("core")
 
@@ -9,8 +9,8 @@ local Feature = {
     Name = "SplitterBalancerTweaks",
 }
 
-local HEIGHT_SCALE     = 0.50
-local ECC_PAWN         = 3   -- ECollisionChannel::ECC_Pawn
+local HEIGHT_SCALE     = 2.0 / 3.0
+local ECC_PAWN         = 2   -- ECollisionChannel::ECC_Pawn (WorldStatic=0, WorldDynamic=1, Pawn=2, Visibility=3)
 local ECR_IGNORE       = 0   -- ECollisionResponse::ECR_Ignore
 local ECR_BLOCK        = 2   -- ECollisionResponse::ECR_Block
 local SCAN_PERIOD_IDLE = 0.45
@@ -126,15 +126,76 @@ local function LogActorCollisionDiag(actor, tag)
         tag, clsName, n, table.concat(details, " | ")))
 end
 
-local function GetPawnCollisionContext()
+local function ResolveActivePawn()
     local pc = Core.GetLocalPlayerController()
     local pawn = Core.IsValidObj(pc) and pc.Pawn or nil
-    if not Core.IsValidObj(pawn) then return nil, {}, {} end
+    if Core.IsValidObj(pawn) and SafeClassName(pawn) ~= "BP_MainMenuPawn_C" then
+        return pawn
+    end
+
+    local okChars, chars = pcall(FindAllOf, "BP_Character_C")
+    if okChars and chars then
+        for _, ch in ipairs(chars) do
+            if Core.IsValidObj(ch) then
+                local okLoc, isLoc = pcall(function()
+                    return ch.IsLocallyControlled and ch:IsLocallyControlled()
+                end)
+                if okLoc and isLoc == true then
+                    return ch
+                end
+            end
+        end
+        for _, ch in ipairs(chars) do
+            if Core.IsValidObj(ch) then
+                return ch
+            end
+        end
+    end
+    return pawn
+end
+
+local function LogPawnExtraDiag(pawn)
+    local clsName = SafeClassName(pawn)
+    local key = "pawnextra:" .. clsName
+    if LoggedClasses[key] then return end
+    LoggedClasses[key] = true
+
+    local moveInfo = "nil"
+    pcall(function()
+        local cm = pawn.CharacterMovement
+        if Core.IsValidObj(cm) then
+            local upd = Core.IsValidObj(cm.UpdatedComponent) and SafeName(cm.UpdatedComponent) or "nil"
+            local stepH = tonumber(cm.MaxStepHeight) or -1
+            local mode = tonumber(cm.MovementMode) or -1
+            moveInfo = string.format("updated=%s stepH=%.1f mode=%d", upd, stepH, mode)
+        end
+    end)
+
+    local attachedNames = {}
+    pcall(function()
+        if pawn.GetAttachedActors then
+            local arr, cnt = ExtractArray(pawn:GetAttachedActors())
+            for i = 1, cnt do
+                attachedNames[#attachedNames + 1] = SafeClassName(arr[i])
+            end
+        end
+    end)
+
+    Core.Log(string.format("[SplitterBalancerTweaks] PawnExtra[%s] move=(%s) attached(%d)=[%s]",
+        clsName, moveInfo, #attachedNames, table.concat(attachedNames, ",")))
+end
+
+local function GetPawnCollisionContext()
+    local pawn = ResolveActivePawn()
+    if not Core.IsValidObj(pawn) then return nil, {}, { [ECC_PAWN] = true } end
 
     local primCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
     if not Core.IsValidObj(primCls) or not pawn.K2_GetComponentsByClass then
         return pawn, {}, { [ECC_PAWN] = true }
     end
+
+    LogActorCollisionDiag(pawn, "pawn")
+    LogPawnExtraDiag(pawn)
 
     local comps, n = ExtractArray(pawn:K2_GetComponentsByClass(primCls))
     local pawnComps = {}
@@ -147,7 +208,7 @@ local function GetPawnCollisionContext()
                 local colEn = c.GetCollisionEnabled and tonumber(c:GetCollisionEnabled()) or 0
                 if colEn ~= 0 and c.GetCollisionObjectType then
                     local ot = tonumber(c:GetCollisionObjectType())
-                    -- Include Pawn's own movement collider channel (e.g. ECC_PawnMovement),
+                    -- Include Pawn's own movement collider channel (e.g. ECC_Pawn=2 or custom movement channel),
                     -- never generic WorldStatic(0) or WorldDynamic(1).
                     if ot and ot >= 2 then
                         ignoreChannels[ot] = true
@@ -157,11 +218,18 @@ local function GetPawnCollisionContext()
         end
     end
 
-    if not LoggedClasses["pawn"] then
-        LoggedClasses["pawn"] = true
-        LogActorCollisionDiag(pawn, "pawn")
-    end
     return pawn, pawnComps, ignoreChannels
+end
+
+local function FormatChannelSet(setTbl)
+    local keys = {}
+    for ch, enabled in pairs(setTbl) do
+        if enabled then keys[#keys + 1] = ch end
+    end
+    table.sort(keys)
+    local s = {}
+    for _, ch in ipairs(keys) do s[#s + 1] = tostring(ch) end
+    return table.concat(s, ",")
 end
 
 local function EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels)
@@ -170,9 +238,14 @@ local function EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels
 
     local changed = false
     local comps, n = ExtractArray(actor:K2_GetComponentsByClass(primCls))
-    local pawnAddr = Core.IsValidObj(pawn) and pawn:GetAddress() or nil
+    local pawnCls = SafeClassName(pawn)
+    local actorCls = SafeClassName(actor)
+    local isLivePawn = Core.IsValidObj(pawn) and pawnCls ~= "BP_MainMenuPawn_C"
+    local pawnAddr = isLivePawn and pawn:GetAddress() or nil
     local actorAddr = actor:GetAddress()
     local needIgnorePair = pawnAddr and not (IgnoredPawnActors[pawnAddr] and IgnoredPawnActors[pawnAddr][actorAddr])
+    local actorIgnErr, pawnIgnErr = nil, nil
+    local actorIgnCount, pawnIgnCount = 0, 0
 
     for i = 1, n do
         local c = comps[i]
@@ -187,8 +260,9 @@ local function EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels
                             changed = true
                         end
                     end
-                    if needIgnorePair and Core.IsValidObj(pawn) and c.IgnoreActorWhenMoving then
-                        c:IgnoreActorWhenMoving(pawn, true)
+                    if needIgnorePair and c.IgnoreActorWhenMoving then
+                        local okA, errA = pcall(function() c:IgnoreActorWhenMoving(pawn, true) end)
+                        if okA then actorIgnCount = actorIgnCount + 1 else actorIgnErr = tostring(errA) end
                     end
                 end
             end)
@@ -200,8 +274,39 @@ local function EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels
         IgnoredPawnActors[pawnAddr][actorAddr] = true
         for _, pcComp in ipairs(pawnComps) do
             if Core.IsValidObj(pcComp) and pcComp.IgnoreActorWhenMoving then
-                pcall(function() pcComp:IgnoreActorWhenMoving(actor, true) end)
+                local okP, errP = pcall(function() pcComp:IgnoreActorWhenMoving(actor, true) end)
+                if okP then pawnIgnCount = pawnIgnCount + 1 else pawnIgnErr = tostring(errP) end
             end
+        end
+    end
+
+    local attachedKey = "attached:" .. actorCls
+    if not LoggedClasses[attachedKey] then
+        LoggedClasses[attachedKey] = true
+        local attachedNames = {}
+        pcall(function()
+            if actor.GetAttachedActors then
+                local arr, cnt = ExtractArray(actor:GetAttachedActors())
+                for i = 1, cnt do
+                    attachedNames[#attachedNames + 1] = SafeClassName(arr[i])
+                end
+            end
+        end)
+        if #attachedNames > 0 then
+            Core.Log(string.format("[SplitterBalancerTweaks] Attached[%s] (%d): %s",
+                actorCls, #attachedNames, table.concat(attachedNames, ",")))
+        end
+    end
+
+    if isLivePawn and (changed or needIgnorePair) then
+        local logKey = "apply:" .. pawnCls .. ":" .. actorCls
+        if not LoggedClasses[logKey] then
+            LoggedClasses[logKey] = true
+            Core.Log(string.format(
+                "[SplitterBalancerTweaks] AppliedWalk[%s -> %s] ch=[%s] changed=%s ignA=%d(%s) ignP=%d(%s)",
+                pawnCls, actorCls, FormatChannelSet(ignoreChannels), tostring(changed),
+                actorIgnCount, tostring(actorIgnErr or "ok"),
+                pawnIgnCount, tostring(pawnIgnErr or "ok")))
         end
     end
 
@@ -224,7 +329,7 @@ local function ShouldScaleMeshComponent(comp)
     return true
 end
 
-local function EnsureQuarterHeight(actor)
+local function EnsureTargetHeight(actor)
     local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
     if not Core.IsValidObj(smCls) or not actor.K2_GetComponentsByClass then return false end
 
@@ -335,9 +440,10 @@ local function ScanAndApplyTweaks()
                 if Core.IsValidObj(actor) then
                     LogActorCollisionDiag(actor, "before")
                     local colChanged = EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels)
-                    local scaleChanged = EnsureQuarterHeight(actor)
+                    local scaleChanged = EnsureTargetHeight(actor)
                     if colChanged or scaleChanged then
-                        LogActorCollisionDiag(actor, "after")
+                        local afterTag = (SafeClassName(pawn) ~= "BP_MainMenuPawn_C" and Core.IsValidObj(pawn)) and ("after_" .. SafeClassName(pawn)) or "after"
+                        LogActorCollisionDiag(actor, afterTag)
                     end
                 end
             end
@@ -357,7 +463,7 @@ end
 
 function Feature.Init()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (Pawn walk-through + 0.50x Z housing height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized (Pawn walk-through + 2/3 (0.67x) Z housing height).")
 end
 
 function Feature.OnClientRestart()
