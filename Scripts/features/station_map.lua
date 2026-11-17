@@ -964,6 +964,9 @@ function Feature.Init()
         MappingName = "Eqol_StationMap",
         Label       = "Station Map",
         OnPress     = ToggleStationMap,
+        CanTrigger  = function()
+            return Core.IsValidObj(ActiveMapWin) or nil
+        end,
     })
     EnsureMapKeybinds()
     StationData.OnIconVisibilityChanged(function()

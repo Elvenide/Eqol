@@ -265,6 +265,15 @@ local function GoToElevatorFloor(floorNum)
     local elevObj, openWidget = FindActivePlayerElevator(pc)
     if not Core.IsValidObj(elevObj) then return end
 
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
+        if not Core.IsValidObj(openWidget)
+            or widgetSub.CurrentWindow:GetAddress() ~= openWidget:GetAddress()
+        then
+            return
+        end
+    end
+
     pcall(function() pc:ExitBuildingMode() end)
     ExecuteInGameThreadWithDelay(1, function()
         if Core.IsValidObj(pc) then

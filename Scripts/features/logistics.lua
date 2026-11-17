@@ -684,7 +684,10 @@ local function OpenLogisticsWindow()
 end
 
 local function ToggleLogistics()
-    if Core.IsAnyTextInputFocused() then
+    if Core.IsSelectingAnyRegisteredKeybind()
+        or IsSelectingAnyKeybind()
+        or Core.IsAnyTextInputFocused()
+    then
         return
     end
 
@@ -693,16 +696,7 @@ local function ToggleLogistics()
         return
     end
 
-    if IsSelectingAnyKeybind()
-        or Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
-        or Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
-        or Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
-    then
-        return
-    end
-
-    local pc = Core.GetLocalPlayerController()
-    if not Core.IsValidObj(pc) or not pc.CharacterInputEnabled then
+    if not Core.IsGameplayInputAllowed() then
         return
     end
 

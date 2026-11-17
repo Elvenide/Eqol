@@ -367,11 +367,24 @@ local TextInputFocusWatcherActive = false
 local SuppressedCharacterInput = false
 local SuppressedCharacterInputPC = nil
 
-local function IsWidgetTreeVisible(w, ownerWin)
-    if not Core.IsValidObj(w) then return false end
+local function ResolveEnclosingUserWidget(widget)
+    if not Core.IsValidObj(widget) or not widget.GetOuter then return nil end
+    local okO, outer = pcall(function() return widget:GetOuter() end)
+    if not okO or not Core.IsValidObj(outer) then return nil end
+    if outer.GetOuter then
+        local okOO, host = pcall(function() return outer:GetOuter() end)
+        if okOO and Core.IsValidObj(host) and host.IsVisible and host:GetAddress() ~= widget:GetAddress() then
+            return host
+        end
+    end
+    return nil
+end
 
-    local cur = w
-    local root = w
+local function IsWidgetChainVisible(startWidget, depthBudget)
+    if not Core.IsValidObj(startWidget) or (depthBudget or 0) <= 0 then return false end
+
+    local cur = startWidget
+    local root = startWidget
     for _ = 1, 32 do
         if not Core.IsValidObj(cur) then break end
         local okV, vis = pcall(function() return cur:IsVisible() end)
@@ -386,19 +399,27 @@ local function IsWidgetTreeVisible(w, ownerWin)
         cur = parent
     end
 
-    if Core.IsValidObj(ownerWin) then
-        local okOV, oVis = pcall(function() return ownerWin:IsVisible() end)
-        if okOV and not oVis then return false end
-        local okOP, oParent = pcall(function() return ownerWin:GetParent() end)
-        if (not okOP or not Core.IsValidObj(oParent)) and ownerWin.IsInViewport then
-            local okVP, inVp = pcall(function() return ownerWin:IsInViewport() end)
-            if okVP and not inVp then return false end
-        end
+    -- Child UserWidgets stop their GetParent() chain at their internal WidgetTree root;
+    -- walk up to the enclosing host UUserWidget when present before checking IsInViewport().
+    local host = ResolveEnclosingUserWidget(root)
+    if not Core.IsValidObj(host) and root:GetAddress() ~= startWidget:GetAddress() then
+        host = ResolveEnclosingUserWidget(startWidget)
+    end
+    if Core.IsValidObj(host) then
+        return IsWidgetChainVisible(host, (depthBudget or 8) - 1)
     end
 
     if Core.IsValidObj(root) and root.IsInViewport then
         local okRVP, rInVp = pcall(function() return root:IsInViewport() end)
         if okRVP and not rInVp then return false end
+    end
+    return true
+end
+
+local function IsWidgetTreeVisible(w, ownerWin)
+    if not IsWidgetChainVisible(w, 8) then return false end
+    if Core.IsValidObj(ownerWin) and not IsWidgetChainVisible(ownerWin, 8) then
+        return false
     end
     return true
 end
@@ -505,6 +526,7 @@ local function EnsureTextInputFocusWatcher()
         if Core.IsValidObj(pc) then
             local okMD, md = pcall(function()
                 return pc:IsInputKeyDown({ KeyName = FName("LeftMouseButton") })
+                    or pc:WasInputKeyJustPressed({ KeyName = FName("LeftMouseButton") })
             end)
             mouseDown = okMD and md == true
         end
@@ -533,10 +555,10 @@ local function EnsureTextInputFocusWatcher()
         end
 
         SyncCharacterInputSuppression()
-        ExecuteInGameThreadWithDelay(anyVisible and 25 or 200, WatcherTick)
+        ExecuteInGameThreadWithDelay(anyVisible and 10 or 200, WatcherTick)
     end
 
-    ExecuteInGameThreadWithDelay(25, WatcherTick)
+    ExecuteInGameThreadWithDelay(10, WatcherTick)
 end
 
 function Core.RegisterTextInput(textInputWidget, ownerWindow)
@@ -548,6 +570,17 @@ function Core.RegisterTextInput(textInputWidget, ownerWindow)
     }
     Core.EnsureKeybindHooks()
     EnsureTextInputFocusWatcher()
+end
+
+local function IsAnyClassInstanceFocused(shortClassName, pc)
+    local ok, list = pcall(FindAllOf, shortClassName)
+    if not ok or not list then return false end
+    for _, w in ipairs(list) do
+        if Core.IsValidObj(w) and IsWidgetChainVisible(w, 8) and IsWidgetOrChildFocused(w, pc) then
+            return true
+        end
+    end
+    return false
 end
 
 function Core.IsAnyTextInputFocused()
@@ -568,6 +601,12 @@ function Core.IsAnyTextInputFocused()
                     return true
                 end
             end
+        end
+    end
+    local pc = Core.GetLocalPlayerController()
+    for _, clsName in ipairs({ "WBP_TextInput_C", "EditableTextBox", "EditableText", "MultiLineEditableTextBox" }) do
+        if IsAnyClassInstanceFocused(clsName, pc) then
+            return true
         end
     end
     return false
@@ -728,6 +767,86 @@ local function SyncKeybindRow(bs, row)
     end
 end
 
+function Core.IsGameplayInputAllowed(opts)
+    opts = opts or {}
+    if Core.IsSelectingAnyRegisteredKeybind() or Core.IsAnyTextInputFocused() then
+        return false
+    end
+    if Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
+        or Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
+        or Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
+        or Core.IsAnyWidgetClassVisible("WBP_ConfirmationPopup_C")
+        or Core.IsAnyWidgetClassVisible("WBP_Confirmation_Popup_C")
+    then
+        return false
+    end
+
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then
+        return false
+    end
+
+    -- Block while any native UI window (Codex, Research, Inventory, Machine UI, etc.) is active
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
+        local allowSelfWindow = false
+        if opts.AllowNativeWindowClass then
+            local cls = Core.FindOrLoadClass(opts.AllowNativeWindowClass)
+            if Core.IsValidObj(cls) then
+                local okIsA, isA = pcall(function() return widgetSub.CurrentWindow:IsA(cls) end)
+                if okIsA and isA == true then
+                    allowSelfWindow = true
+                end
+            end
+        end
+        if not allowSelfWindow then
+            return false
+        end
+    end
+
+    if opts.AllowCursorUI == true then
+        return true
+    end
+
+    -- Visible cursor means a modal/overlay UI (Codex, Map, Logistics, Designer, Popups) owns input
+    local showCursor = false
+    pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
+    if showCursor then
+        return false
+    end
+
+    local charEnabled = false
+    pcall(function() charEnabled = (pc.CharacterInputEnabled == true) end)
+    if charEnabled then
+        return true
+    end
+
+    local isPiloting = false
+    local isSpectating = false
+    pcall(function()
+        local po = pc.PlayerObject
+        if Core.IsValidObj(po) then
+            isPiloting = Core.IsValidObj(po.PilotedShip)
+            if Core.IsValidObj(po.SpectatorView) then
+                isSpectating = (po.SpectatorView.bSpectatorMode == true)
+            end
+        end
+    end)
+    return isPiloting or isSpectating
+end
+
+local function CanTriggerRegisteredKeybind(bs)
+    if type(bs.CanTrigger) == "function" then
+        local ok, customRes = pcall(bs.CanTrigger)
+        if ok and customRes == true then
+            return not Core.IsSelectingAnyRegisteredKeybind() and not Core.IsAnyTextInputFocused()
+        elseif ok and customRes == false then
+            return false
+        end
+    end
+    return Core.IsGameplayInputAllowed(bs)
+end
+
 local function ApplyKeybindState(bs, keyName, shouldSave)
     local normalized = (keyName and keyName ~= "") and keyName or "None"
     Core.Config[bs.ConfigKey] = normalized
@@ -747,12 +866,7 @@ local function ApplyKeybindState(bs, keyName, shouldSave)
                 for _, entry in pairs(RegisteredKeybinds) do
                     if entry.ActiveUe4ssKey == ue4ssKey then
                         ExecuteInGameThread(function()
-                            if not Core.IsSelectingAnyRegisteredKeybind()
-                                and not Core.IsAnyTextInputFocused()
-                                and not Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
-                                and not Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
-                                and not Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
-                            then
+                            if CanTriggerRegisteredKeybind(entry) then
                                 entry.OnPress()
                             end
                         end)
@@ -773,12 +887,7 @@ local function ApplyKeybindState(bs, keyName, shouldSave)
                 local okD, down = pcall(function() return pc:IsInputKeyDown({ KeyName = FName(cur) }) end)
                 if okD and down and not bs.FallbackWasDown then
                     bs.FallbackWasDown = true
-                    if not Core.IsSelectingAnyRegisteredKeybind()
-                        and not Core.IsAnyTextInputFocused()
-                        and not Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
-                        and not Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
-                        and not Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
-                    then
+                    if CanTriggerRegisteredKeybind(bs) then
                         bs.OnPress()
                     end
                 elseif not okD or not down then
@@ -987,6 +1096,9 @@ function Core.RegisterConfigurableKeybind(opts)
         Label = opts.Label,
         OnPress = opts.OnPress,
         OnChanged = opts.OnChanged,
+        CanTrigger = opts.CanTrigger,
+        AllowCursorUI = opts.AllowCursorUI,
+        AllowNativeWindowClass = opts.AllowNativeWindowClass,
         ActiveUe4ssKey = nil,
         FallbackPollActive = false,
         FallbackWasDown = false,
