@@ -159,6 +159,30 @@ local function GetItemKey(item)
     return tostring(item:GetAddress())
 end
 
+local function GetAssemblerRunState(m)
+    local bWorking = nil
+    local okW, w = pcall(function() return m.bWorking end)
+    if okW and type(w) == "boolean" then
+        bWorking = w
+    end
+
+    local status = nil
+    if m.GetAssemblerStatus then
+        local okS, s = pcall(function() return m:GetAssemblerStatus() end)
+        if okS and type(s) == "number" then
+            status = s
+        end
+    end
+
+    local isRunning = false
+    if bWorking ~= nil then
+        isRunning = bWorking and (status == nil or status == 0)
+    elseif status ~= nil then
+        isRunning = (status == 0)
+    end
+    return isRunning, status
+end
+
 local function CollectStationLogisticsData(station, walkFrame)
     local platforms = StationData.GetStationPlatforms(station)
     if #platforms == 0 and Core.IsValidObj(walkFrame) then
@@ -167,8 +191,8 @@ local function CollectStationLogisticsData(station, walkFrame)
 
     local containerItems = {} -- itemKey -> { Item = uobj, Amount = number }
     local assemblers = {}
-    local stationProdRates = {} -- itemKey -> items/min
-    local stationConsRates = {} -- itemKey -> items/min
+    local stationProdRates = {} -- itemKey -> actual items/min
+    local stationConsRates = {} -- itemKey -> active/starved items/min
 
     local stationProdItems = {} -- itemKey -> { Item = uobj, Rate = number }
 
@@ -212,6 +236,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                         if bm > 0.0001 then bonusMult = bm end
                     end)
 
+                    local isRunning, machineStatus = GetAssemblerRunState(m)
                     local craftSec = 1.0
                     local inputs = {}
                     local outputs = {}
@@ -222,18 +247,20 @@ local function CollectStationLogisticsData(station, walkFrame)
                             craftSec = sec
                         end
 
-                        -- Outputs
+                        -- Outputs (only count toward Total Production when actively running)
                         local okOut, outStack = pcall(function() return rec.Output end)
                         if okOut and outStack and Core.IsValidObj(outStack.Item) then
                             local amt = tonumber(outStack.Amount) or 1
                             local rate = (amt * 60.0 / craftSec) * bonusMult
                             table.insert(outputs, { Item = outStack.Item, Rate = rate })
-                            local k = GetItemKey(outStack.Item)
-                            stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
-                            if not stationProdItems[k] then
-                                stationProdItems[k] = { Item = outStack.Item, Rate = 0.0 }
+                            if isRunning then
+                                local k = GetItemKey(outStack.Item)
+                                stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
+                                if not stationProdItems[k] then
+                                    stationProdItems[k] = { Item = outStack.Item, Rate = 0.0 }
+                                end
+                                stationProdItems[k].Rate = stationProdItems[k].Rate + rate
                             end
-                            stationProdItems[k].Rate = stationProdItems[k].Rate + rate
                         else
                             local okOuts, outs = pcall(function() return rec:GetOutputs() end)
                             if okOuts and outs then
@@ -243,18 +270,20 @@ local function CollectStationLogisticsData(station, walkFrame)
                                         local amt = tonumber(st.Amount) or 1
                                         local rate = (amt * 60.0 / craftSec) * bonusMult
                                         table.insert(outputs, { Item = st.Item, Rate = rate })
-                                        local k = GetItemKey(st.Item)
-                                        stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
-                                        if not stationProdItems[k] then
-                                            stationProdItems[k] = { Item = st.Item, Rate = 0.0 }
+                                        if isRunning then
+                                            local k = GetItemKey(st.Item)
+                                            stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
+                                            if not stationProdItems[k] then
+                                                stationProdItems[k] = { Item = st.Item, Rate = 0.0 }
+                                            end
+                                            stationProdItems[k].Rate = stationProdItems[k].Rate + rate
                                         end
-                                        stationProdItems[k].Rate = stationProdItems[k].Rate + rate
                                     end
                                 end)
                             end
                         end
 
-                        -- Inputs
+                        -- Inputs (count active demand when running or starved for items)
                         local okIn, inArr = pcall(function() return rec.Inputs end)
                         if okIn and inArr then
                             StationData.ForEachArray(inArr, function(_, elem)
@@ -263,8 +292,10 @@ local function CollectStationLogisticsData(station, walkFrame)
                                     local amt = tonumber(st.Amount) or 1
                                     local rate = (amt * 60.0 / craftSec) * bonusMult
                                     table.insert(inputs, { Item = st.Item, Rate = rate })
-                                    local k = GetItemKey(st.Item)
-                                    stationConsRates[k] = (stationConsRates[k] or 0.0) + rate
+                                    if isRunning or machineStatus == 1 then
+                                        local k = GetItemKey(st.Item)
+                                        stationConsRates[k] = (stationConsRates[k] or 0.0) + rate
+                                    end
                                 end
                             end)
                         end
@@ -274,6 +305,8 @@ local function CollectStationLogisticsData(station, walkFrame)
                         Machine = m,
                         Name = StationData.GetMachineDisplayName(m),
                         HasRecipe = Core.IsValidObj(rec),
+                        IsRunning = isRunning,
+                        MachineStatus = machineStatus,
                         Inputs = inputs,
                         Outputs = outputs,
                     })
@@ -431,15 +464,33 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
 
     local statusCode = "G"
     local statusCol = STATUS_COLORS.Green
-    local tooltipMsg = "Production OK: all input rates meet station demand."
+    local tooltipMsg = "Producing: machine is actively running and supplied."
     if not entry.HasRecipe then
         statusCode = "A"
         statusCol = STATUS_COLORS.Amber
         tooltipMsg = "Idle: no active recipe or output configured."
-    elseif hasDeficit then
-        statusCode = "R"
+    elseif entry.MachineStatus == 2 then
+        statusCode = "R_PWR"
         statusCol = STATUS_COLORS.Red
-        tooltipMsg = "Bottlenecked: input demand exceeds production (" .. table.concat(deficitNames, ", ") .. ")."
+        tooltipMsg = "Offline: insufficient power."
+    elseif entry.MachineStatus == 3 then
+        statusCode = "R_CFG"
+        statusCol = STATUS_COLORS.Red
+        tooltipMsg = "Stopped: invalid machine configuration."
+    elseif entry.MachineStatus == 1 then
+        statusCode = "R_ITM"
+        statusCol = STATUS_COLORS.Red
+        tooltipMsg = hasDeficit
+            and ("Bottlenecked (waiting for items): " .. table.concat(deficitNames, ", ") .. ".")
+            or "Waiting for input items."
+    elseif hasDeficit then
+        statusCode = "R_DEF"
+        statusCol = STATUS_COLORS.Red
+        tooltipMsg = "Bottlenecked: input demand exceeds current production (" .. table.concat(deficitNames, ", ") .. ")."
+    elseif not entry.IsRunning then
+        statusCode = "A_STP"
+        statusCol = STATUS_COLORS.Amber
+        tooltipMsg = "Idle: output full or machine not currently running."
     end
 
     local outParts = {}
@@ -447,7 +498,9 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
         local k = GetItemKey(outp.Item) or "?"
         table.insert(outParts, string.format("%s=%.2f", k, outp.Rate or 0.0))
     end
-    local sig = string.format("%s|%s|%s|%s", tostring(entry.Name), statusCode, table.concat(inpParts, ","), table.concat(outParts, ","))
+    local sig = string.format("%s|%s|%s|%s|%s|%s",
+        tostring(entry.Name), statusCode, tostring(entry.IsRunning), tostring(entry.MachineStatus),
+        table.concat(inpParts, ","), table.concat(outParts, ","))
     return statusCol, tooltipMsg, sig
 end
 
