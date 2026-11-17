@@ -83,6 +83,7 @@ local InjectedSettingsRows = {}
 local TrackedRemapRows = {}
 local HudKeyIndicators = {} -- hudAddr -> { Root, KeyText }
 local ActiveLogisticsWin = nil
+local ActiveLogisticsUI = nil
 local HookedButtons = {}
 
 --------------------------------------------------------------------------------
@@ -327,6 +328,7 @@ local function CloseLogisticsWindow()
         pcall(function() ActiveLogisticsWin:RemoveFromParent() end)
     end
     ActiveLogisticsWin = nil
+    ActiveLogisticsUI = nil
     SetLogisticsCursorMode(Core.GetLocalPlayerController(), nil, false)
 end
 
@@ -378,6 +380,334 @@ local function AddItemRateChip(parentHBox, window, pc, outer, item, rate, tintCo
     end
 end
 
+local function BuildStorageSignatures(items)
+    local orderParts = {}
+    local fullParts = {}
+    for _, entry in ipairs(items) do
+        local k = GetItemKey(entry.Item) or "?"
+        table.insert(orderParts, k)
+        table.insert(fullParts, k .. "=" .. tostring(entry.Amount))
+    end
+    return table.concat(orderParts, ","), table.concat(fullParts, ";")
+end
+
+local function BuildTotalsSignature(prodTotals)
+    local parts = {}
+    for _, entry in ipairs(prodTotals) do
+        local k = GetItemKey(entry.Item) or "?"
+        table.insert(parts, string.format("%s=%.2f", k, entry.Rate or 0.0))
+    end
+    return table.concat(parts, ";")
+end
+
+local function ComputeAssemblerStatus(entry, prodRates, consRates)
+    local hasDeficit = false
+    local deficitNames = {}
+    local inpParts = {}
+    for _, inp in ipairs(entry.Inputs) do
+        local k = GetItemKey(inp.Item) or "?"
+        local pRate = prodRates[k] or 0.0
+        local cRate = consRates[k] or 0.0
+        local isDef = false
+        local hasRecipe = false
+        pcall(function() hasRecipe = Core.IsValidObj(inp.Item.Recipe) end)
+        if (pRate > 0.001 or hasRecipe) and cRate > pRate + 0.001 then
+            hasDeficit = true
+            isDef = true
+            local iName = k
+            pcall(function()
+                if inp.Item and inp.Item.Name then
+                    local s = tostring(inp.Item.Name:ToString())
+                    if s ~= "" then iName = s end
+                elseif inp.Item and inp.Item.GetName then
+                    local s = tostring(inp.Item:GetName())
+                    if s ~= "" then iName = s end
+                end
+            end)
+            deficitNames[#deficitNames + 1] = string.format("%s (%.1f/m needed, %.1f/m produced)", iName, cRate, pRate)
+        end
+        table.insert(inpParts, string.format("%s=%.2f:%s", k, inp.Rate or 0.0, isDef and "R" or "N"))
+    end
+
+    local statusCode = "G"
+    local statusCol = STATUS_COLORS.Green
+    local tooltipMsg = "Production OK: all input rates meet station demand."
+    if not entry.HasRecipe then
+        statusCode = "A"
+        statusCol = STATUS_COLORS.Amber
+        tooltipMsg = "Idle: no active recipe or output configured."
+    elseif hasDeficit then
+        statusCode = "R"
+        statusCol = STATUS_COLORS.Red
+        tooltipMsg = "Bottlenecked: input demand exceeds production (" .. table.concat(deficitNames, ", ") .. ")."
+    end
+
+    local outParts = {}
+    for _, outp in ipairs(entry.Outputs) do
+        local k = GetItemKey(outp.Item) or "?"
+        table.insert(outParts, string.format("%s=%.2f", k, outp.Rate or 0.0))
+    end
+    local sig = string.format("%s|%s|%s|%s", tostring(entry.Name), statusCode, table.concat(inpParts, ","), table.concat(outParts, ","))
+    return statusCol, tooltipMsg, sig
+end
+
+local function PopulateStorageSection(ui, items)
+    if not ui or not Core.IsValidObj(ui.Window) or not Core.IsValidObj(ui.InvWrap) then return end
+    local orderSig, fullSig = BuildStorageSignatures(items)
+    if ui.LastStorageFullSig == fullSig then return end
+    ui.LastStorageFullSig = fullSig
+
+    if Core.IsValidObj(ui.InvHeader) then
+        pcall(function()
+            ui.InvHeader:SetText(Core.MakeText(string.format("Storage (%d)", #items)))
+        end)
+    end
+
+    -- Fast in-place update when the set/order of stored item types hasn't changed
+    if ui.LastStorageOrderSig == orderSig and ui.StorageSlots then
+        local allOk = true
+        for idx, entry in ipairs(items) do
+            local slotW = ui.StorageSlots[idx]
+            if Core.IsValidObj(slotW) then
+                pcall(function()
+                    slotW:SetItemStack({ Item = entry.Item, Amount = entry.Amount })
+                end)
+            else
+                allOk = false
+                break
+            end
+        end
+        if allOk then return end
+    end
+
+    ui.LastStorageOrderSig = orderSig
+    ui.StorageSlots = {}
+    local savedOffset = 0.0
+    if Core.IsValidObj(ui.InvScroll) and ui.InvScroll.GetScrollOffset then
+        pcall(function() savedOffset = tonumber(ui.InvScroll:GetScrollOffset()) or 0.0 end)
+    end
+
+    pcall(function()
+        if ui.InvWrap.ClearChildren then ui.InvWrap:ClearChildren() end
+    end)
+    for idx, entry in ipairs(items) do
+        local slotW = Core.CreateUserWidget(PATHS.InventorySlotClass, ui.Window, ui.PC)
+        if Core.IsValidObj(slotW) then
+            pcall(function()
+                slotW:SetItemStack({ Item = entry.Item, Amount = entry.Amount })
+            end)
+            ui.InvWrap:AddChildToWrapBox(slotW)
+            ui.StorageSlots[idx] = slotW
+        end
+    end
+
+    if Core.IsValidObj(ui.InvScroll) and ui.InvScroll.SetScrollOffset and savedOffset > 0.0 then
+        pcall(function() ui.InvScroll:SetScrollOffset(savedOffset) end)
+    end
+end
+
+local function PopulateTotalProductionSection(ui, prodTotals)
+    if not ui or not Core.IsValidObj(ui.Window) or not Core.IsValidObj(ui.TotListBox) then return end
+    local sig = BuildTotalsSignature(prodTotals)
+    if ui.LastTotalsSig == sig then return end
+    ui.LastTotalsSig = sig
+
+    if Core.IsValidObj(ui.TotHeader) then
+        pcall(function()
+            ui.TotHeader:SetText(Core.MakeText(string.format("Total Production (%d)", #prodTotals)))
+        end)
+    end
+
+    local savedOffset = 0.0
+    if Core.IsValidObj(ui.TotScroll) and ui.TotScroll.GetScrollOffset then
+        pcall(function() savedOffset = tonumber(ui.TotScroll:GetScrollOffset()) or 0.0 end)
+    end
+
+    pcall(function()
+        if ui.TotListBox.ClearChildren then ui.TotListBox:ClearChildren() end
+    end)
+    for i = 1, #prodTotals, 2 do
+        local pairRow = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
+        if Core.IsValidObj(pairRow) then
+            for col = 0, 1 do
+                local entry = prodTotals[i + col]
+                local cellBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
+                if Core.IsValidObj(cellBox) then
+                    if entry then
+                        AddItemRateChip(cellBox, ui.Window, ui.PC, ui.Outer, entry.Item, entry.Rate, STATUS_COLORS.Green)
+                    end
+                    local cSlot = pairRow:AddChildToHorizontalBox(cellBox)
+                    if Core.IsValidObj(cSlot) then
+                        pcall(function() cSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
+                    end
+                end
+            end
+            local prSlot = ui.TotListBox:AddChildToVerticalBox(pairRow)
+            if Core.IsValidObj(prSlot) then
+                pcall(function() prSlot:SetPadding({ Left = 0.0, Top = 3.0, Right = 0.0, Bottom = 3.0 }) end)
+            end
+        end
+    end
+
+    if Core.IsValidObj(ui.TotScroll) and ui.TotScroll.SetScrollOffset and savedOffset > 0.0 then
+        pcall(function() ui.TotScroll:SetScrollOffset(savedOffset) end)
+    end
+end
+
+local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
+    if not ui or not Core.IsValidObj(ui.Window) or not Core.IsValidObj(ui.MachListBox) then return end
+
+    local computed = {}
+    local sigParts = {}
+    for idx, entry in ipairs(assemblers) do
+        local statusCol, tooltipMsg, rowSig = ComputeAssemblerStatus(entry, prodRates, consRates)
+        computed[idx] = { statusCol = statusCol, tooltipMsg = tooltipMsg }
+        sigParts[idx] = rowSig
+    end
+    local sig = table.concat(sigParts, "||")
+    if ui.LastMachinesSig == sig then return end
+    ui.LastMachinesSig = sig
+
+    if Core.IsValidObj(ui.MachHeader) then
+        pcall(function()
+            ui.MachHeader:SetText(Core.MakeText(string.format("Production (%d)", #assemblers)))
+        end)
+    end
+
+    local savedOffset = 0.0
+    if Core.IsValidObj(ui.MachScroll) and ui.MachScroll.GetScrollOffset then
+        pcall(function() savedOffset = tonumber(ui.MachScroll:GetScrollOffset()) or 0.0 end)
+    end
+
+    pcall(function()
+        if ui.MachListBox.ClearChildren then ui.MachListBox:ClearChildren() end
+    end)
+
+    for idx, entry in ipairs(assemblers) do
+        local info = computed[idx]
+        local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
+        local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
+        local statusBar = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
+        local statusSize = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+
+        if Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(statusBar) and Core.IsValidObj(statusSize) then
+            pcall(function()
+                rowBorder:SetBrushColor(STATUS_COLORS.RowBg)
+                rowBorder:SetPadding({ Left = 6.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
+                rowBorder:SetToolTipText(Core.MakeText(info.tooltipMsg))
+                statusBar:SetBrushColor(info.statusCol)
+                statusSize:SetWidthOverride(6.0)
+                statusSize:SetHeightOverride(28.0)
+            end)
+            statusSize:AddChild(statusBar)
+
+            local stSlot = rowHBox:AddChildToHorizontalBox(statusSize)
+            if Core.IsValidObj(stSlot) then
+                pcall(function()
+                    stSlot:SetVerticalAlignment(2)
+                    stSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
+                end)
+            end
+
+            local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+            if Core.IsValidObj(nameTxt) then
+                pcall(function()
+                    nameTxt:SetSize(12)
+                    nameTxt:SetText(Core.MakeText(entry.Name))
+                end)
+                local nBox = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+                pcall(function() nBox:SetWidthOverride(130.0) end)
+                nBox:AddChild(nameTxt)
+                local nSlot = rowHBox:AddChildToHorizontalBox(nBox)
+                if Core.IsValidObj(nSlot) then
+                    pcall(function() nSlot:SetVerticalAlignment(2) end)
+                end
+            end
+
+            for _, inp in ipairs(entry.Inputs) do
+                local k = GetItemKey(inp.Item)
+                local pRate = prodRates[k] or 0.0
+                local cRate = consRates[k] or 0.0
+                local chipTint = (cRate > pRate + 0.001) and STATUS_COLORS.Red or nil
+                AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, inp.Item, inp.Rate, chipTint)
+            end
+
+            if #entry.Inputs > 0 and #entry.Outputs > 0 then
+                local arrowTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+                if Core.IsValidObj(arrowTxt) then
+                    pcall(function()
+                        arrowTxt:SetSize(13)
+                        arrowTxt:SetText(Core.MakeText("→"))
+                    end)
+                    local aSlot = rowHBox:AddChildToHorizontalBox(arrowTxt)
+                    if Core.IsValidObj(aSlot) then
+                        pcall(function()
+                            aSlot:SetVerticalAlignment(2)
+                            aSlot:SetPadding({ Left = 2.0, Top = 0.0, Right = 10.0, Bottom = 0.0 })
+                        end)
+                    end
+                end
+            end
+
+            for _, outp in ipairs(entry.Outputs) do
+                AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, outp.Item, outp.Rate, STATUS_COLORS.Green)
+            end
+
+            rowBorder:AddChild(rowHBox)
+            local rSlot = ui.MachListBox:AddChildToVerticalBox(rowBorder)
+            if Core.IsValidObj(rSlot) then
+                pcall(function() rSlot:SetPadding({ Left = 0.0, Top = 2.0, Right = 0.0, Bottom = 2.0 }) end)
+            end
+        end
+    end
+
+    if Core.IsValidObj(ui.MachScroll) and ui.MachScroll.SetScrollOffset and savedOffset > 0.0 then
+        pcall(function() ui.MachScroll:SetScrollOffset(savedOffset) end)
+    end
+end
+
+local function RefreshLogisticsUI(ui)
+    if not ui or not Core.IsValidObj(ui.Window) then return false end
+    local pc = Core.IsValidObj(ui.PC) and ui.PC or Core.GetLocalPlayerController()
+    local station, walkFrame = ui.Station, ui.WalkFrame
+    if Core.IsValidObj(pc) then
+        local inSt, curWalk, curSt = StationData.IsPlayerInStation(pc)
+        if inSt then
+            if Core.IsValidObj(curSt) then station = curSt end
+            if Core.IsValidObj(curWalk) then walkFrame = curWalk end
+            ui.Station = station
+            ui.WalkFrame = walkFrame
+        end
+    end
+
+    local items, assemblers, prodRates, consRates, prodTotals = CollectStationLogisticsData(station, walkFrame)
+    PopulateStorageSection(ui, items)
+    PopulateTotalProductionSection(ui, prodTotals)
+    PopulateMachinesSection(ui, assemblers, prodRates, consRates)
+    return true
+end
+
+local function StartLogisticsLivePoll(win, ui)
+    local function PollTick()
+        if ActiveLogisticsWin ~= win or ActiveLogisticsUI ~= ui or not Core.IsValidObj(win) then
+            return
+        end
+        local openAndVisible = false
+        pcall(function()
+            openAndVisible = (win:IsInViewport() == true) and (win:IsVisible() == true)
+        end)
+        if not openAndVisible then
+            CloseLogisticsWindow()
+            return
+        end
+
+        pcall(RefreshLogisticsUI, ui)
+        ExecuteInGameThreadWithDelay(500, PollTick)
+    end
+
+    ExecuteInGameThreadWithDelay(500, PollTick)
+end
+
 local function OpenLogisticsWindow()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
@@ -408,8 +738,6 @@ local function OpenLogisticsWindow()
         Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, CloseLogisticsWindow)
     end
 
-    local items, assemblers, prodRates, consRates, prodTotals = CollectStationLogisticsData(station, walkFrame)
-
     local rootBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
     if not (Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
@@ -424,7 +752,7 @@ local function OpenLogisticsWindow()
     end
     pcall(function() win:SetContentForSlot(FName("Content"), rootBox) end)
 
-    -- Left Column: Container Inventory Grid (Icon-heavy)
+    -- Left Column: Storage Grid + Total Production Rates
     local leftVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local invHeader = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
     local invScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
@@ -433,7 +761,7 @@ local function OpenLogisticsWindow()
     if Core.IsValidObj(invHeader) then
         pcall(function()
             invHeader:SetSize(14)
-            invHeader:SetText(Core.MakeText(string.format("Storage (%d)", #items)))
+            invHeader:SetText(Core.MakeText("Storage (0)"))
         end)
         leftVBox:AddChildToVerticalBox(invHeader)
     end
@@ -442,15 +770,6 @@ local function OpenLogisticsWindow()
         pcall(function()
             invWrap:SetInnerSlotPadding({ X = 4.0, Y = 4.0 })
         end)
-        for _, entry in ipairs(items) do
-            local slotW = Core.CreateUserWidget(PATHS.InventorySlotClass, win, pc)
-            if Core.IsValidObj(slotW) then
-                pcall(function()
-                    slotW:SetItemStack({ Item = entry.Item, Amount = entry.Amount })
-                end)
-                invWrap:AddChildToWrapBox(slotW)
-            end
-        end
         invScroll:AddChild(invWrap)
         local sBoxSlot = leftVBox:AddChildToVerticalBox(invScroll)
         if Core.IsValidObj(sBoxSlot) then
@@ -458,14 +777,13 @@ local function OpenLogisticsWindow()
         end
     end
 
-    -- Bottom-Left Half: Total Production Rates (2-column list)
     local totHeader = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
     local totScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
     local totListBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     if Core.IsValidObj(totHeader) then
         pcall(function()
             totHeader:SetSize(14)
-            totHeader:SetText(Core.MakeText(string.format("Total Production (%d)", #prodTotals)))
+            totHeader:SetText(Core.MakeText("Total Production (0)"))
         end)
         local thSlot = leftVBox:AddChildToVerticalBox(totHeader)
         if Core.IsValidObj(thSlot) then
@@ -474,29 +792,6 @@ local function OpenLogisticsWindow()
     end
 
     if Core.IsValidObj(totListBox) and Core.IsValidObj(totScroll) then
-        for i = 1, #prodTotals, 2 do
-            local pairRow = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-            if Core.IsValidObj(pairRow) then
-                for col = 0, 1 do
-                    local entry = prodTotals[i + col]
-                    local cellBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-                    if Core.IsValidObj(cellBox) then
-                        if entry then
-                            AddItemRateChip(cellBox, win, pc, outer, entry.Item, entry.Rate, STATUS_COLORS.Green)
-                        end
-                        local cSlot = pairRow:AddChildToHorizontalBox(cellBox)
-                        if Core.IsValidObj(cSlot) then
-                            pcall(function() cSlot:SetSize({ Value = 0.5, SizeRule = 1 }) end)
-                        end
-                    end
-                end
-                local prSlot = totListBox:AddChildToVerticalBox(pairRow)
-                if Core.IsValidObj(prSlot) then
-                    pcall(function() prSlot:SetPadding({ Left = 0.0, Top = 3.0, Right = 0.0, Bottom = 3.0 }) end)
-                end
-            end
-        end
-
         totScroll:AddChild(totListBox)
         local tBoxSlot = leftVBox:AddChildToVerticalBox(totScroll)
         if Core.IsValidObj(tBoxSlot) then
@@ -513,7 +808,7 @@ local function OpenLogisticsWindow()
         end)
     end
 
-    -- Right Column: Production Machines & Rates (Icon-heavy)
+    -- Right Column: Production Machines & Rates
     local rightVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local machHeader = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
     local machScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
@@ -522,129 +817,12 @@ local function OpenLogisticsWindow()
     if Core.IsValidObj(machHeader) then
         pcall(function()
             machHeader:SetSize(14)
-            machHeader:SetText(Core.MakeText(string.format("Production (%d)", #assemblers)))
+            machHeader:SetText(Core.MakeText("Production (0)"))
         end)
         rightVBox:AddChildToVerticalBox(machHeader)
     end
 
     if Core.IsValidObj(machListBox) and Core.IsValidObj(machScroll) then
-        for _, entry in ipairs(assemblers) do
-            local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-            local statusBar = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            local statusSize = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-
-            if Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(statusBar) and Core.IsValidObj(statusSize) then
-                -- Determine bottleneck status: consuming faster than station produces?
-                -- Only flag items that are produced by a station machine (pRate > 0) or have a crafting recipe
-                local hasDeficit = false
-                local deficitNames = {}
-                for _, inp in ipairs(entry.Inputs) do
-                    local k = GetItemKey(inp.Item)
-                    local pRate = prodRates[k] or 0.0
-                    local cRate = consRates[k] or 0.0
-                    local hasRecipe = false
-                    pcall(function() hasRecipe = Core.IsValidObj(inp.Item.Recipe) end)
-                    if (pRate > 0.001 or hasRecipe) and cRate > pRate + 0.001 then
-                        hasDeficit = true
-                        local iName = k
-                        pcall(function()
-                            if inp.Item and inp.Item.Name then
-                                local s = tostring(inp.Item.Name:ToString())
-                                if s ~= "" then iName = s end
-                            elseif inp.Item and inp.Item.GetName then
-                                local s = tostring(inp.Item:GetName())
-                                if s ~= "" then iName = s end
-                            end
-                        end)
-                        deficitNames[#deficitNames + 1] = string.format("%s (%.1f/m needed, %.1f/m produced)", iName, cRate, pRate)
-                    end
-                end
-
-                local statusCol = STATUS_COLORS.Green
-                local tooltipMsg = "Production OK: all input rates meet station demand."
-                if not entry.HasRecipe then
-                    statusCol = STATUS_COLORS.Amber
-                    tooltipMsg = "Idle: no active recipe or output configured."
-                elseif hasDeficit then
-                    statusCol = STATUS_COLORS.Red
-                    tooltipMsg = "Bottlenecked: input demand exceeds production (" .. table.concat(deficitNames, ", ") .. ")."
-                end
-
-                pcall(function()
-                    rowBorder:SetBrushColor(STATUS_COLORS.RowBg)
-                    rowBorder:SetPadding({ Left = 6.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
-                    rowBorder:SetToolTipText(Core.MakeText(tooltipMsg))
-                    statusBar:SetBrushColor(statusCol)
-                    statusSize:SetWidthOverride(6.0)
-                    statusSize:SetHeightOverride(28.0)
-                end)
-                statusSize:AddChild(statusBar)
-
-                local stSlot = rowHBox:AddChildToHorizontalBox(statusSize)
-                if Core.IsValidObj(stSlot) then
-                    pcall(function()
-                        stSlot:SetVerticalAlignment(2)
-                        stSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
-                    end)
-                end
-
-                -- Compact machine name
-                local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
-                if Core.IsValidObj(nameTxt) then
-                    pcall(function()
-                        nameTxt:SetSize(12)
-                        nameTxt:SetText(Core.MakeText(entry.Name))
-                    end)
-                    local nBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-                    pcall(function() nBox:SetWidthOverride(130.0) end)
-                    nBox:AddChild(nameTxt)
-                    local nSlot = rowHBox:AddChildToHorizontalBox(nBox)
-                    if Core.IsValidObj(nSlot) then
-                        pcall(function() nSlot:SetVerticalAlignment(2) end)
-                    end
-                end
-
-                -- Ingredient icons + rates
-                for _, inp in ipairs(entry.Inputs) do
-                    local k = GetItemKey(inp.Item)
-                    local pRate = prodRates[k] or 0.0
-                    local cRate = consRates[k] or 0.0
-                    local chipTint = (cRate > pRate + 0.001) and STATUS_COLORS.Red or nil
-                    AddItemRateChip(rowHBox, win, pc, outer, inp.Item, inp.Rate, chipTint)
-                end
-
-                -- Arrow separator
-                if #entry.Inputs > 0 and #entry.Outputs > 0 then
-                    local arrowTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
-                    if Core.IsValidObj(arrowTxt) then
-                        pcall(function()
-                            arrowTxt:SetSize(13)
-                            arrowTxt:SetText(Core.MakeText("→"))
-                        end)
-                        local aSlot = rowHBox:AddChildToHorizontalBox(arrowTxt)
-                        if Core.IsValidObj(aSlot) then
-                            pcall(function()
-                                aSlot:SetVerticalAlignment(2)
-                                aSlot:SetPadding({ Left = 2.0, Top = 0.0, Right = 10.0, Bottom = 0.0 })
-                            end)
-                        end
-                    end
-                end
-
-                -- Output icons + rates
-                for _, outp in ipairs(entry.Outputs) do
-                    AddItemRateChip(rowHBox, win, pc, outer, outp.Item, outp.Rate, STATUS_COLORS.Green)
-                end
-
-                rowBorder:AddChild(rowHBox)
-                local rSlot = machListBox:AddChildToVerticalBox(rowBorder)
-                if Core.IsValidObj(rSlot) then
-                    pcall(function() rSlot:SetPadding({ Left = 0.0, Top = 2.0, Right = 0.0, Bottom = 2.0 }) end)
-                end
-            end
-        end
-
         machScroll:AddChild(machListBox)
         local mBoxSlot = rightVBox:AddChildToVerticalBox(machScroll)
         if Core.IsValidObj(mBoxSlot) then
@@ -669,6 +847,26 @@ local function OpenLogisticsWindow()
             mainSlot:SetVerticalAlignment(0)
         end)
     end
+
+    local ui = {
+        Window = win,
+        PC = pc,
+        Outer = outer,
+        Station = station,
+        WalkFrame = walkFrame,
+        InvHeader = invHeader,
+        InvScroll = invScroll,
+        InvWrap = invWrap,
+        TotHeader = totHeader,
+        TotScroll = totScroll,
+        TotListBox = totListBox,
+        MachHeader = machHeader,
+        MachScroll = machScroll,
+        MachListBox = machListBox,
+    }
+    ActiveLogisticsUI = ui
+    RefreshLogisticsUI(ui)
+    StartLogisticsLivePoll(win, ui)
 end
 
 local function ToggleLogistics()
@@ -1108,6 +1306,7 @@ function Feature.PruneCaches()
     end
     if ActiveLogisticsWin and not Core.IsValidObj(ActiveLogisticsWin) then
         ActiveLogisticsWin = nil
+        ActiveLogisticsUI = nil
     end
 end
 
