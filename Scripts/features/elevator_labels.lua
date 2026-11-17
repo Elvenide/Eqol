@@ -22,9 +22,9 @@ local COLORS = {
     Transparent = { R = 0.0, G = 0.0, B = 0.0, A = 0.0 },
 }
 
-local GRID_UNIT_CM         = 25.0   -- UMachineObject.Inputs uses 25 cm sub-grid units
-local DEFAULT_WALL_DIST    = 282.0  -- cm outward from module center (proud of outer wall, inside 325cm conveyor node)
-local PANEL_Z_ABOVE_STOP   = 215.0  -- cm along actor Up from stopPos (centered on blank gray plate ~160-270cm)
+local GRID_UNIT_CM         = 50.0   -- Elevator Inputs use 50 cm grid units (+-13->+-650cm, +-6->+-300cm)
+local PORT_WALL_OFFSET_CM  = 288.0  -- cm along port facing axis (12cm proud of +-300cm port seam)
+local PANEL_Z_ABOVE_STOP   = 210.0  -- cm along actor Up from stopPos (centered on blank gray plate ~160-260cm)
 local MAX_VIEW_DIST_SQ     = 3000.0 * 3000.0
 local ICON_PIXEL_SIZE      = 64.0
 local ICON_WORLD_SCALE     = 1.00   -- ~64 cm icon centered inside ~110x110 cm blank gray plate
@@ -316,11 +316,14 @@ local function LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCo
         for i = 1, n do
             local v = arr[i]
             if v then
-                local s = nil
+                local vx, vy, vz, okXY = 0.0, 0.0, 0.0, false
                 pcall(function()
-                    s = string.format("#%d=(%.1f,%.1f,%.1f)", i, tonumber(v.X) or 0, tonumber(v.Y) or 0, tonumber(v.Z) or 0)
+                    vx = tonumber(v.X) or 0.0
+                    vy = tonumber(v.Y) or 0.0
+                    okXY = true
+                    vz = tonumber(v.Z) or 0.0
                 end)
-                parts[#parts + 1] = s or ("#" .. i .. "=err")
+                parts[#parts + 1] = okXY and string.format("#%d=(%.1f,%.1f,%.1f)", i, vx, vy, vz) or ("#" .. i .. "=err")
             end
         end
         return n, table.concat(parts, " ")
@@ -596,15 +599,19 @@ local function GetStopFrameInfo(stopObj)
     }
 end
 
-local function SnapAxisNormal(dx, dy)
-    if math.abs(dx) >= math.abs(dy) then
-        return (dx >= 0.0 and 1.0 or -1.0), 0.0
+local function ResolveInwardPortWall(rawLx, rawLy)
+    -- Elevator ports sit on the outer arms (e.g. (+-650, +-300) or (+-300, +-650))
+    -- and face inward along the shorter-magnitude axis toward the hallway centerline.
+    if math.abs(rawLx) >= math.abs(rawLy) then
+        local ny = (rawLy >= 0.0) and -1.0 or 1.0
+        return rawLx, -ny * PORT_WALL_OFFSET_CM, 0.0, ny
     end
-    return 0.0, (dy >= 0.0 and 1.0 or -1.0)
+    local nx = (rawLx >= 0.0) and -1.0 or 1.0
+    return -nx * PORT_WALL_OFFSET_CM, rawLy, nx, 0.0
 end
 
 -- Computes exact machine-local port offset { lx, ly, gridZ, nx, ny } from UMachineObject.Inputs
--- Empirical UE4SS log verification: Inputs uses 25cm sub-grid units with +X=Forward, -Y=Right.
+-- Empirical NearBelts verification: Elevator Inputs use 50cm grid units with +X=Forward, +Y=Right.
 local function ResolvePortLocalFromInputs(stopObj, idx1, bAddr)
     local inputs, inCount = {}, 0
     local srcName = "Inputs"
@@ -681,10 +688,8 @@ local function ResolvePortLocalFromInputs(stopObj, idx1, bAddr)
     end)
 
     local rawLx = (px - cx) * GRID_UNIT_CM
-    local rawLy = -(py - cy) * GRID_UNIT_CM
-    local nx, ny = SnapAxisNormal(rawLx, rawLy)
-    local lx = (nx ~= 0.0) and (nx * DEFAULT_WALL_DIST) or rawLx
-    local ly = (ny ~= 0.0) and (ny * DEFAULT_WALL_DIST) or rawLy
+    local rawLy = (py - cy) * GRID_UNIT_CM
+    local lx, ly, nx, ny = ResolveInwardPortWall(rawLx, rawLy)
 
     LogOnce(string.format("%s:inp:%d", tostring(bAddr), idx1),
         "Step[PortLocal] Shaft 0x%X Port#%d src=%s n=%d dim=%s raw=(%.1f,%.1f,%.1f) centroid=(%.2f,%.2f) unclamped=(%.1f,%.1f) local=(%.1f,%.1f) n=(%.0f,%.0f)",
