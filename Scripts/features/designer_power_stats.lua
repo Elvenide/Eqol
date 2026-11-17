@@ -145,42 +145,34 @@ local function IsProducerObject(obj)
     return HasClassOrName(obj, "/Script/MainSequence.ReactorObject", { "SolarPanel", "Reactor", "Generator" }, "Shield")
 end
 
-local function ReadDisplayPower(obj)
-    local okMax, maxP = pcall(function()
-        return obj.GetDisplayMaxPower and obj:GetDisplayMaxPower() or 0.0
-    end)
-    if okMax and type(maxP) == "number" and maxP ~= 0 then
-        return maxP
+-- Note: Never call UMachineObject:GetDisplayMaxPower() or GetDisplayPower() on CDOs
+-- because Ship machine CDOs lack a runtime BuildingFrame and crash reading [Frame + 0x48].
+local function ReadSafeNumericProp(obj, propNames)
+    local best = 0.0
+    for _, name in ipairs(propNames) do
+        local okV, raw = pcall(function() return obj[name] end)
+        if okV and raw ~= nil then
+            local v = math.abs(ReadFPNum(raw))
+            if v > best then
+                best = v
+            end
+        end
     end
-    local okCur, curP = pcall(function()
-        return obj.GetDisplayPower and obj:GetDisplayPower() or 0.0
-    end)
-    if okCur and type(curP) == "number" and curP ~= 0 then
-        return curP
-    end
-    return 0.0
+    return best
 end
 
 local function ComputePowerFromObject(obj)
     if not IsMachineObject(obj) then return 0.0, 0.0, 0.0 end
 
     if IsSolarPanelObject(obj) then
-        local rate = 0.0
-        pcall(function() rate = ReadFPNum(obj.PowerGenRate) end)
-        if rate <= 0 then
-            rate = ReadDisplayPower(obj)
-        end
-        return 0.0, (rate > 0 and rate or 0.0), 0.0
+        local rate = ReadSafeNumericProp(obj, { "PowerGenRate", "MaxPower" })
+        return 0.0, rate, 0.0
     elseif IsProducerObject(obj) then
-        local maxP = ReadDisplayPower(obj)
-        local rate = 0.0
-        pcall(function() rate = ReadFPNum(obj.PowerGenRate) end)
-        return math.max(maxP > 0 and maxP or 0.0, rate > 0 and rate or 0.0), 0.0, 0.0
+        local rate = ReadSafeNumericProp(obj, { "PowerGenRate", "MaxPower" })
+        return rate, 0.0, 0.0
     else
-        local maxP = math.abs(ReadDisplayPower(obj))
-        local rate = 0.0
-        pcall(function() rate = ReadFPNum(obj.PowerConsumptionRate) end)
-        return 0.0, 0.0, math.max(maxP, rate > 0 and rate or 0.0)
+        local cons = ReadSafeNumericProp(obj, { "PowerConsumptionRate", "PowerDraw", "MaxPower" })
+        return 0.0, 0.0, cons
     end
 end
 
