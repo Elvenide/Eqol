@@ -191,7 +191,9 @@ local MACHINE_ENTRY_FIELDS = {
     "MachineObjectClass",
     "ObjectClass",
     "Machine",
+    "MachineObject",
     "DefaultMachine",
+    "Value",
 }
 
 local function ResolveMachineCDOFromEntry(entry)
@@ -249,19 +251,20 @@ end
 local function ResolveBlockObjectCDOFromActor(actor)
     if not Core.IsValidObj(actor) then return nil, "invalid_actor" end
 
-    -- 1. Direct runtime BlockObject on actor
+    -- 1. Resolve CDO from runtime actor.BlockObject (always prefer CDO; never return a runtime BlockObject instance)
     local rawObj = nil
     pcall(function() rawObj = Core.UnwrapArrayElem(actor.BlockObject) end)
     if Core.IsValidObj(rawObj) then
-        if IsBuildingBlockObject(rawObj) then
-            return rawObj, "actor.BlockObject"
-        end
         local okC, cls = pcall(function() return rawObj:GetClass() end)
         if okC and Core.IsValidObj(cls) then
             local cdo = GetCDOFromUClass(cls)
             if IsBuildingBlockObject(cdo) then
                 return cdo, "actor.BlockObject:CDO"
             end
+        end
+        local okFull, full = pcall(function() return rawObj:GetFullName() end)
+        if okFull and type(full) == "string" and string.find(full, "Default__", 1, true) and IsBuildingBlockObject(rawObj) then
+            return rawObj, "actor.BlockObject(CDO)"
         end
     end
 
@@ -378,7 +381,8 @@ local function ComputePowerFromBlockCDO(blockCDO)
         end
     end
 
-    -- 3. Check single-machine properties & GetDefaultMachine() / GetDefaultMachine(0)
+    -- 3. Check single-machine properties (do NOT call UBuildingBlockObject::GetDefaultMachine,
+    --    which dereferences a null Cast<Frame> pointer at +0x188 when called outside its expected frame type)
     if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
         for _, propName in ipairs({ "DefaultMachine", "DefaultMachineClass", "MachineClass", "Machine" }) do
             local okP, val = pcall(function() return blockCDO[propName] end)
@@ -387,24 +391,6 @@ local function ComputePowerFromBlockCDO(blockCDO)
                 nsg, sbg, cons, usedObj = AddMachineEntryPower(val, nsg, sbg, cons)
                 if Core.IsValidObj(usedObj) then
                     machSrc = "prop:" .. propName
-                    table.insert(machNames, SafeObjName(usedObj))
-                    break
-                end
-            end
-        end
-    end
-
-    if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
-        for _, callFn in ipairs({
-            function() return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine() or nil end,
-            function() return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine(0) or nil end,
-        }) do
-            local okGDM, defMachine = pcall(callFn)
-            if okGDM and defMachine ~= nil then
-                local usedObj = nil
-                nsg, sbg, cons, usedObj = AddMachineEntryPower(defMachine, nsg, sbg, cons)
-                if Core.IsValidObj(usedObj) then
-                    machSrc = "GetDefaultMachine"
                     table.insert(machNames, SafeObjName(usedObj))
                     break
                 end
