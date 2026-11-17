@@ -19,7 +19,7 @@ local PATHS = {
 }
 
 local COLORS = {
-    PanelBg = { R = 0.015, G = 0.015, B = 0.02, A = 1.0 },
+    Transparent = { R = 0.0, G = 0.0, B = 0.0, A = 0.0 },
 }
 
 local GRID_UNIT_CM         = 50.0   -- Elevator Inputs use 50 cm grid units (+-13->+-650cm, +-6->+-300cm)
@@ -27,8 +27,7 @@ local PORT_WALL_OFFSET_CM  = 297.0  -- cm along port facing axis (3cm proud of +
 local PANEL_Z_ABOVE_STOP   = 156.0  -- cm along actor Up from stopPos (centered on blank gray plate)
 local MAX_VIEW_DIST_SQ     = 3000.0 * 3000.0
 local ICON_PIXEL_SIZE      = 64.0
-local ICON_WORLD_SCALE     = 0.72   -- ~46 cm black square panel inside blank gray plate
-local ICON_INNER_SCALE     = 0.74   -- ~34 cm item icon padded inside the black square panel
+local ICON_WORLD_SCALE     = 0.54   -- ~35 cm item icon centered inside blank gray plate
 local ELEVATOR_SCAN_PERIOD = 1.5
 local PORT_DATA_PERIOD     = 0.25
 
@@ -128,12 +127,11 @@ local function GetOrCreateIconActor(pc, idx)
         itemW:SetIconSize(ICON_PIXEL_SIZE)
         itemW:SetVisibility(0)
         comp:SetWidgetSpace(0) -- World space
-        comp:SetBlendMode(0)   -- EWidgetBlendMode::Opaque (keeps PanelBg visible around item sprite)
         comp:SetDrawSize({ X = ICON_PIXEL_SIZE, Y = ICON_PIXEL_SIZE })
         comp:SetDrawAtDesiredSize(true)
         comp:SetPivot({ X = 0.5, Y = 0.5 })
         comp:SetTwoSided(true)
-        comp:SetBackgroundColor(COLORS.PanelBg)
+        comp:SetBackgroundColor(COLORS.Transparent)
         comp:SetWidget(itemW)
         comp:SetWorldScale3D({ X = ICON_WORLD_SCALE, Y = ICON_WORLD_SCALE, Z = ICON_WORLD_SCALE })
         comp:SetVisibility(false, false)
@@ -141,25 +139,12 @@ local function GetOrCreateIconActor(pc, idx)
     if not okSetup then
         LogOnce("err:setup" .. idx, "Step[IconPool#%d] setup error: %s", idx, tostring(errSetup))
     end
-    local okPad, errPad = pcall(function()
-        itemW:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
-        itemW:SetRenderScale({ X = ICON_INNER_SCALE, Y = ICON_INNER_SCALE })
-    end)
-    if not okPad then
-        LogOnce("err:innerScale" .. idx, "Step[IconPool#%d] inner scale warning: %s", idx, tostring(errPad))
-    end
     pcall(function() comp:SetCollisionEnabled(0) end)
 
-    local opqMatStr, curMatStr, bmStr = "nil", "nil", "nil"
-    pcall(function()
-        if comp.OpaqueMaterial then opqMatStr = SafeObjName(comp.OpaqueMaterial) end
-        if comp.GetMaterial then curMatStr = SafeObjName(comp:GetMaterial(0)) end
-        if comp.BlendMode ~= nil then bmStr = tostring(comp.BlendMode) end
-    end)
     LogOnce("pool:" .. idx,
-        "Step[IconPool#%d] Created actor=0x%X comp=0x%X widget=0x%X scale=%.2f px=%.0f blend=%s opqMat=%s curMat=%s",
+        "Step[IconPool#%d] Created actor=0x%X comp=0x%X widget=0x%X scale=%.2f px=%.0f",
         idx, tonumber(actor:GetAddress()) or 0, tonumber(comp:GetAddress()) or 0,
-        tonumber(itemW:GetAddress()) or 0, ICON_WORLD_SCALE, ICON_PIXEL_SIZE, bmStr, opqMatStr, curMatStr)
+        tonumber(itemW:GetAddress()) or 0, ICON_WORLD_SCALE, ICON_PIXEL_SIZE)
 
     entry = {
         Actor = actor,
