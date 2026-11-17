@@ -210,8 +210,47 @@ local function FindActivePlayerElevator(pc)
     return bestElevObj, nil
 end
 
+local function ExitBuildingModeIfInElevator(pc)
+    if not Core.IsValidObj(pc) then
+        pc = Core.GetLocalPlayerController()
+    end
+    if not Core.IsValidObj(pc) then return end
+
+    local elevObj = FindActivePlayerElevator(pc)
+    if not Core.IsValidObj(elevObj) then return end
+
+    pcall(function() pc:ExitBuildingMode() end)
+    ExecuteInGameThreadWithDelay(1, function()
+        if Core.IsValidObj(pc) then
+            pcall(function() pc:ExitBuildingMode() end)
+        end
+    end)
+end
+
+function Feature.RegisterHooks()
+    Core.TryRegisterHook(
+        "ElevatorHotkeys_EnterBuildingMode",
+        "/Script/MainSequence.DMSPlayerController:EnterBuildingMode",
+        function(Context)
+            local pc = Context and Context:get() or nil
+            ExitBuildingModeIfInElevator(pc)
+        end
+    )
+    Core.TryRegisterHook(
+        "ElevatorHotkeys_OnEnterBuildMode",
+        "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C:OnEnterBuildMode",
+        function(Context)
+            local pc = Context and Context:get() or nil
+            ExitBuildingModeIfInElevator(pc)
+        end
+    )
+end
+
 local function GoToElevatorFloor(floorNum)
+    Feature.RegisterHooks()
+
     if Core.IsSelectingAnyRegisteredKeybind()
+        or Core.IsAnyTextInputFocused()
         or Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
         or Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
         or Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
@@ -225,6 +264,13 @@ local function GoToElevatorFloor(floorNum)
 
     local elevObj, openWidget = FindActivePlayerElevator(pc)
     if not Core.IsValidObj(elevObj) then return end
+
+    pcall(function() pc:ExitBuildingMode() end)
+    ExecuteInGameThreadWithDelay(1, function()
+        if Core.IsValidObj(pc) then
+            pcall(function() pc:ExitBuildingMode() end)
+        end
+    end)
 
     local bottomElev, stackIdx = ResolveStackIndexForFloor(elevObj, floorNum)
     if not Core.IsValidObj(bottomElev) or stackIdx == nil then return end
@@ -251,7 +297,12 @@ local function GoToElevatorFloor(floorNum)
     end
 end
 
+function Feature.OnClientRestart()
+    Feature.RegisterHooks()
+end
+
 function Feature.Init()
+    Feature.RegisterHooks()
     if not Key then return end
 
     local bindings = {
