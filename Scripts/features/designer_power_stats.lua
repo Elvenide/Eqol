@@ -116,8 +116,15 @@ local function HasClassOrName(obj, classPath, nameSubstrings, excludeSubstring)
     return false
 end
 
+local function IsBuildingBlockClass(obj)
+    if not Core.IsValidObj(obj) then return false end
+    return HasClassOrName(obj, "/Script/MainSequence.BuildingBlockObject", { "BuildingBlock" }, nil)
+        or HasClassOrName(obj, "/Script/MainSequence.BuildingBlock", nil, nil)
+end
+
 local function IsMachineObject(obj)
     if not Core.IsValidObj(obj) then return false end
+    if IsBuildingBlockClass(obj) then return false end
     if HasClassOrName(obj, "/Script/MainSequence.MachineObject", { "Machine", "SolarPanel", "Reactor", "Generator" }, nil) then
         return true
     end
@@ -128,10 +135,12 @@ local function IsMachineObject(obj)
 end
 
 local function IsSolarPanelObject(obj)
+    if IsBuildingBlockClass(obj) then return false end
     return HasClassOrName(obj, "/Script/MainSequence.SolarPanelObject", { "SolarPanel" }, nil)
 end
 
 local function IsProducerObject(obj)
+    if IsBuildingBlockClass(obj) then return false end
     if IsSolarPanelObject(obj) then return true end
     return HasClassOrName(obj, "/Script/MainSequence.ReactorObject", { "SolarPanel", "Reactor", "Generator" }, "Shield")
 end
@@ -175,27 +184,52 @@ local function ComputePowerFromObject(obj)
     end
 end
 
-local function AddMachineEntryPower(entry, nsg, sbg, cons, checkInstance)
-    if not entry then return nsg, sbg, cons, nil end
-    local mObj = nil
-    if Core.IsValidObj(entry) then
-        if IsMachineObject(entry) then
-            mObj = entry
-        else
-            mObj = GetCDOFromUClass(entry)
+local MACHINE_ENTRY_FIELDS = {
+    "Class",
+    "MachineClass",
+    "DefaultMachineClass",
+    "MachineObjectClass",
+    "ObjectClass",
+    "Machine",
+    "DefaultMachine",
+}
+
+local function ResolveMachineCDOFromEntry(entry)
+    if entry == nil then return nil end
+    local unwrapped = UnwrapStruct(entry)
+    if unwrapped == nil then return nil end
+
+    if Core.IsValidObj(unwrapped) then
+        if IsMachineObject(unwrapped) then
+            return unwrapped
         end
-    else
-        if checkInstance then
-            pcall(function() mObj = Core.UnwrapArrayElem(entry.Machine) end)
+        local cdo = GetCDOFromUClass(unwrapped)
+        if Core.IsValidObj(cdo) and IsMachineObject(cdo) then
+            return cdo
         end
-        if not Core.IsValidObj(mObj) then
-            local mCls = nil
-            pcall(function() mCls = entry.Class end)
-            if mCls then
-                mObj = GetCDOFromUClass(mCls)
+        -- unwrapped could also be a sub-object holding one of the machine fields
+    end
+
+    for _, fieldName in ipairs(MACHINE_ENTRY_FIELDS) do
+        local okF, ref = pcall(function() return unwrapped[fieldName] end)
+        if okF and ref ~= nil then
+            local cand = Core.UnwrapArrayElem(ref)
+            if Core.IsValidObj(cand) then
+                if IsMachineObject(cand) then
+                    return cand
+                end
+                local cdo = GetCDOFromUClass(cand)
+                if Core.IsValidObj(cdo) and IsMachineObject(cdo) then
+                    return cdo
+                end
             end
         end
     end
+    return nil
+end
+
+local function AddMachineEntryPower(entry, nsg, sbg, cons)
+    local mObj = ResolveMachineCDOFromEntry(entry)
     if Core.IsValidObj(mObj) and IsMachineObject(mObj) then
         local g, sg, c = ComputePowerFromObject(mObj)
         return nsg + g, sbg + sg, cons + c, mObj
@@ -313,53 +347,82 @@ local function ComputePowerFromBlockCDO(blockCDO)
 
     local nsg, sbg, cons = 0.0, 0.0, 0.0
     local machSrc = "none"
-    local machName = "nil"
+    local machNames = {}
+    local attachedCount = 0
 
-    -- 1. Check GetDefaultMachine() (returns TSubclassOf<UMachineObject>, so unwrap UClass -> CDO)
-    local okGDM, defMachine = pcall(function()
-        return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine() or nil
-    end)
-    if okGDM and defMachine ~= nil then
-        defMachine = Core.UnwrapArrayElem(defMachine)
-        if Core.IsValidObj(defMachine) then
-            local mObj = IsMachineObject(defMachine) and defMachine or GetCDOFromUClass(defMachine)
-            if Core.IsValidObj(mObj) and IsMachineObject(mObj) then
-                local g, sg, c = ComputePowerFromObject(mObj)
-                nsg = nsg + g
-                sbg = sbg + sg
-                cons = cons + c
-                machSrc = (mObj == defMachine) and "GetDefaultMachine(obj)" or "GetDefaultMachine(class->CDO)"
-                machName = SafeObjName(mObj)
-            else
-                machSrc = "GetDefaultMachine(non_machine:" .. SafeObjName(defMachine) .. ")"
+    local function collectFromArray(arr, srcLabel)
+        local arrCount = 0
+        StationData.ForEachArray(arr, function(_, elem)
+            arrCount = arrCount + 1
+            local usedObj = nil
+            nsg, sbg, cons, usedObj = AddMachineEntryPower(elem, nsg, sbg, cons)
+            if Core.IsValidObj(usedObj) then
+                machSrc = srcLabel
+                table.insert(machNames, SafeObjName(usedObj))
+            end
+        end)
+        return arrCount
+    end
+
+    -- 1. Check AttachedMachines on UBuildingBlockObject CDO (primary editor-configured machine list)
+    local okAM, attachedMachines = pcall(function() return blockCDO.AttachedMachines end)
+    if okAM and attachedMachines then
+        attachedCount = collectFromArray(attachedMachines, "AttachedMachines")
+    end
+
+    -- 2. Check DefaultMachines array if still 0
+    if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
+        local okDM, defMachines = pcall(function() return blockCDO.DefaultMachines end)
+        if okDM and defMachines then
+            collectFromArray(defMachines, "DefaultMachines")
+        end
+    end
+
+    -- 3. Check single-machine properties & GetDefaultMachine() / GetDefaultMachine(0)
+    if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
+        for _, propName in ipairs({ "DefaultMachine", "DefaultMachineClass", "MachineClass", "Machine" }) do
+            local okP, val = pcall(function() return blockCDO[propName] end)
+            if okP and val ~= nil then
+                local usedObj = nil
+                nsg, sbg, cons, usedObj = AddMachineEntryPower(val, nsg, sbg, cons)
+                if Core.IsValidObj(usedObj) then
+                    machSrc = "prop:" .. propName
+                    table.insert(machNames, SafeObjName(usedObj))
+                    break
+                end
             end
         end
     end
 
-    -- 2. Fallback: DefaultMachines array if present
     if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
-        local okDM, defMachines = pcall(function() return blockCDO.DefaultMachines end)
-        if okDM and defMachines then
-            StationData.ForEachArray(defMachines, function(_, elem)
+        for _, callFn in ipairs({
+            function() return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine() or nil end,
+            function() return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine(0) or nil end,
+        }) do
+            local okGDM, defMachine = pcall(callFn)
+            if okGDM and defMachine ~= nil then
                 local usedObj = nil
-                nsg, sbg, cons, usedObj = AddMachineEntryPower(UnwrapStruct(elem), nsg, sbg, cons, true)
+                nsg, sbg, cons, usedObj = AddMachineEntryPower(defMachine, nsg, sbg, cons)
                 if Core.IsValidObj(usedObj) then
-                    machSrc = "DefaultMachines"
-                    machName = SafeObjName(usedObj)
+                    machSrc = "GetDefaultMachine"
+                    table.insert(machNames, SafeObjName(usedObj))
+                    break
                 end
-            end)
+            end
         end
     end
 
-    -- 3. Fallback: blockCDO itself
-    if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
-        if IsMachineObject(blockCDO) then
-            nsg, sbg, cons = ComputePowerFromObject(blockCDO)
-            machSrc = "blockCDO_self"
-            machName = SafeObjName(blockCDO)
-        end
+    -- 4. Fallback: check blockCDO itself only if it actually is a MachineObject
+    if nsg == 0.0 and sbg == 0.0 and cons == 0.0 and IsMachineObject(blockCDO) then
+        nsg, sbg, cons = ComputePowerFromObject(blockCDO)
+        machSrc = "blockCDO_self"
+        table.insert(machNames, SafeObjName(blockCDO))
     end
 
+    if machSrc == "none" and attachedCount > 0 then
+        machSrc = string.format("AttachedMachines_unresolved(count=%d)", attachedCount)
+    end
+    local machName = (#machNames > 0) and table.concat(machNames, "+") or "nil"
     return { nonSolarGen = nsg, solarBaseGen = sbg, cons = cons }, machSrc, machName
 end
 
