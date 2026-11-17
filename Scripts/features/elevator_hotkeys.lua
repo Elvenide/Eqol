@@ -22,6 +22,7 @@ local CachedChats = {}          -- addr -> WBP_Chat_C
 local LastElevatorScanClock = -10.0
 local LastChatScanClock = -10.0
 local LastExitBuildClock = -10.0
+local PendingDeparture = nil    -- { BottomElev, TargetStackIdx, PressedClock, MaxClock, ForceZeroDone }
 
 local function RefreshElevatorCache()
     LastElevatorScanClock = os.clock()
@@ -268,6 +269,58 @@ Feature.WatchWidgets = {
     end,
 }
 
+local function CloseElevatorDoorsImmediately(bottomElev, forceZero)
+    if not Core.IsValidObj(bottomElev) then return false end
+
+    local hadOpenDoor = false
+    pcall(function()
+        local actors = bottomElev.Actors
+        if actors then
+            StationData.ForEachArray(actors, function(_, aElem)
+                local bActor = Core.UnwrapArrayElem(aElem)
+                if Core.IsValidObj(bActor) then
+                    if bActor.ClosePodDoors then
+                        pcall(function() bActor:ClosePodDoors() end)
+                    end
+                    if Core.IsValidObj(bActor.PodActor) and bActor.PodActor.SetDoorsOpen then
+                        pcall(function() bActor.PodActor:SetDoorsOpen(false) end)
+                    end
+                end
+            end)
+        end
+    end)
+
+    local okStack, stack = pcall(function() return bottomElev.ElevatorStack end)
+    if okStack and stack then
+        StationData.ForEachArray(stack, function(_, elem)
+            local stopObj = Core.UnwrapArrayElem(elem)
+            if not Core.IsValidObj(stopObj) then return end
+            local curOpen = tonumber(stopObj.DoorOpenProgress) or 0
+            if curOpen > 0 then
+                hadOpenDoor = true
+                local maxOpen = tonumber(stopObj.DoorOpenMaxProgress) or 0
+                if forceZero then
+                    pcall(function() stopObj.DoorOpenProgress = 0 end)
+                else
+                    pcall(function() stopObj.DoorOpenProgress = (maxOpen > 0) and maxOpen or 1 end)
+                end
+                pcall(function()
+                    local sActors = stopObj.Actors
+                    if sActors then
+                        StationData.ForEachArray(sActors, function(_, aElem)
+                            local sActor = Core.UnwrapArrayElem(aElem)
+                            if Core.IsValidObj(sActor) and sActor.CloseDoors then
+                                pcall(function() sActor:CloseDoors() end)
+                            end
+                        end)
+                    end
+                end)
+            end
+        end)
+    end
+    return hadOpenDoor
+end
+
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
         "ElevatorHotkeys_EnterBuildingMode",
@@ -283,6 +336,46 @@ function Feature.RegisterHooks()
         function(Context)
             local pc = Context and Context:get() or nil
             ExitBuildingModeIfInElevator(pc)
+        end
+    )
+    Core.TryRegisterHook(
+        "ElevatorHotkeys_TickDeparture",
+        "/Script/MainSequence.DMSPlayerController:ReceiveTick",
+        function()
+            local pd = PendingDeparture
+            if not pd then return end
+            local now = os.clock()
+            if not Core.IsValidObj(pd.BottomElev) or now > pd.MaxClock then
+                if Core.IsValidObj(pd.BottomElev) then
+                    local okLog, moving, curF, qLen = pcall(function()
+                        local q = pd.BottomElev.FloorQueue
+                        return pd.BottomElev.bMoving == true, pd.BottomElev.CurrentFloor, q and q:GetArrayNum() or -1
+                    end)
+                    if okLog then
+                        Core.Log(string.format("[ElevatorHotkeys] Departure window ended: bMoving=%s curFloor=%s qLen=%s elapsed=%.0fms",
+                            tostring(moving), tostring(curF), tostring(qLen), (now - pd.PressedClock) * 1000.0))
+                    end
+                end
+                PendingDeparture = nil
+                return
+            end
+
+            local isMoving = false
+            pcall(function() isMoving = (pd.BottomElev.bMoving == true) end)
+            if isMoving then
+                Core.Log(string.format("[ElevatorHotkeys] Departed in %.0fms (target=%s)",
+                    (now - pd.PressedClock) * 1000.0, tostring(pd.TargetStackIdx)))
+                PendingDeparture = nil
+                return
+            end
+
+            local dt = now - pd.PressedClock
+            if dt >= 0.05 and not pd.ForceZeroDone then
+                pd.ForceZeroDone = true
+                CloseElevatorDoorsImmediately(pd.BottomElev, true)
+            else
+                CloseElevatorDoorsImmediately(pd.BottomElev, false)
+            end
         end
     )
 end
@@ -303,6 +396,9 @@ local function GoToElevatorFloor(floorNum)
     local bottomElev, stackIdx = ResolveStackIndexForFloor(elevObj, floorNum)
     if not Core.IsValidObj(bottomElev) or stackIdx == nil then return end
 
+    local curFloor = nil
+    pcall(function() curFloor = tonumber(bottomElev.CurrentFloor) end)
+
     if Core.IsValidObj(openWidget) and openWidget.OnFloorPressed then
         pcall(function() openWidget:OnFloorPressed(stackIdx) end)
     else
@@ -321,6 +417,19 @@ local function GoToElevatorFloor(floorNum)
         if okCmd and Core.IsValidObj(cmd) then
             pcall(function() pc:AddInputCommand(bottomElev.ID, cmd) end)
         end
+    end
+
+    if curFloor ~= stackIdx then
+        local hadOpenDoor = CloseElevatorDoorsImmediately(bottomElev, false)
+        PendingDeparture = {
+            BottomElev = bottomElev,
+            TargetStackIdx = stackIdx,
+            PressedClock = os.clock(),
+            MaxClock = os.clock() + 0.65,
+            ForceZeroDone = false,
+        }
+        Core.Log(string.format("[ElevatorHotkeys] GoToFloor=%s stackIdx=%s curFloor=%s hadOpenDoor=%s",
+            tostring(floorNum), tostring(stackIdx), tostring(curFloor), tostring(hadOpenDoor)))
     end
 
     LastExitBuildClock = os.clock()
