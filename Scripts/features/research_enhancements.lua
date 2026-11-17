@@ -64,11 +64,6 @@ local function GetObjectSearchText(obj)
     end
 
     local parts = {}
-    local okName, fName = pcall(function() return obj:GetFName():ToString() end)
-    if okName and type(fName) == "string" and fName ~= "" then
-        parts[#parts + 1] = fName
-    end
-
     local hasDisp = false
     local okDisp, dispVal = pcall(function() return obj.DisplayName end)
     if okDisp then
@@ -93,10 +88,20 @@ local function GetObjectSearchText(obj)
                         local cdoStr = SafeTextToString(cdoDisp)
                         if cdoStr ~= "" then
                             parts[#parts + 1] = cdoStr
+                            hasDisp = true
                         end
                     end
                 end
             end
+        end
+    end
+
+    -- Fallback to Display Title / Name property only if DisplayName is absent (never raw FName with _C suffix)
+    if not hasDisp then
+        local okN, nVal = pcall(function() return obj.Name end)
+        if okN then
+            local nStr = SafeTextToString(nVal)
+            if nStr ~= "" then parts[#parts + 1] = nStr end
         end
     end
 
@@ -118,12 +123,6 @@ local function GetTechSearchText(tech)
     local okDisp, dispVal = pcall(function() return tech.DisplayName end)
     if okDisp then
         local s = SafeTextToString(dispVal)
-        if s ~= "" then parts[#parts + 1] = s end
-    end
-
-    local okDesc, descVal = pcall(function() return tech.Description end)
-    if okDesc then
-        local s = SafeTextToString(descVal)
         if s ~= "" then parts[#parts + 1] = s end
     end
 
@@ -150,9 +149,11 @@ local function GetTechSearchText(tech)
         end)
     end
 
-    local objText = GetObjectSearchText(tech)
-    if objText ~= "" then
-        parts[#parts + 1] = objText
+    if #parts == 0 then
+        local objText = GetObjectSearchText(tech)
+        if objText ~= "" then
+            parts[#parts + 1] = objText
+        end
     end
 
     local result = string.lower(table.concat(parts, "\n"))
@@ -829,32 +830,21 @@ local function EnsureDragGhost(tree, pc, srcWidget)
     if not Core.IsValidObj(ghost) then return nil end
 
     pcall(function()
-        local tech = nil
-        pcall(function() tech = srcWidget.Technology end)
-        if not Core.IsValidObj(tech) then
-            pcall(function() tech = srcWidget.Research end)
-        end
+        local tech = ResolveTechFromWidget(srcWidget)
         local resState = nil
-        pcall(function() resState = srcWidget.ResearchState end)
+        pcall(function() resState = Core.UnwrapArrayElem(srcWidget.ResearchState) end)
+        if not Core.IsValidObj(resState) and Core.IsValidObj(tree) then
+            pcall(function() resState = Core.UnwrapArrayElem(tree.ResearchState) end)
+        end
         local treeView = nil
-        pcall(function() treeView = srcWidget.ResearchTreeView end)
+        pcall(function() treeView = Core.UnwrapArrayElem(srcWidget.ResearchTreeView) end)
 
-        if tech ~= nil then pcall(function() ghost.Technology = tech end) end
+        if Core.IsValidObj(tech) then pcall(function() ghost.Technology = tech end) end
         pcall(function() ghost.Research = srcWidget.Research end)
-        if resState ~= nil then pcall(function() ghost.ResearchState = resState end) end
-        if Core.IsValidObj(treeView) then
-            pcall(function() ghost.ResearchTreeView = treeView end)
-            if ghost.SetView then
-                pcall(function() ghost:SetView(treeView) end)
-            end
-        end
-        if ghost.SetTechnology and Core.IsValidObj(tech) then
-            pcall(function() ghost:SetTechnology(tech, resState) end)
-        end
-        if ghost.RefreshAvailable then pcall(function() ghost:RefreshAvailable() end) end
-        if ghost.RefreshProgress then pcall(function() ghost:RefreshProgress() end) end
+        if Core.IsValidObj(resState) then pcall(function() ghost.ResearchState = resState end) end
+        if Core.IsValidObj(treeView) then pcall(function() ghost.ResearchTreeView = treeView end) end
 
-        -- Render above all ResearchTree / Queue children without intercepting mouse input
+        -- AddToViewport runs Construct() so internal widget tree (Image_0, Border_1, Button) is initialized
         ghost:SetVisibility(3) -- 3 = HitTestInvisible
         ghost:AddToViewport(200)
         if ghost.SetAnchorsInViewport then
@@ -863,6 +853,30 @@ local function EnsureDragGhost(tree, pc, srcWidget)
         if ghost.SetAlignmentInViewport then
             ghost:SetAlignmentInViewport({ X = 0.5, Y = 0.5 })
         end
+
+        if Core.IsValidObj(treeView) and ghost.SetView then
+            pcall(function() ghost:SetView(treeView) end)
+        end
+        if ghost.SetTechnology and Core.IsValidObj(tech) and Core.IsValidObj(resState) then
+            pcall(function() ghost:SetTechnology(tech, resState) end)
+        end
+        if ghost.Refresh then pcall(function() ghost:Refresh() end) end
+        if ghost.RefreshAvailable then pcall(function() ghost:RefreshAvailable() end) end
+        if ghost.RefreshProgress then pcall(function() ghost:RefreshProgress() end) end
+
+        -- Mirror Image_0 brush directly from source tile as a guaranteed icon fallback
+        pcall(function()
+            if Core.IsValidObj(srcWidget.Image_0) and Core.IsValidObj(ghost.Image_0) then
+                if ghost.Image_0.SetBrush then
+                    ghost.Image_0:SetBrush(srcWidget.Image_0.Brush)
+                end
+                local resObj = srcWidget.Image_0.Brush and srcWidget.Image_0.Brush.ResourceObject or nil
+                if Core.IsValidObj(resObj) and ghost.Image_0.SetBrushResourceObject then
+                    ghost.Image_0:SetBrushResourceObject(resObj)
+                end
+            end
+        end)
+
         local w, h = 60.0, 60.0
         local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
         if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and srcWidget.GetCachedGeometry then
