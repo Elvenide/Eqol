@@ -66,6 +66,11 @@ end
 
 function Core.GetFPFloat(fpNum)
     if not fpNum then return 0.0 end
+    if type(fpNum) == "number" then return fpNum end
+    if type(fpNum) ~= "userdata" then return 0.0 end
+    local okUObj, isUObj = pcall(function() return type(fpNum.IsValid) == "function" end)
+    if okUObj and isUObj then return 0.0 end
+
     local fpMath = Core.GetCDO(Core.PATHS.FPMathCDO)
     if Core.IsValidObj(fpMath) then
         local ok, val = pcall(function() return fpMath:GetFloat(fpNum) end)
@@ -81,6 +86,10 @@ function Core.GetFPVector(fpVec)
     if type(fpVec.X) == "number" and type(fpVec.Y) == "number" then
         return fpVec.X, fpVec.Y, tonumber(fpVec.Z) or 0.0
     end
+    if type(fpVec) ~= "userdata" then return 0.0, 0.0, 0.0 end
+    local okUObj, isUObj = pcall(function() return type(fpVec.IsValid) == "function" end)
+    if okUObj and isUObj then return 0.0, 0.0, 0.0 end
+
     local fpMath = Core.GetCDO(Core.PATHS.FPMathCDO)
     if Core.IsValidObj(fpMath) then
         local ok, vec = pcall(function() return fpMath:GetVector(fpVec) end)
@@ -363,7 +372,176 @@ function Core.EnsureAllHooks()
     end
 end
 
+local TrackedTextInputs = {} -- widgetAddr -> { Input = widget, Owner = ownerWindowOrNil }
+local TextInputFocusWatcherActive = false
+local SuppressedCharacterInput = false
+local SuppressedCharacterInputPC = nil
+
+local function IsWidgetTreeVisible(w, ownerWin)
+    if not Core.IsValidObj(w) then return false end
+    if Core.IsValidObj(ownerWin) then
+        local okVP, inVp = pcall(function()
+            return not ownerWin.IsInViewport or ownerWin:IsInViewport()
+        end)
+        if okVP and not inVp then return false end
+        local okOV, oVis = pcall(function() return ownerWin:IsVisible() end)
+        if okOV and not oVis then return false end
+    end
+    local cur = w
+    for _ = 1, 20 do
+        if not Core.IsValidObj(cur) then break end
+        local okV, vis = pcall(function() return cur:IsVisible() end)
+        if okV and not vis then
+            return false
+        end
+        local okP, parent = pcall(function() return cur:GetParent() end)
+        if not okP or not Core.IsValidObj(parent) then
+            break
+        end
+        cur = parent
+    end
+    return true
+end
+
+local function IsWidgetOrChildFocused(w, pc)
+    if not Core.IsValidObj(w) then return false end
+    for _, checkName in ipairs({ "HasKeyboardFocus", "HasAnyUserFocus", "HasFocusedDescendants" }) do
+        local ok, res = pcall(function()
+            return w[checkName] and w[checkName](w)
+        end)
+        if ok and res == true then
+            return true
+        end
+    end
+    if Core.IsValidObj(pc) then
+        local okU, resU = pcall(function()
+            return w.HasUserFocus and w:HasUserFocus(pc)
+        end)
+        if okU and resU == true then
+            return true
+        end
+    end
+    return false
+end
+
+local function IsTrackedInputFocused(entry, pc)
+    local w = entry and entry.Input or nil
+    if not Core.IsValidObj(w) then return false end
+    if not IsWidgetTreeVisible(w, entry.Owner) then return false end
+
+    if IsWidgetOrChildFocused(w, pc) then return true end
+    local okBox, box = pcall(function() return w.EditableTextBox_80 end)
+    if okBox and Core.IsValidObj(box) and IsWidgetOrChildFocused(box, pc) then
+        return true
+    end
+    return false
+end
+
+local function IsAnyTrackedTextInputFocused()
+    local pc = Core.GetLocalPlayerController()
+    for addr, entry in pairs(TrackedTextInputs) do
+        if not Core.IsValidObj(entry.Input) then
+            TrackedTextInputs[addr] = nil
+        elseif IsTrackedInputFocused(entry, pc) then
+            return true
+        end
+    end
+    return false
+end
+
+local function RestoreSuppressedCharacterInput()
+    if not SuppressedCharacterInput then return end
+    local pc = Core.IsValidObj(SuppressedCharacterInputPC) and SuppressedCharacterInputPC or Core.GetLocalPlayerController()
+    if Core.IsValidObj(pc) then
+        pcall(function() pc:AllowCharacterInput(true) end)
+    end
+    SuppressedCharacterInput = false
+    SuppressedCharacterInputPC = nil
+end
+
+local function SyncCharacterInputSuppression()
+    local anyFocused = IsAnyTrackedTextInputFocused()
+    local pc = Core.GetLocalPlayerController()
+    if anyFocused then
+        if Core.IsValidObj(pc) and pc.CharacterInputEnabled == true then
+            pcall(function() pc:AllowCharacterInput(false) end)
+            SuppressedCharacterInput = true
+            SuppressedCharacterInputPC = pc
+        end
+    else
+        RestoreSuppressedCharacterInput()
+    end
+    return anyFocused
+end
+
+local function EnsureTextInputFocusWatcher()
+    if TextInputFocusWatcherActive then return end
+    TextInputFocusWatcherActive = true
+
+    local function WatcherTick()
+        if next(TrackedTextInputs) == nil then
+            RestoreSuppressedCharacterInput()
+            TextInputFocusWatcherActive = false
+            return
+        end
+
+        local anyVisible = false
+        for addr, entry in pairs(TrackedTextInputs) do
+            if not Core.IsValidObj(entry.Input) then
+                TrackedTextInputs[addr] = nil
+            elseif IsWidgetTreeVisible(entry.Input, entry.Owner) then
+                anyVisible = true
+            end
+        end
+
+        SyncCharacterInputSuppression()
+        ExecuteInGameThreadWithDelay(anyVisible and 25 or 200, WatcherTick)
+    end
+
+    ExecuteInGameThreadWithDelay(25, WatcherTick)
+end
+
+function Core.RegisterTextInput(textInputWidget, ownerWindow)
+    if not Core.IsValidObj(textInputWidget) then return end
+    TrackedTextInputs[textInputWidget:GetAddress()] = {
+        Input = textInputWidget,
+        Owner = Core.IsValidObj(ownerWindow) and ownerWindow or nil,
+    }
+    Core.EnsureKeybindHooks()
+    EnsureTextInputFocusWatcher()
+end
+
+function Core.IsAnyTextInputFocused()
+    if IsAnyTrackedTextInputFocused() then
+        return true
+    end
+    if Core.IsAnyWidgetClassVisible("WBP_RenamePopup_C")
+        or Core.IsAnyWidgetClassVisible("WBP_ElevatorConfig_C")
+    then
+        return true
+    end
+    local okChats, chats = pcall(FindAllOf, "WBP_Chat_C")
+    if okChats and chats then
+        for _, chat in ipairs(chats) do
+            if Core.IsValidObj(chat) then
+                local okOpen, isOpen = pcall(function() return chat.IsOpen == true end)
+                if okOpen and isOpen then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 function Core.PruneAllCaches()
+    for addr, entry in pairs(TrackedTextInputs) do
+        if not Core.IsValidObj(entry.Input) then
+            TrackedTextInputs[addr] = nil
+        end
+    end
+    SuppressedCharacterInput = false
+    SuppressedCharacterInputPC = nil
     for _, feature in ipairs(Features) do
         if type(feature.PruneCaches) == "function" then
             feature.PruneCaches(Core)
@@ -531,6 +709,7 @@ local function ApplyKeybindState(bs, keyName, shouldSave)
                     if entry.ActiveUe4ssKey == ue4ssKey then
                         ExecuteInGameThread(function()
                             if not Core.IsSelectingAnyRegisteredKeybind()
+                                and not Core.IsAnyTextInputFocused()
                                 and not Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
                                 and not Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
                                 and not Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
@@ -555,7 +734,14 @@ local function ApplyKeybindState(bs, keyName, shouldSave)
                 local okD, down = pcall(function() return pc:IsInputKeyDown({ KeyName = FName(cur) }) end)
                 if okD and down and not bs.FallbackWasDown then
                     bs.FallbackWasDown = true
-                    bs.OnPress()
+                    if not Core.IsSelectingAnyRegisteredKeybind()
+                        and not Core.IsAnyTextInputFocused()
+                        and not Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
+                        and not Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
+                        and not Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
+                    then
+                        bs.OnPress()
+                    end
                 elseif not okD or not down then
                     bs.FallbackWasDown = false
                 end
@@ -715,6 +901,13 @@ function Core.EnsureKeybindHooks()
             if not bs then return end
             ApplyKeybindState(bs, "None", true)
             SyncKeybindRow(bs, row)
+        end
+    )
+    Core.TryRegisterHook(
+        "Core_TextInput_OnCommitted",
+        "/Game/Blueprints/Widgets/Basic/WBP_TextInput.WBP_TextInput_C:BndEvt__WBP_TextInput_EditableTextBox_80_K2Node_ComponentBoundEvent_1_OnEditableTextBoxCommittedEvent__DelegateSignature",
+        function()
+            ExecuteInGameThreadWithDelay(1, SyncCharacterInputSuppression)
         end
     )
 

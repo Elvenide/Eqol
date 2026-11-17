@@ -215,6 +215,10 @@ local function TogglePowerOverview()
         return
     end
 
+    if Core.IsAnyTextInputFocused() then
+        return
+    end
+
     local powerOverviewClass = Core.FindOrLoadClass(PATHS.PowerOverviewClass)
     if Core.IsValidObj(powerOverviewClass) then
         Core.EnsureAllHooks()
@@ -233,6 +237,7 @@ local function TogglePowerOverview()
 
     -- Do not trigger while navigating menus, rebinding keys, or typing in inputs
     if IsSelectingAnyKeybind()
+        or Core.IsAnyTextInputFocused()
         or Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
         or Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
         or Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")

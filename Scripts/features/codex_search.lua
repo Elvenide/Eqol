@@ -211,6 +211,7 @@ EnsureCodexSearchBar = function(codexContent)
     }
     InjectedCodex[addr] = st
     InputToCodex[searchInput:GetAddress()] = st
+    Core.RegisterTextInput(searchInput, codexContent)
     return st
 end
 
