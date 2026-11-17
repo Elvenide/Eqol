@@ -437,7 +437,91 @@ local function ResolveDesignerObject(designerHud)
     return designer
 end
 
-local function ScheduleAllDesignersRefresh(triggerSource)
+local DesignerWatcherActive = false
+
+local function EnsureDesignerWatcher()
+    if DesignerWatcherActive then return end
+    DesignerWatcherActive = true
+
+    local function WatcherTick()
+        local anyVisible = false
+        for addr, st in pairs(InjectedDesigners) do
+            if not Core.IsValidObj(st.Hud) then
+                InjectedDesigners[addr] = nil
+            else
+                local inVp, vis = false, false
+                pcall(function()
+                    inVp = st.Hud:IsInViewport() == true
+                    vis = st.Hud:IsVisible() == true
+                end)
+                if inVp and vis then
+                    anyVisible = true
+                    local designer = ResolveDesignerObject(st.Hud)
+                    local previewCount, pendingCount = 0, 0
+                    if Core.IsValidObj(designer) then
+                        local okP, previewBlocks = pcall(function()
+                            return Core.IsValidObj(designer.Visualizer) and designer.Visualizer.PreviewBlocks or nil
+                        end)
+                        if okP and previewBlocks then
+                            StationData.ForEachArray(previewBlocks, function(_, elem)
+                                local actor = Core.UnwrapArrayElem(elem)
+                                if Core.IsValidObj(actor) then
+                                    previewCount = previewCount + 1
+                                    local okPend, pendRes = pcall(function()
+                                        if actor.IsDesignerPending then
+                                            return actor:IsDesignerPending()
+                                        end
+                                        return actor.bPending == true
+                                    end)
+                                    if okPend and pendRes == true then
+                                        pendingCount = pendingCount + 1
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                    if previewCount ~= st.WatchedPreviewCount or pendingCount ~= st.WatchedPendingCount then
+                        st.WatchedPreviewCount = previewCount
+                        st.WatchedPendingCount = pendingCount
+                        LastTriggerSource = "WatcherPoll"
+                        RefreshDesignerPowerStats(st.Hud)
+                    end
+                end
+            end
+        end
+
+        if not anyVisible then
+            DesignerWatcherActive = false
+            return
+        end
+        ExecuteInGameThreadWithDelay(150, WatcherTick)
+    end
+
+    ExecuteInGameThreadWithDelay(150, WatcherTick)
+end
+
+local function ScanAndRefreshAllDesigners(triggerSource)
+    if triggerSource then
+        LastTriggerSource = triggerSource
+    end
+    local seen = {}
+    for _, st in pairs(InjectedDesigners) do
+        if Core.IsValidObj(st.Hud) then
+            seen[st.Hud:GetAddress()] = true
+            RefreshDesignerPowerStats(st.Hud)
+        end
+    end
+    local okHuds, huds = pcall(FindAllOf, "WBP_DesignerHUD_C")
+    if okHuds and huds then
+        for _, hud in ipairs(huds) do
+            if Core.IsValidObj(hud) and not seen[hud:GetAddress()] then
+                RefreshDesignerPowerStats(hud)
+            end
+        end
+    end
+end
+
+local function ScheduleAllDesignersRefresh(triggerSource, targetHud)
     if triggerSource then
         LastTriggerSource = triggerSource
     end
@@ -445,11 +529,10 @@ local function ScheduleAllDesignersRefresh(triggerSource)
     RefreshScheduled = true
     ExecuteInGameThreadWithDelay(40, function()
         RefreshScheduled = false
-        for _, st in pairs(InjectedDesigners) do
-            if Core.IsValidObj(st.Hud) then
-                RefreshDesignerPowerStats(st.Hud)
-            end
+        if Core.IsValidObj(targetHud) and not InjectedDesigners[targetHud:GetAddress()] then
+            RefreshDesignerPowerStats(targetHud)
         end
+        ScanAndRefreshAllDesigners(nil)
     end)
 end
 
@@ -812,7 +895,13 @@ RefreshDesignerPowerStats = function(hud)
 
     if not st or not Core.IsValidObj(st.PowerText) then
         local statsPanel, refCol, hullText, hullColVBox = FindStatsContainerPanel(hud)
-        if not Core.IsValidObj(statsPanel) then return end
+        if not Core.IsValidObj(statsPanel) then
+            Core.Log(string.format(
+                "[DesignerStats Warn] FindStatsContainerPanel returned nil (HullText=%s StatsContainer=%s)",
+                tostring(Core.IsValidObj(hud.HullText)), tostring(Core.IsValidObj(hud.StatsContainer))
+            ))
+            return
+        end
 
         local refLabelText = nil
         local labelColor = COLORS.GoldAccent
@@ -867,10 +956,14 @@ RefreshDesignerPowerStats = function(hud)
         end)
 
         local pwrTxt, pwrLbl = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power", nextCol, labelColor, labelSize)
-        if not Core.IsValidObj(pwrTxt) then return end
+        if not Core.IsValidObj(pwrTxt) then
+            Core.Log("[DesignerStats Warn] CreateDesignerStatColumn returned nil")
+            return
+        end
 
         st = { Hud = hud, PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
         InjectedDesigners[addr] = st
+        EnsureDesignerWatcher()
     end
 
     local gen, cons, diag = ComputeDesignerPower(hud, st)
@@ -901,6 +994,7 @@ end
 
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
+        Core.Log("[DesignerStats WatchWidget] WBP_DesignerHUD_C constructed")
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(150, function()
             if Core.IsValidObj(hud) then
@@ -913,13 +1007,32 @@ Feature.WatchWidgets = {
 
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
+        "DesignerHUD_Refresh",
+        PATHS.DesignerHUDClass .. ":Refresh",
+        function(Context)
+            local hud = Context:get()
+            if Core.IsValidObj(hud) then
+                ScheduleAllDesignersRefresh("HUD_Refresh", hud)
+            end
+        end
+    )
+
+    Core.TryRegisterHook(
         "DesignerHUD_RefreshStats",
         PATHS.DesignerHUDClass .. ":RefreshStats",
         function(Context)
             local hud = Context:get()
             if Core.IsValidObj(hud) then
-                ScheduleAllDesignersRefresh("RefreshStats")
+                ScheduleAllDesignersRefresh("RefreshStats", hud)
             end
+        end
+    )
+
+    Core.TryRegisterHook(
+        "Designer_RefreshBlueprintStats",
+        "/Script/MainSequence.Designer:RefreshBlueprintStats",
+        function()
+            ScheduleAllDesignersRefresh("Designer_RefreshBlueprintStats")
         end
     )
 
@@ -949,6 +1062,16 @@ end
 
 function Feature.OnClientRestart()
     Feature.RegisterHooks()
+    ExecuteInGameThreadWithDelay(200, function()
+        ScanAndRefreshAllDesigners("OnClientRestart")
+    end)
+end
+
+function Feature.OnMapLoad()
+    Feature.RegisterHooks()
+    ExecuteInGameThreadWithDelay(200, function()
+        ScanAndRefreshAllDesigners("OnMapLoad")
+    end)
 end
 
 function Feature.PruneCaches()
