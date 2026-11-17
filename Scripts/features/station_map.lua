@@ -918,7 +918,7 @@ local function EnsureMapKeybinds()
 
     if Key.B then
         RegisterKeyBind(Key.B, function()
-            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection then
+            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(OpenBuildMenuFromStationMap)
             end
         end)
@@ -926,7 +926,7 @@ local function EnsureMapKeybinds()
 
     if Key.R then
         RegisterKeyBind(Key.R, function()
-            if Core.IsValidObj(ActiveMapWin) and (InteractionMode == "Place" or InteractionMode == "Paste") then
+            if Core.IsValidObj(ActiveMapWin) and (InteractionMode == "Place" or InteractionMode == "Paste") and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
                     PendingRotationDeg = (PendingRotationDeg + 90) % 360
                     UpdateStatusBanner()
@@ -937,7 +937,7 @@ local function EnsureMapKeybinds()
 
     if Key.ESCAPE then
         RegisterKeyBind(Key.ESCAPE, function()
-            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection then
+            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
                     if InteractionMode ~= "Select" then
                         InteractionMode = "Select"

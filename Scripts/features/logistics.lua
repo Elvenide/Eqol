@@ -684,6 +684,10 @@ local function OpenLogisticsWindow()
 end
 
 local function ToggleLogistics()
+    if Core.IsAnyTextInputFocused() then
+        return
+    end
+
     if Core.IsValidObj(ActiveLogisticsWin) then
         CloseLogisticsWindow()
         return
