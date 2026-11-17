@@ -32,7 +32,6 @@ Core.RegisterFeature(require("features.player_alerts"))
 Core.RegisterFeature(require("features.elevator_labels"))
 Core.RegisterFeature(require("features.elevator_hotkeys"))
 Core.RegisterFeature(require("features.codex_search"))
-Core.RegisterFeature(require("features.research_enhancements"))
 
 -- Startup
 Core.InitAll()
