@@ -33,12 +33,13 @@ local PATHS = {
 }
 
 local STATUS_COLORS = {
-    Green = { R = 0.05402, G = 0.7042, B = 0.05281, A = 1.0 },
-    Amber = { R = 0.8917,  G = 0.6242, B = 0.0,     A = 1.0 },
-    Red   = { R = 0.5177,  G = 0.0,    B = 0.04122, A = 1.0 },
-    WinBg = { R = 0.012,   G = 0.016,  B = 0.024,   A = 0.78 },
-    RowBg = { R = 0.0,     G = 0.0,    B = 0.0,     A = 0.0  },
-    KeyBg = { R = 0.060,   G = 0.090,  B = 0.130,   A = 0.85 },
+    Green      = { R = 0.05402, G = 0.7042, B = 0.05281, A = 1.0 },
+    Amber      = { R = 0.8917,  G = 0.6242, B = 0.0,     A = 1.0 },
+    Red        = { R = 0.5177,  G = 0.0,    B = 0.04122, A = 1.0 },
+    OutputFull = { R = 0.16,    G = 0.65,   B = 0.96,    A = 1.0 },
+    WinBg      = { R = 0.012,   G = 0.016,  B = 0.024,   A = 0.78 },
+    RowBg      = { R = 0.0,     G = 0.0,    B = 0.0,     A = 0.0  },
+    KeyBg      = { R = 0.060,   G = 0.090,  B = 0.130,   A = 0.85 },
 }
 
 local UE_TO_UE4SS_KEY = {
@@ -183,6 +184,106 @@ local function GetAssemblerRunState(m)
     return isRunning, status
 end
 
+local function CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
+    local missingInputs = false
+    local missingNames = {}
+    local outputFull = false
+
+    -- 1. Check whether output craft completed or OutputInventory lacks space
+    pcall(function()
+        if m.bProgressComplete == true then
+            outputFull = true
+        end
+    end)
+
+    if not outputFull and #outputs > 0 then
+        local outInv = nil
+        pcall(function()
+            outInv = m.GetOutputInventory and m:GetOutputInventory() or m.OutputInventory
+        end)
+        if Core.IsValidObj(outInv) then
+            local isEmpty = false
+            pcall(function()
+                if outInv.IsEmpty then
+                    isEmpty = (outInv:IsEmpty() == true)
+                end
+            end)
+            if not isEmpty and outInv.HasSpaceForItems then
+                local primaryOut = outputs[1]
+                local okSp, sp = pcall(function()
+                    return outInv:HasSpaceForItems({
+                        Item = primaryOut.Item,
+                        Amount = primaryOut.CraftAmount or 1,
+                    })
+                end)
+                if okSp and type(sp) == "boolean" and not sp then
+                    outputFull = true
+                end
+            end
+        end
+    end
+
+    -- 2. Inspect InputInventory directly against recipe per-craft input amounts
+    local inInv = nil
+    pcall(function()
+        inInv = m.GetInputInventory and m:GetInputInventory() or m.InputInventory
+    end)
+    if Core.IsValidObj(inInv) and #inputs > 0 then
+        local storedIn = {}
+        local readSlots = false
+        local okSlots, slots = pcall(function() return inInv:GetItemSlots() end)
+        if okSlots and slots then
+            readSlots = true
+            StationData.ForEachArray(slots, function(_, elem)
+                local st = Core.UnwrapStruct(elem)
+                if st and Core.IsValidObj(st.Item) then
+                    local k = GetItemKey(st.Item)
+                    if k then
+                        storedIn[k] = (storedIn[k] or 0) + (tonumber(st.Amount) or 0)
+                    end
+                end
+            end)
+        end
+
+        for _, inp in ipairs(inputs) do
+            local have = 0
+            if readSlots then
+                local k = GetItemKey(inp.Item)
+                have = (k and storedIn[k]) or 0
+            elseif inInv.GetItemAmount then
+                local okAmt, a = pcall(function() return inInv:GetItemAmount(inp.Item) end)
+                if okAmt and type(a) == "number" then have = a end
+            end
+            if have < (inp.CraftAmount or 1) then
+                missingInputs = true
+                local iName = GetItemKey(inp.Item) or "?"
+                pcall(function()
+                    if inp.Item and inp.Item.DisplayName then
+                        local s = tostring(inp.Item.DisplayName:ToString())
+                        if s ~= "" then iName = s end
+                    elseif inp.Item and inp.Item.Name then
+                        local s = tostring(inp.Item.Name:ToString())
+                        if s ~= "" then iName = s end
+                    end
+                end)
+                missingNames[#missingNames + 1] = iName
+            end
+        end
+    elseif machineStatus == 1 and not outputFull then
+        missingInputs = true
+    end
+
+    -- If powered & valid config with all required inputs present, but stopped -> output is full
+    if not outputFull and not isRunning and machineStatus ~= 2 and machineStatus ~= 3 and not missingInputs then
+        outputFull = true
+    end
+    if outputFull then
+        missingInputs = false
+    end
+
+    return missingInputs, missingNames, outputFull
+end
+
 local function CollectStationLogisticsData(station, walkFrame)
     local platforms = StationData.GetStationPlatforms(station)
     if #platforms == 0 and Core.IsValidObj(walkFrame) then
@@ -240,6 +341,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                     local craftSec = 1.0
                     local inputs = {}
                     local outputs = {}
+                    local hasMissingInputs, missingNames, isOutputFull = false, {}, false
 
                     if Core.IsValidObj(rec) then
                         local okSec, sec = pcall(function() return rec:GetCraftingSeconds() end)
@@ -247,20 +349,12 @@ local function CollectStationLogisticsData(station, walkFrame)
                             craftSec = sec
                         end
 
-                        -- Outputs (only count toward Total Production when actively running)
+                        -- Outputs
                         local okOut, outStack = pcall(function() return rec.Output end)
                         if okOut and outStack and Core.IsValidObj(outStack.Item) then
                             local amt = tonumber(outStack.Amount) or 1
                             local rate = (amt * 60.0 / craftSec) * bonusMult
-                            table.insert(outputs, { Item = outStack.Item, Rate = rate })
-                            if isRunning then
-                                local k = GetItemKey(outStack.Item)
-                                stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
-                                if not stationProdItems[k] then
-                                    stationProdItems[k] = { Item = outStack.Item, Rate = 0.0 }
-                                end
-                                stationProdItems[k].Rate = stationProdItems[k].Rate + rate
-                            end
+                            table.insert(outputs, { Item = outStack.Item, Rate = rate, CraftAmount = amt })
                         else
                             local okOuts, outs = pcall(function() return rec:GetOutputs() end)
                             if okOuts and outs then
@@ -269,21 +363,13 @@ local function CollectStationLogisticsData(station, walkFrame)
                                     if st and Core.IsValidObj(st.Item) then
                                         local amt = tonumber(st.Amount) or 1
                                         local rate = (amt * 60.0 / craftSec) * bonusMult
-                                        table.insert(outputs, { Item = st.Item, Rate = rate })
-                                        if isRunning then
-                                            local k = GetItemKey(st.Item)
-                                            stationProdRates[k] = (stationProdRates[k] or 0.0) + rate
-                                            if not stationProdItems[k] then
-                                                stationProdItems[k] = { Item = st.Item, Rate = 0.0 }
-                                            end
-                                            stationProdItems[k].Rate = stationProdItems[k].Rate + rate
-                                        end
+                                        table.insert(outputs, { Item = st.Item, Rate = rate, CraftAmount = amt })
                                     end
                                 end)
                             end
                         end
 
-                        -- Inputs (count active demand when running or starved for items)
+                        -- Inputs
                         local okIn, inArr = pcall(function() return rec.Inputs end)
                         if okIn and inArr then
                             StationData.ForEachArray(inArr, function(_, elem)
@@ -291,13 +377,38 @@ local function CollectStationLogisticsData(station, walkFrame)
                                 if st and Core.IsValidObj(st.Item) then
                                     local amt = tonumber(st.Amount) or 1
                                     local rate = (amt * 60.0 / craftSec) * bonusMult
-                                    table.insert(inputs, { Item = st.Item, Rate = rate })
-                                    if isRunning or machineStatus == 1 then
-                                        local k = GetItemKey(st.Item)
-                                        stationConsRates[k] = (stationConsRates[k] or 0.0) + rate
-                                    end
+                                    table.insert(inputs, { Item = st.Item, Rate = rate, CraftAmount = amt })
                                 end
                             end)
+                        end
+
+                        hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
+
+                        -- Total Production reflects ONLY actual currently running output;
+                        -- stationProdRates also counts Output Full machines so backed-up producers don't report fake deficits.
+                        for _, outp in ipairs(outputs) do
+                            local k = GetItemKey(outp.Item)
+                            if k then
+                                if isRunning or isOutputFull then
+                                    stationProdRates[k] = (stationProdRates[k] or 0.0) + outp.Rate
+                                end
+                                if isRunning then
+                                    if not stationProdItems[k] then
+                                        stationProdItems[k] = { Item = outp.Item, Rate = 0.0 }
+                                    end
+                                    stationProdItems[k].Rate = stationProdItems[k].Rate + outp.Rate
+                                end
+                            end
+                        end
+
+                        -- Demand counts running or input-starved machines (not output-full or unpowered)
+                        if isRunning or hasMissingInputs then
+                            for _, inp in ipairs(inputs) do
+                                local k = GetItemKey(inp.Item)
+                                if k then
+                                    stationConsRates[k] = (stationConsRates[k] or 0.0) + inp.Rate
+                                end
+                            end
                         end
                     end
 
@@ -307,6 +418,9 @@ local function CollectStationLogisticsData(station, walkFrame)
                         HasRecipe = Core.IsValidObj(rec),
                         IsRunning = isRunning,
                         MachineStatus = machineStatus,
+                        HasMissingInputs = hasMissingInputs,
+                        MissingInputNames = missingNames,
+                        IsOutputFull = isOutputFull,
                         Inputs = inputs,
                         Outputs = outputs,
                     })
@@ -463,34 +577,50 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
     end
 
     local statusCode = "G"
+    local statusLabel = "Producing"
     local statusCol = STATUS_COLORS.Green
     local tooltipMsg = "Producing: machine is actively running and supplied."
     if not entry.HasRecipe then
         statusCode = "A"
+        statusLabel = "No Recipe"
         statusCol = STATUS_COLORS.Amber
         tooltipMsg = "Idle: no active recipe or output configured."
     elseif entry.MachineStatus == 2 then
         statusCode = "R_PWR"
+        statusLabel = "No Power"
         statusCol = STATUS_COLORS.Red
         tooltipMsg = "Offline: insufficient power."
     elseif entry.MachineStatus == 3 then
         statusCode = "R_CFG"
+        statusLabel = "Invalid Config"
         statusCol = STATUS_COLORS.Red
         tooltipMsg = "Stopped: invalid machine configuration."
-    elseif entry.MachineStatus == 1 then
+    elseif entry.IsOutputFull then
+        statusCode = "B_FULL"
+        statusLabel = "Output Full"
+        statusCol = STATUS_COLORS.OutputFull
+        tooltipMsg = "Output full: output buffer is full so production is paused."
+    elseif entry.HasMissingInputs then
         statusCode = "R_ITM"
+        statusLabel = "Missing Inputs"
         statusCol = STATUS_COLORS.Red
-        tooltipMsg = hasDeficit
-            and ("Bottlenecked (waiting for items): " .. table.concat(deficitNames, ", ") .. ".")
-            or "Waiting for input items."
-    elseif hasDeficit then
+        if entry.MissingInputNames and #entry.MissingInputNames > 0 then
+            tooltipMsg = "Missing inputs: waiting for " .. table.concat(entry.MissingInputNames, ", ") .. "."
+        elseif hasDeficit then
+            tooltipMsg = "Bottlenecked (missing inputs): " .. table.concat(deficitNames, ", ") .. "."
+        else
+            tooltipMsg = "Waiting for input items."
+        end
+    elseif hasDeficit and entry.IsRunning then
         statusCode = "R_DEF"
+        statusLabel = "Input Deficit"
         statusCol = STATUS_COLORS.Red
         tooltipMsg = "Bottlenecked: input demand exceeds current production (" .. table.concat(deficitNames, ", ") .. ")."
     elseif not entry.IsRunning then
         statusCode = "A_STP"
+        statusLabel = "Idle"
         statusCol = STATUS_COLORS.Amber
-        tooltipMsg = "Idle: output full or machine not currently running."
+        tooltipMsg = "Idle: machine is not currently running."
     end
 
     local outParts = {}
@@ -501,7 +631,7 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
     local sig = string.format("%s|%s|%s|%s|%s|%s",
         tostring(entry.Name), statusCode, tostring(entry.IsRunning), tostring(entry.MachineStatus),
         table.concat(inpParts, ","), table.concat(outParts, ","))
-    return statusCol, tooltipMsg, sig
+    return statusCol, statusLabel, tooltipMsg, sig
 end
 
 local function PopulateStorageSection(ui, items)
@@ -613,8 +743,8 @@ local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
     local computed = {}
     local sigParts = {}
     for idx, entry in ipairs(assemblers) do
-        local statusCol, tooltipMsg, rowSig = ComputeAssemblerStatus(entry, prodRates, consRates)
-        computed[idx] = { statusCol = statusCol, tooltipMsg = tooltipMsg }
+        local statusCol, statusLabel, tooltipMsg, rowSig = ComputeAssemblerStatus(entry, prodRates, consRates)
+        computed[idx] = { statusCol = statusCol, statusLabel = statusLabel, tooltipMsg = tooltipMsg }
         sigParts[idx] = rowSig
     end
     local sig = table.concat(sigParts, "||")
@@ -668,9 +798,22 @@ local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
                     nameTxt:SetSize(12)
                     nameTxt:SetText(Core.MakeText(entry.Name))
                 end)
+                local nameCol = Core.CreateRawWidget(PATHS.VerticalBoxClass, ui.Outer)
+                local statusTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+                if Core.IsValidObj(nameCol) and Core.IsValidObj(statusTxt) then
+                    pcall(function()
+                        statusTxt:SetSize(9)
+                        statusTxt:SetText(Core.MakeText(info.statusLabel or ""))
+                        if Core.IsValidObj(statusTxt.TextBlock) then
+                            statusTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = info.statusCol, ColorUseRule = 0 })
+                        end
+                    end)
+                    nameCol:AddChildToVerticalBox(nameTxt)
+                    nameCol:AddChildToVerticalBox(statusTxt)
+                end
                 local nBox = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
                 pcall(function() nBox:SetWidthOverride(130.0) end)
-                nBox:AddChild(nameTxt)
+                nBox:AddChild(Core.IsValidObj(nameCol) and nameCol or nameTxt)
                 local nSlot = rowHBox:AddChildToHorizontalBox(nBox)
                 if Core.IsValidObj(nSlot) then
                     pcall(function() nSlot:SetVerticalAlignment(2) end)
