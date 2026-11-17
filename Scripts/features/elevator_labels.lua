@@ -23,11 +23,11 @@ local COLORS = {
 }
 
 local GRID_UNIT_CM         = 50.0   -- Elevator Inputs use 50 cm grid units (+-13->+-650cm, +-6->+-300cm)
-local PORT_WALL_OFFSET_CM  = 288.0  -- cm along port facing axis (12cm proud of +-300cm port seam)
-local PANEL_Z_ABOVE_STOP   = 210.0  -- cm along actor Up from stopPos (centered on blank gray plate ~160-260cm)
+local PORT_WALL_OFFSET_CM  = 295.0  -- cm along port facing axis (5cm proud of +-300cm port seam)
+local PANEL_Z_ABOVE_STOP   = 170.0  -- cm along actor Up from stopPos (centered on blank gray plate ~125-215cm)
 local MAX_VIEW_DIST_SQ     = 3000.0 * 3000.0
 local ICON_PIXEL_SIZE      = 64.0
-local ICON_WORLD_SCALE     = 1.00   -- ~64 cm icon centered inside ~110x110 cm blank gray plate
+local ICON_WORLD_SCALE     = 0.95   -- ~61 cm icon centered inside blank gray plate
 local ELEVATOR_SCAN_PERIOD = 1.5
 local PORT_DATA_PERIOD     = 0.25
 
