@@ -187,11 +187,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                         local okSlots, slots = pcall(function() return inv:GetItemSlots() end)
                         if okSlots and slots then
                             StationData.ForEachArray(slots, function(_, elem)
-                                local st = elem
-                                if type(elem.get) == "function" then
-                                    local okG, g = pcall(function() return elem:get() end)
-                                    if okG then st = g end
-                                end
+                                local st = Core.UnwrapStruct(elem)
                                 if st and Core.IsValidObj(st.Item) then
                                     local amt = tonumber(st.Amount) or 0
                                     if amt > 0 then
@@ -241,11 +237,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                             local okOuts, outs = pcall(function() return rec:GetOutputs() end)
                             if okOuts and outs then
                                 StationData.ForEachArray(outs, function(_, elem)
-                                    local st = elem
-                                    if type(elem.get) == "function" then
-                                        local okG, g = pcall(function() return elem:get() end)
-                                        if okG then st = g end
-                                    end
+                                    local st = Core.UnwrapStruct(elem)
                                     if st and Core.IsValidObj(st.Item) then
                                         local amt = tonumber(st.Amount) or 1
                                         local rate = (amt * 60.0 / craftSec) * bonusMult
@@ -265,11 +257,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                         local okIn, inArr = pcall(function() return rec.Inputs end)
                         if okIn and inArr then
                             StationData.ForEachArray(inArr, function(_, elem)
-                                local st = elem
-                                if type(elem.get) == "function" then
-                                    local okG, g = pcall(function() return elem:get() end)
-                                    if okG then st = g end
-                                end
+                                local st = Core.UnwrapStruct(elem)
                                 if st and Core.IsValidObj(st.Item) then
                                     local amt = tonumber(st.Amount) or 1
                                     local rate = (amt * 60.0 / craftSec) * bonusMult

@@ -138,11 +138,7 @@ local function ExtractItemFromElevator(elev)
         if okSlots and slots then
             StationData.ForEachArray(slots, function(_, elem)
                 if foundItem then return end
-                local st = elem
-                if type(elem.get) == "function" then
-                    local okG, g = pcall(function() return elem:get() end)
-                    if okG then st = g end
-                end
+                local st = Core.UnwrapStruct(elem)
                 if st and Core.IsValidObj(st.Item) and (tonumber(st.Amount) or 0) > 0 then
                     foundItem = st.Item
                     foundAmt = tonumber(st.Amount)

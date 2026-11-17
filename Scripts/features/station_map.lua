@@ -147,11 +147,7 @@ local function PlayerHasBuildableMaterials(pc, buildable, count)
     local hasAll = true
     StationData.ForEachArray(costArr, function(_, elem)
         if not hasAll then return end
-        local st = elem
-        if type(elem.get) == "function" then
-            local okG, g = pcall(function() return elem:get() end)
-            if okG then st = g end
-        end
+        local st = Core.UnwrapStruct(elem)
         if st and Core.IsValidObj(st.Item) then
             local needed = (tonumber(st.Amount) or 0) * mult
             if needed > 0 then

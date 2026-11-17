@@ -46,6 +46,18 @@ function Core.UnwrapArrayElem(elem)
     return nil
 end
 
+function Core.UnwrapStruct(val)
+    if val == nil then return nil end
+    local ok, inner = pcall(function()
+        if type(val.get) == "function" then
+            return val:get()
+        end
+        return val
+    end)
+    if ok and inner ~= nil then return inner end
+    return val
+end
+
 function Core.Clamp(val, lo, hi)
     if val < lo then return lo end
     if val > hi then return hi end

@@ -616,11 +616,7 @@ function StationData.GetPrimaryItemForMachine(machine)
                 local firstItem = nil
                 StationData.ForEachArray(outs, function(_, elem)
                     if firstItem then return end
-                    local st = elem
-                    if type(elem.get) == "function" then
-                        local okG, g = pcall(function() return elem:get() end)
-                        if okG then st = g end
-                    end
+                    local st = Core.UnwrapStruct(elem)
                     if st and Core.IsValidObj(st.Item) then
                         firstItem = st.Item
                     end
@@ -639,11 +635,7 @@ function StationData.GetPrimaryItemForMachine(machine)
             local okSlots, slots = pcall(function() return inv:GetItemSlots() end)
             if okSlots and slots then
                 StationData.ForEachArray(slots, function(_, elem)
-                    local st = elem
-                    if type(elem.get) == "function" then
-                        local okG, g = pcall(function() return elem:get() end)
-                        if okG then st = g end
-                    end
+                    local st = Core.UnwrapStruct(elem)
                     if st and Core.IsValidObj(st.Item) then
                         local amt = tonumber(st.Amount) or 1
                         if amt > bestAmount then
