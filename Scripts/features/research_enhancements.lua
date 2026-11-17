@@ -877,19 +877,31 @@ local function EnsureDragGhost(tree, pc, srcWidget)
             end
         end)
 
-        local w, h = 60.0, 60.0
-        local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
-        if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and srcWidget.GetCachedGeometry then
-            local okS, sz = pcall(function()
-                return slateLib:GetLocalSize(srcWidget:GetCachedGeometry())
-            end)
-            if okS and sz ~= nil then
-                local sx, sy = tonumber(sz.X), tonumber(sz.Y)
-                if sx and sx >= 20.0 and sx <= 240.0 then w = sx end
-                if sy and sy >= 20.0 and sy <= 240.0 then h = sy end
+        local w, h = nil, nil
+        pcall(function()
+            if srcWidget.GetDesiredSize then
+                local dsz = srcWidget:GetDesiredSize()
+                if dsz ~= nil then
+                    local dx, dy = tonumber(dsz.X), tonumber(dsz.Y)
+                    if dx and dx >= 40.0 and dx <= 600.0 then w = dx end
+                    if dy and dy >= 40.0 and dy <= 600.0 then h = dy end
+                end
+            end
+        end)
+        if not w or not h then
+            local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+            if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and srcWidget.GetCachedGeometry then
+                local okS, sz = pcall(function()
+                    return slateLib:GetLocalSize(srcWidget:GetCachedGeometry())
+                end)
+                if okS and sz ~= nil then
+                    local sx, sy = tonumber(sz.X), tonumber(sz.Y)
+                    if not w and sx and sx >= 40.0 and sx <= 600.0 then w = sx end
+                    if not h and sy and sy >= 40.0 and sy <= 600.0 then h = sy end
+                end
             end
         end
-        if ghost.SetDesiredSizeInViewport then
+        if w and h and ghost.SetDesiredSizeInViewport then
             ghost:SetDesiredSizeInViewport({ X = w, Y = h })
         end
     end)
