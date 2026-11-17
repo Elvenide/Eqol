@@ -16,6 +16,7 @@ local PATHS = {
     SizeBoxClass     = "/Script/UMG.SizeBox",
     DesignerHUDClass = "/Game/Blueprints/Widgets/HUDs/Designer/WBP_DesignerHUD.WBP_DesignerHUD_C",
     BPCDesignerClass = "/Game/Blueprints/Player/Designer/BPC_Designer.BPC_Designer_C",
+    SolarPanelCDO    = "/Game/Blueprints/Machines/BPO_SolarPanel.Default__BPO_SolarPanel_C",
 }
 
 local COLORS = {
@@ -25,8 +26,10 @@ local COLORS = {
     GreenValue = { R = 0.30, G = 0.90, B = 0.40, A = 1.0 },
 }
 
-local InjectedDesigners = {} -- hudAddr -> { Hud, PowerText, PowerLabel, LabelColor }
-local HookedBlueprintStats = false
+local InjectedDesigners = {}    -- hudAddr -> { Hud, PowerText, PowerLabel, LabelColor, SolarEfficiency, InitialLoadedGen, InitialLoadedCons, ResetBaseline }
+local BlockClassPowerCache = {} -- blockClsAddr -> { nonSolarGen, solarBaseGen, cons }
+local ActorBlockInfoCache = {}  -- actorAddr -> { info = table, clsAddr = number }
+local RefreshScheduled = false
 local RefreshDesignerPowerStats -- forward declaration
 
 local function FormatPower(kw)
@@ -130,40 +133,31 @@ local function ReadDisplayPower(obj)
     return 0.0
 end
 
-local function ComputePowerFromObject(obj, solarEfficiency)
-    local gen, cons = 0.0, 0.0
-    if not IsMachineObject(obj) then return gen, cons end
+local function ComputePowerFromObject(obj)
+    if not IsMachineObject(obj) then return 0.0, 0.0, 0.0 end
 
-    local eff = (type(solarEfficiency) == "number" and solarEfficiency > 0) and solarEfficiency or 1.0
-    local maxP = ReadDisplayPower(obj)
-
-    if IsProducerObject(obj) then
-        local isSolar = IsSolarPanelObject(obj)
-        local baseGen = maxP > 0 and maxP or 0.0
-        if baseGen == 0.0 then
-            local okRate, rateVal = pcall(function() return obj.PowerGenRate end)
-            if okRate and rateVal ~= nil then
-                local r = ReadFPNum(rateVal)
-                if r > 0 then baseGen = r end
-            end
-            if baseGen == 0.0 and isSolar then
-                local okME, meVal = pcall(function() return obj.MaxEfficiency end)
-                if okME and meVal ~= nil then
-                    local me = ReadFPNum(meVal)
-                    if me > 0 then baseGen = me end
-                end
-            end
+    if IsSolarPanelObject(obj) then
+        local rate = 0.0
+        pcall(function() rate = ReadFPNum(obj.PowerGenRate) end)
+        if rate <= 0 then
+            rate = ReadDisplayPower(obj)
         end
-        gen = isSolar and (baseGen * eff) or baseGen
+        return 0.0, (rate > 0 and rate or 0.0), 0.0
+    elseif IsProducerObject(obj) then
+        local maxP = ReadDisplayPower(obj)
+        local rate = 0.0
+        pcall(function() rate = ReadFPNum(obj.PowerGenRate) end)
+        return math.max(maxP > 0 and maxP or 0.0, rate > 0 and rate or 0.0), 0.0, 0.0
     else
-        cons = maxP ~= 0 and math.abs(maxP) or 0.0
+        local maxP = math.abs(ReadDisplayPower(obj))
+        local rate = 0.0
+        pcall(function() rate = ReadFPNum(obj.PowerConsumptionRate) end)
+        return 0.0, 0.0, math.max(maxP, rate > 0 and rate or 0.0)
     end
-
-    return gen, cons
 end
 
-local function AddMachineEntryPower(entry, solarEfficiency, gen, cons, checkInstance)
-    if not entry then return gen, cons end
+local function AddMachineEntryPower(entry, nsg, sbg, cons, checkInstance)
+    if not entry then return nsg, sbg, cons end
     local mObj = nil
     if Core.IsValidObj(entry) then
         if IsMachineObject(entry) then
@@ -184,85 +178,59 @@ local function AddMachineEntryPower(entry, solarEfficiency, gen, cons, checkInst
         end
     end
     if Core.IsValidObj(mObj) then
-        local g, c = ComputePowerFromObject(mObj, solarEfficiency)
-        return gen + g, cons + c
+        local g, sg, c = ComputePowerFromObject(mObj)
+        return nsg + g, sbg + sg, cons + c
     end
-    return gen, cons
+    return nsg, sbg, cons
 end
 
-local function ComputePowerFromBlockClass(blockCls, solarEfficiency, cache)
+local function GetBlockClassPowerInfo(blockCls)
     blockCls = Core.UnwrapArrayElem(blockCls)
-    if not Core.IsValidObj(blockCls) then return 0.0, 0.0 end
-
-    local addr = blockCls:GetAddress()
-    local cached = cache and cache[addr]
-    if cached then
-        return cached.gen, cached.cons
+    if not Core.IsValidObj(blockCls) then
+        return { nonSolarGen = 0.0, solarBaseGen = 0.0, cons = 0.0 }
     end
 
-    local gen, cons = 0.0, 0.0
+    local addr = blockCls:GetAddress()
+    local cached = BlockClassPowerCache[addr]
+    if cached then
+        return cached
+    end
+
+    local nsg, sbg, cons = 0.0, 0.0, 0.0
     local blockCDO = GetCDOFromUClass(blockCls)
     if Core.IsValidObj(blockCDO) then
         local okDM, defMachines = pcall(function() return blockCDO.DefaultMachines end)
         if okDM and defMachines then
             StationData.ForEachArray(defMachines, function(_, elem)
-                gen, cons = AddMachineEntryPower(UnwrapStruct(elem), solarEfficiency, gen, cons, true)
+                nsg, sbg, cons = AddMachineEntryPower(UnwrapStruct(elem), nsg, sbg, cons, true)
             end)
         end
 
-        if gen == 0.0 and cons == 0.0 then
+        if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
             local okGDM, defMachine = pcall(function()
                 return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine() or nil
             end)
             if okGDM and Core.IsValidObj(defMachine) then
-                local g, c = ComputePowerFromObject(defMachine, solarEfficiency)
-                gen = gen + g
+                local g, sg, c = ComputePowerFromObject(defMachine)
+                nsg = nsg + g
+                sbg = sbg + sg
                 cons = cons + c
             end
         end
 
-        if gen == 0.0 and cons == 0.0 then
-            gen, cons = ComputePowerFromObject(blockCDO, solarEfficiency)
+        if nsg == 0.0 and sbg == 0.0 and cons == 0.0 then
+            nsg, sbg, cons = ComputePowerFromObject(blockCDO)
         end
     end
 
-    if cache then
-        cache[addr] = { gen = gen, cons = cons }
-    end
-    return gen, cons
+    local info = { nonSolarGen = nsg, solarBaseGen = sbg, cons = cons }
+    BlockClassPowerCache[addr] = info
+    return info
 end
 
-local function SumBlueprintBlocksPower(bp, solarEfficiency, cache)
-    bp = UnwrapStruct(bp)
-    if not bp then return 0.0, 0.0, 0 end
-
-    local okB, blocks = pcall(function() return bp.Blocks end)
-    if not okB or not blocks then return 0.0, 0.0, 0 end
-
-    local totalGen, totalCons, count = 0.0, 0.0, 0
-    StationData.ForEachArray(blocks, function(_, elem)
-        local entry = UnwrapStruct(elem)
-        if not entry then return end
-
-        count = count + 1
-        local blockCls = nil
-        pcall(function() blockCls = entry.Class end)
-        local g, c = ComputePowerFromBlockClass(blockCls, solarEfficiency, cache)
-
-        if g == 0.0 and c == 0.0 then
-            local okBM, bMachines = pcall(function() return entry.DefaultMachines end)
-            if okBM and bMachines then
-                StationData.ForEachArray(bMachines, function(_, mElem)
-                    g, c = AddMachineEntryPower(UnwrapStruct(mElem), solarEfficiency, g, c, false)
-                end)
-            end
-        end
-
-        totalGen = totalGen + g
-        totalCons = totalCons + c
-    end)
-
-    return totalGen, totalCons, count
+local function EvalPowerInfo(info, solarEfficiency)
+    local eff = (type(solarEfficiency) == "number" and solarEfficiency > 0) and solarEfficiency or 1.0
+    return (info.nonSolarGen or 0.0) + (info.solarBaseGen or 0.0) * eff, (info.cons or 0.0)
 end
 
 local function ResolveDesignerObject(designerHud)
@@ -293,7 +261,10 @@ local function ResolveDesignerObject(designerHud)
 end
 
 local function ScheduleAllDesignersRefresh()
-    ExecuteInGameThreadWithDelay(50, function()
+    if RefreshScheduled then return end
+    RefreshScheduled = true
+    ExecuteInGameThreadWithDelay(40, function()
+        RefreshScheduled = false
         for _, st in pairs(InjectedDesigners) do
             if Core.IsValidObj(st.Hud) then
                 RefreshDesignerPowerStats(st.Hud)
@@ -302,26 +273,72 @@ local function ScheduleAllDesignersRefresh()
     end)
 end
 
-local function EnsureBlueprintStatsHook(designer)
-    Feature.RegisterHooks()
-    if HookedBlueprintStats or not Core.IsValidObj(designer) then return end
-    local dCls = designer:GetClass()
-    if not Core.IsValidObj(dCls) then return end
-    local full = dCls:GetFullName()
-    local clsPath = full and full:match("^%S+ (.+)$") or nil
-    if not clsPath then return end
-    if Core.TryRegisterHook("Designer_RefreshBlueprintStats", clsPath .. ":RefreshBlueprintStats", function()
-        ScheduleAllDesignersRefresh()
-    end) then
-        HookedBlueprintStats = true
+local function ResolveStationSolarEfficiency(frame, pg)
+    local eff = nil
+    if Core.IsValidObj(pg) then
+        local okProds, prods = pcall(function() return pg.Producers end)
+        if okProds and prods then
+            StationData.ForEachArray(prods, function(_, elem)
+                if eff ~= nil then return end
+                local prod = Core.UnwrapArrayElem(elem)
+                if not IsSolarPanelObject(prod) then return end
+
+                local rate = 0.0
+                pcall(function() rate = ReadFPNum(prod.PowerGenRate) end)
+                local maxP = 0.0
+                if prod.GetDisplayMaxPower then
+                    local okMaxP, mp = pcall(function() return prod:GetDisplayMaxPower() end)
+                    if okMaxP and type(mp) == "number" then maxP = mp end
+                end
+                if rate > 0 and maxP > 0 then
+                    eff = maxP / rate
+                    return
+                end
+
+                local okDE, deVal = pcall(function() return prod.DistanceEfficiency end)
+                if okDE and deVal ~= nil then
+                    local de = ReadFPNum(deVal)
+                    if de > 0 then
+                        eff = de
+                    end
+                end
+            end)
+        end
     end
+
+    if eff ~= nil then return eff end
+
+    -- Fallback when the station has no existing solar panels: compute from distance to sun and solar CDO bounds
+    if Core.IsValidObj(frame) and frame.GetDistanceToSun then
+        local okD, rawDist = pcall(function() return frame:GetDistanceToSun() end)
+        local dist = okD and ReadFPNum(rawDist) or 0.0
+        if dist > 0 then
+            local solarCDO = Core.GetCDO(PATHS.SolarPanelCDO)
+            if Core.IsValidObj(solarCDO) then
+                local minDist, maxDist, minEff, maxEff = 0.0, 0.0, 0.0, 1.0
+                pcall(function()
+                    minDist = ReadFPNum(solarCDO.MinDistance)
+                    maxDist = ReadFPNum(solarCDO.MaxDistance)
+                    minEff  = ReadFPNum(solarCDO.MinEfficiency)
+                    maxEff  = ReadFPNum(solarCDO.MaxEfficiency)
+                end)
+                if maxEff > 0 and maxDist > minDist then
+                    local t = Core.Clamp((dist - minDist) / (maxDist - minDist), 0.0, 1.0)
+                    eff = maxEff + t * (minEff - maxEff)
+                    if eff > 0 then
+                        return eff
+                    end
+                end
+            end
+        end
+    end
+
+    return 1.0
 end
 
-local function ComputeDesignerPower(designerHud)
+local function ComputeDesignerPower(designerHud, st)
     local designer = ResolveDesignerObject(designerHud)
     if not Core.IsValidObj(designer) then return 0.0, 0.0 end
-
-    EnsureBlueprintStatsHook(designer)
 
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
@@ -337,51 +354,32 @@ local function ComputeDesignerPower(designerHud)
     end
 
     local pgGen, pgCons = 0.0, 0.0
-    local solarEfficiency = 1.0
+    local pg = nil
     if isStationFrame and frame.GetPowerGrid then
-        local okPG, pg = pcall(function() return frame:GetPowerGrid() end)
-        if okPG and Core.IsValidObj(pg) then
+        local okPG, foundPG = pcall(function() return frame:GetPowerGrid() end)
+        if okPG and Core.IsValidObj(foundPG) then
+            pg = foundPG
             pgGen = ReadFPNum(pg.MaxProduction)
             pgCons = ReadFPNum(pg.MaxConsumption)
-            local okProds, prods = pcall(function() return pg.Producers end)
-            if okProds and prods then
-                local foundSolarEff = false
-                StationData.ForEachArray(prods, function(_, elem)
-                    if foundSolarEff then return end
-                    local prod = Core.UnwrapArrayElem(elem)
-                    if not IsSolarPanelObject(prod) then return end
-                    local okDE, deVal = pcall(function() return prod.DistanceEfficiency end)
-                    if okDE and deVal ~= nil then
-                        local de = ReadFPNum(deVal)
-                        if de > 0 then
-                            solarEfficiency = de
-                            foundSolarEff = true
-                            return
-                        end
-                    end
-                    if prod.GetDisplayMaxPower then
-                        local okMaxP, maxP = pcall(function() return prod:GetDisplayMaxPower() end)
-                        local okRate, rateVal = pcall(function() return prod.PowerGenRate end)
-                        if okMaxP and type(maxP) == "number" and maxP > 0 and okRate and rateVal ~= nil then
-                            local rate = ReadFPNum(rateVal)
-                            if rate > 0 then
-                                solarEfficiency = maxP / rate
-                                foundSolarEff = true
-                            end
-                        end
-                    end
-                end)
+        end
+    end
+
+    local solarEfficiency = 1.0
+    if isStationFrame then
+        if st and type(st.SolarEfficiency) == "number" then
+            solarEfficiency = st.SolarEfficiency
+        else
+            solarEfficiency = ResolveStationSolarEfficiency(frame, pg)
+            if st then
+                st.SolarEfficiency = solarEfficiency
             end
         end
     end
 
-    local previewTotalGen, previewTotalCons = 0.0, 0.0
     local previewPendingGen, previewPendingCons = 0.0, 0.0
     local previewLoadedGen, previewLoadedCons = 0.0, 0.0
     local previewCount = 0
-    local classPowerCache = {}
 
-    -- Source 1: Visualizer.PreviewBlocks (TArray<ABuildingBlock*>)
     local okPreview, previewBlocks = pcall(function()
         if Core.IsValidObj(designer.Visualizer) then
             return designer.Visualizer.PreviewBlocks
@@ -394,14 +392,24 @@ local function ComputeDesignerPower(designerHud)
             if not Core.IsValidObj(actor) then return end
 
             previewCount = previewCount + 1
-            local blockCls = nil
-            pcall(function() blockCls = actor.BlockClass end)
-            if not Core.IsValidObj(Core.UnwrapArrayElem(blockCls)) then
-                pcall(function()
-                    if Core.IsValidObj(actor.BlockObject) then
-                        blockCls = actor.BlockObject:GetClass()
-                    end
-                end)
+            local aAddr = actor:GetAddress()
+            local cached = ActorBlockInfoCache[aAddr]
+            local info = cached and cached.info or nil
+            if not info then
+                local blockCls = nil
+                pcall(function() blockCls = Core.UnwrapArrayElem(actor.BlockClass) end)
+                if not Core.IsValidObj(blockCls) then
+                    pcall(function()
+                        if Core.IsValidObj(actor.BlockObject) then
+                            blockCls = actor.BlockObject:GetClass()
+                        end
+                    end)
+                end
+                info = GetBlockClassPowerInfo(blockCls)
+                ActorBlockInfoCache[aAddr] = {
+                    info = info,
+                    clsAddr = Core.IsValidObj(blockCls) and blockCls:GetAddress() or 0,
+                }
             end
 
             local isPending = false
@@ -415,9 +423,7 @@ local function ComputeDesignerPower(designerHud)
                 isPending = (pendRes == true)
             end
 
-            local g, c = ComputePowerFromBlockClass(blockCls, solarEfficiency, classPowerCache)
-            previewTotalGen = previewTotalGen + g
-            previewTotalCons = previewTotalCons + c
+            local g, c = EvalPowerInfo(info, solarEfficiency)
             if isPending then
                 previewPendingGen = previewPendingGen + g
                 previewPendingCons = previewPendingCons + c
@@ -428,99 +434,31 @@ local function ComputeDesignerPower(designerHud)
         end)
     end
 
-    -- Source 2: PendingBlueprint (station) / UnattachedBlueprint (ship) / Visualizer.Blueprint
-    local bp = nil
-    if isStationFrame and Core.IsValidObj(frame) then
-        local okPB, pb = pcall(function() return frame.PendingBlueprint end)
-        if okPB and pb then
-            bp = pb
-        elseif frame.GetConstPendingBlueprint then
-            local okCPB, cpb = pcall(function() return frame:GetConstPendingBlueprint() end)
-            if okCPB and cpb then bp = cpb end
-        end
-    else
-        local okUB, ub = pcall(function() return designer.UnattachedBlueprint end)
-        if okUB and ub then bp = ub end
-    end
-
-    local pendBpGen, pendBpCons, pendBpCount = 0.0, 0.0, 0
-    if bp then
-        pendBpGen, pendBpCons, pendBpCount = SumBlueprintBlocksPower(bp, solarEfficiency, classPowerCache)
-    end
-    if pendBpCount == 0 then
-        local okVB, vb = pcall(function()
-            if Core.IsValidObj(designer.Visualizer) then
-                return designer.Visualizer.Blueprint
-            end
-            return nil
-        end)
-        if okVB and vb then
-            pendBpGen, pendBpCons, pendBpCount = SumBlueprintBlocksPower(vb, solarEfficiency, classPowerCache)
-        end
-    end
-
-    -- Source 3: Constructed station baseline blocks (frame.BuildingBlocks / frame.Blueprint)
-    local constructedGen, constructedCons, constructedCount = 0.0, 0.0, 0
-    if isStationFrame and Core.IsValidObj(frame) then
-        local okBB, bBlocks = pcall(function() return frame.BuildingBlocks end)
-        if okBB and bBlocks then
-            StationData.ForEachArray(bBlocks, function(_, elem)
-                local bObj = Core.UnwrapArrayElem(elem)
-                if Core.IsValidObj(bObj) then
-                    constructedCount = constructedCount + 1
-                    local g, c = ComputePowerFromBlockClass(bObj:GetClass(), solarEfficiency, classPowerCache)
-                    constructedGen = constructedGen + g
-                    constructedCons = constructedCons + c
-                end
-            end)
-        end
-        if constructedCount == 0 then
-            local baseBp = nil
-            local okFB, fb = pcall(function() return frame.Blueprint end)
-            if okFB and fb then
-                baseBp = fb
-            elseif frame.GetBlueprint then
-                local okGFB, gfb = pcall(function() return frame:GetBlueprint() end)
-                if okGFB and gfb then baseBp = gfb end
-            end
-            if baseBp then
-                constructedGen, constructedCons, constructedCount = SumBlueprintBlocksPower(baseBp, solarEfficiency, classPowerCache)
-            end
-        end
-        if constructedCount == 0 and (previewLoadedGen > 0 or previewLoadedCons > 0) then
-            constructedGen = previewLoadedGen
-            constructedCons = previewLoadedCons
+    if st then
+        if st.InitialLoadedGen == nil or (st.ResetBaseline == true and previewPendingGen == 0.0 and previewPendingCons == 0.0) then
+            st.InitialLoadedGen = previewLoadedGen
+            st.InitialLoadedCons = previewLoadedCons
+            st.ResetBaseline = false
         end
     end
 
     local totalGen, totalCons = 0.0, 0.0
     if isStationFrame then
-        if pendBpCount > 0 and (constructedCount > 0 or previewCount > 0) then
-            local deltaGen = pendBpGen - constructedGen
-            local deltaCons = pendBpCons - constructedCons
-            if deltaGen == 0.0 and deltaCons == 0.0 and (previewPendingGen > 0 or previewPendingCons > 0) then
-                deltaGen = previewPendingGen
-                deltaCons = previewPendingCons
-            end
-            totalGen = math.max(0.0, pgGen + deltaGen)
-            totalCons = math.max(0.0, pgCons + deltaCons)
-        elseif previewPendingGen > 0 or previewPendingCons > 0 then
-            totalGen = pgGen + previewPendingGen
-            totalCons = pgCons + previewPendingCons
-        else
-            totalGen = math.max(pgGen, pendBpGen, previewTotalGen)
-            totalCons = math.max(pgCons, pendBpCons, previewTotalCons)
-        end
+        local baseLoadedGen = st and st.InitialLoadedGen or previewLoadedGen
+        local baseLoadedCons = st and st.InitialLoadedCons or previewLoadedCons
+        local deltaGen = (previewLoadedGen - baseLoadedGen) + previewPendingGen
+        local deltaCons = (previewLoadedCons - baseLoadedCons) + previewPendingCons
+        totalGen = math.max(0.0, pgGen + deltaGen)
+        totalCons = math.max(0.0, pgCons + deltaCons)
     else
-        totalGen = math.max(pendBpGen, previewTotalGen)
-        totalCons = math.max(pendBpCons, previewTotalCons)
+        totalGen = previewLoadedGen + previewPendingGen
+        totalCons = previewLoadedCons + previewPendingCons
     end
 
     local diag = string.format(
-        "DesignerPowerStats: gen=%.1f cons=%.1f (station=%s eff=%.2f pg=%.1f/%.1f pendBP=%d:%.1f/%.1f built=%d:%.1f/%.1f preview=%d pend=%.1f/%.1f tot=%.1f/%.1f)",
+        "DesignerPowerStats: gen=%.1f cons=%.1f (station=%s eff=%.2f pg=%.1f/%.1f preview=%d loaded=%.1f/%.1f pend=%.1f/%.1f)",
         totalGen, totalCons, tostring(isStationFrame), solarEfficiency, pgGen, pgCons,
-        pendBpCount, pendBpGen, pendBpCons, constructedCount, constructedGen, constructedCons,
-        previewCount, previewPendingGen, previewPendingCons, previewTotalGen, previewTotalCons
+        previewCount, previewLoadedGen, previewLoadedCons, previewPendingGen, previewPendingCons
     )
     return totalGen, totalCons, diag
 end
@@ -735,7 +673,7 @@ RefreshDesignerPowerStats = function(hud)
         InjectedDesigners[addr] = st
     end
 
-    local gen, cons, diag = ComputeDesignerPower(hud)
+    local gen, cons, diag = ComputeDesignerPower(hud, st)
     if st.LastGen ~= gen or st.LastCons ~= cons then
         st.LastGen = gen
         st.LastCons = cons
@@ -772,40 +710,54 @@ Feature.WatchWidgets = {
 }
 
 function Feature.RegisterHooks()
-    for _, fnName in ipairs({ "Refresh", "RefreshStats" }) do
-        Core.TryRegisterHook(
-            "DesignerHUD_" .. fnName,
-            PATHS.DesignerHUDClass .. ":" .. fnName,
-            function(Context)
-                local hud = Context:get()
-                if Core.IsValidObj(hud) then
-                    ExecuteInGameThreadWithDelay(50, function()
-                        if Core.IsValidObj(hud) then
-                            RefreshDesignerPowerStats(hud)
-                        end
-                    end)
-                end
-            end
-        )
-    end
-
-    for _, fnName in ipairs({ "Confirm", "RemoveBlock" }) do
-        Core.TryRegisterHook(
-            "BPCDesigner_" .. fnName,
-            PATHS.BPCDesignerClass .. ":" .. fnName,
-            function()
+    Core.TryRegisterHook(
+        "DesignerHUD_RefreshStats",
+        PATHS.DesignerHUDClass .. ":RefreshStats",
+        function(Context)
+            local hud = Context:get()
+            if Core.IsValidObj(hud) then
                 ScheduleAllDesignersRefresh()
             end
-        )
-    end
+        end
+    )
+
+    Core.TryRegisterHook(
+        "BPCDesigner_Confirm",
+        PATHS.BPCDesignerClass .. ":Confirm",
+        function()
+            ActorBlockInfoCache = {}
+            for _, st in pairs(InjectedDesigners) do
+                st.ResetBaseline = true
+                st.SolarEfficiency = nil
+            end
+            ScheduleAllDesignersRefresh()
+        end
+    )
+
+    Core.TryRegisterHook(
+        "BPCDesigner_RemoveBlock",
+        PATHS.BPCDesignerClass .. ":RemoveBlock",
+        function()
+            ScheduleAllDesignersRefresh()
+        end
+    )
+end
+
+function Feature.OnClientRestart()
+    Feature.RegisterHooks()
 end
 
 function Feature.PruneCaches()
+    ActorBlockInfoCache = {}
     for addr, st in pairs(InjectedDesigners) do
         if not Core.IsValidObj(st.PowerText) then
             InjectedDesigners[addr] = nil
         end
     end
+end
+
+function Feature.Init()
+    Feature.RegisterHooks()
 end
 
 return Feature
