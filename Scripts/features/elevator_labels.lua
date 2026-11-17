@@ -1,6 +1,6 @@
--- Eqol Feature: Elevator Port Item Icons
+-- Eqol Feature: Elevator Port Item Icons (3D World-Space WidgetComponent)
 -- Displays the item icon from each populated UElevatorObject.ItemColumns slot
--- on the blank panel directly above the matching conveyor port across every
+-- directly on the blank gray panel above the matching conveyor port across every
 -- stacked elevator module in that shaft (above and below the feeder floor).
 
 local Core = require("core")
@@ -11,28 +11,31 @@ local Feature = {
 }
 
 local PATHS = {
-    WBPItemClass     = "/Game/Blueprints/Widgets/Display/Inventory/WBP_Item.WBP_Item_C",
-    CanvasPanelClass = "/Script/UMG.CanvasPanel",
-    WidgetLayoutLib  = "/Script/UMG.Default__WidgetLayoutLibrary",
-    WorldUtilsCDO    = "/Script/MainSequence.Default__WorldUtils",
+    WBPItemClass    = "/Game/Blueprints/Widgets/Display/Inventory/WBP_Item.WBP_Item_C",
+    ActorClass      = "/Script/Engine.Actor",
+    WidgetCompClass = "/Script/UMG.WidgetComponent",
+    KismetMathLib   = "/Script/Engine.Default__KismetMathLibrary",
+    WorldUtilsCDO   = "/Script/MainSequence.Default__WorldUtils",
 }
 
-local MAX_RENDER_DIST_SQ   = 4000.0 * 4000.0
-local MIN_FACING_DOT       = 15.0
-local DEFAULT_WALL_DIST    = 266.0
-local PANEL_ABOVE_BELT_Z   = 112.0
-local FALLBACK_PANEL_Z     = 160.0
+local COLORS = {
+    Transparent = { R = 0.0, G = 0.0, B = 0.0, A = 0.0 },
+}
+
+local MAX_VIEW_DIST_SQ     = 3000.0 * 3000.0
+local DEFAULT_WALL_DIST    = 272.0  -- cm outward from module center (SM2_StationElevator NavCollision is +-264cm)
+local PANEL_Z_ABOVE_FLOOR  = 162.0  -- cm above module floor (center of blank gray square above purple collar)
+local ICON_PIXEL_SIZE      = 64.0
+local ICON_WORLD_SCALE     = 1.20   -- ~77 cm icon centered inside ~110x110 cm gray plate
 local ELEVATOR_SCAN_PERIOD = 1.5
-local PORT_DATA_PERIOD     = 0.20
+local PORT_DATA_PERIOD     = 0.25
 
 local CachedElevActors = {} -- addr -> AElevator
-local CachedWorldPorts = {} -- list of { X, Y, Z, Nx, Ny, Item, ItemAddr }
+local CachedWorldPorts = {} -- list of { X, Y, Z, Nx, Ny, Ux, Uy, Uz, Item, ItemAddr }
+local IconPool         = {} -- idx -> { Actor, Comp, ItemWidget, LastItemAddr }
 local LastElevatorScan = -10.0
 local LastPortRefresh  = -10.0
-local LastHudScan      = -10.0
-local HudOverlays      = {} -- hudAddr -> { Hud, PC, Outer, Canvas, Pool = {} }
-local LoggedShafts     = {} -- bottomAddr -> true
-local HooksRegistered  = false
+local LoggedShafts     = {}
 local PollActive       = false
 
 local function ExtractArray(tarr)
@@ -44,6 +47,74 @@ local function ExtractArray(tarr)
         out[idx] = Core.UnwrapArrayElem(elem)
     end)
     return out, count
+end
+
+local function DestroyIconPool()
+    for i, entry in ipairs(IconPool) do
+        if entry and Core.IsValidObj(entry.Actor) then
+            pcall(function() entry.Actor:K2_DestroyActor() end)
+        end
+        IconPool[i] = nil
+    end
+end
+
+local function GetOrCreateIconActor(pc, idx)
+    local entry = IconPool[idx]
+    if entry and Core.IsValidObj(entry.Actor) and Core.IsValidObj(entry.Comp) and Core.IsValidObj(entry.ItemWidget) then
+        return entry
+    end
+
+    local compCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
+    if not Core.IsValidObj(compCls) then return nil end
+
+    local actor = Core.SpawnActor(pc, PATHS.ActorClass, { X = 0.0, Y = 0.0, Z = 0.0 }, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
+    if not Core.IsValidObj(actor) then return nil end
+
+    local xform = {
+        Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
+        Translation = { X = 0.0, Y = 0.0, Z = 0.0 },
+        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
+    }
+
+    local okC, comp = pcall(function()
+        return actor:AddComponentByClass(compCls, false, xform, false)
+    end)
+    if not okC or not Core.IsValidObj(comp) then
+        pcall(function() actor:K2_DestroyActor() end)
+        return nil
+    end
+
+    pcall(function() actor:K2_SetRootComponent(comp) end)
+
+    local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, pc, pc)
+    if not Core.IsValidObj(itemW) then
+        pcall(function() actor:K2_DestroyActor() end)
+        return nil
+    end
+
+    pcall(function()
+        itemW.TooltipEnabled = false
+        itemW:SetIconSize(ICON_PIXEL_SIZE)
+        itemW:SetVisibility(0)
+        comp:SetWidgetSpace(0) -- World space
+        comp:SetDrawSize({ X = ICON_PIXEL_SIZE, Y = ICON_PIXEL_SIZE })
+        comp:SetDrawAtDesiredSize(true)
+        comp:SetPivot({ X = 0.5, Y = 0.5 })
+        comp:SetTwoSided(true)
+        comp:SetBackgroundColor(COLORS.Transparent)
+        comp:SetWidget(itemW)
+        comp:SetWorldScale3D({ X = ICON_WORLD_SCALE, Y = ICON_WORLD_SCALE, Z = ICON_WORLD_SCALE })
+        comp:SetVisibility(false, false)
+    end)
+
+    entry = {
+        Actor = actor,
+        Comp = comp,
+        ItemWidget = itemW,
+        LastItemAddr = nil,
+    }
+    IconPool[idx] = entry
+    return entry
 end
 
 local function RefreshElevatorActorCache(force)
@@ -121,35 +192,93 @@ local function GetActorFromSimObj(simObj)
     return actor
 end
 
-local function GetSimObjWorldPos(simObj)
-    local actor = GetActorFromSimObj(simObj)
+local function GetStopFrameInfo(stopObj)
+    local actor = GetActorFromSimObj(stopObj)
+    local pos, yaw = nil, 0.0
+    local up = { X = 0.0, Y = 0.0, Z = 1.0 }
+    local floorZ = nil
+    local boundsInfo = nil
+
     if Core.IsValidObj(actor) then
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
         if okLoc and loc then
-            local yaw = 0.0
-            pcall(function()
-                local rot = actor:GetActorRotation()
-                if rot and type(rot.Yaw) == "number" then
-                    yaw = rot.Yaw
-                end
+            pos = { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }
+        end
+        pcall(function()
+            local rot = actor:GetActorRotation()
+            if rot and type(rot.Yaw) == "number" then
+                yaw = rot.Yaw
+            end
+        end)
+        pcall(function()
+            local u = actor:GetActorUpVector()
+            if u and type(u.X) == "number" then
+                up = { X = u.X, Y = u.Y, Z = u.Z }
+            end
+        end)
+        if actor.GetActorBounds then
+            local okB, bOrig, bExt = pcall(function()
+                local o = { X = 0.0, Y = 0.0, Z = 0.0 }
+                local e = { X = 0.0, Y = 0.0, Z = 0.0 }
+                actor:GetActorBounds(true, o, e)
+                return o, e
             end)
-            return { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }, yaw, actor
+            if okB and bOrig and bExt then
+                local oz = tonumber(bOrig.Z)
+                local ez = tonumber(bExt.Z)
+                boundsInfo = {
+                    ox = tonumber(bOrig.X) or 0.0, oy = tonumber(bOrig.Y) or 0.0, oz = oz or 0.0,
+                    ex = tonumber(bExt.X) or 0.0, ey = tonumber(bExt.Y) or 0.0, ez = ez or 0.0,
+                }
+                if oz and ez and ez >= 80.0 and ez <= 350.0 then
+                    floorZ = oz - ez
+                end
+            end
         end
     end
 
-    local okM, mx, my, mz, mYaw = pcall(StationData.GetMachineWorldPosAndYaw, simObj, nil)
-    if okM and type(mx) == "number" then
-        return { X = mx, Y = my or 0.0, Z = mz or 0.0 }, mYaw or 0.0, nil
-    end
-
-    local worldUtils = Core.GetCDO(PATHS.WorldUtilsCDO)
-    if Core.IsValidObj(worldUtils) and worldUtils.GetObjectWorldLocation then
-        local okLoc, loc = pcall(function() return worldUtils:GetObjectWorldLocation(simObj) end)
-        if okLoc and loc then
-            return { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }, 0.0, nil
+    if not pos then
+        local okM, mx, my, mz, mYaw = pcall(StationData.GetMachineWorldPosAndYaw, stopObj, nil)
+        if okM and type(mx) == "number" then
+            pos = { X = mx, Y = my or 0.0, Z = mz or 0.0 }
+            yaw = mYaw or 0.0
         end
     end
-    return nil, 0.0, nil
+    if not pos then
+        local worldUtils = Core.GetCDO(PATHS.WorldUtilsCDO)
+        if Core.IsValidObj(worldUtils) and worldUtils.GetObjectWorldLocation then
+            local okLoc, loc = pcall(function() return worldUtils:GetObjectWorldLocation(stopObj) end)
+            if okLoc and loc then
+                pos = { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }
+            end
+        end
+    end
+    if not pos then return nil end
+
+    if not floorZ then
+        local offBelow = nil
+        pcall(function()
+            if type(stopObj.OffsetBelow) == "number" then
+                offBelow = stopObj.OffsetBelow
+            elseif stopObj.OffsetBelow and type(stopObj.OffsetBelow.Z) == "number" then
+                offBelow = stopObj.OffsetBelow.Z
+            end
+        end)
+        if offBelow and math.abs(offBelow) > 10.0 then
+            floorZ = pos.Z - math.abs(offBelow)
+        else
+            floorZ = pos.Z
+        end
+    end
+
+    return {
+        Pos = pos,
+        Yaw = yaw,
+        Up = up,
+        FloorZ = floorZ,
+        Actor = actor,
+        Bounds = boundsInfo,
+    }
 end
 
 local function RotateXYDeg(x, y, deg)
@@ -159,14 +288,6 @@ local function RotateXYDeg(x, y, deg)
     return x * c - y * s, x * s + y * c
 end
 
-local function RotateGridSteps(dx, dy, gridRot)
-    local r = (tonumber(gridRot) or 0) % 4
-    if r == 1 then return -dy, dx end
-    if r == 2 then return -dx, -dy end
-    if r == 3 then return dy, -dx end
-    return dx, dy
-end
-
 local function SnapAxisNormal(dx, dy)
     if math.abs(dx) >= math.abs(dy) then
         return (dx >= 0.0 and 1.0 or -1.0), 0.0
@@ -174,101 +295,22 @@ local function SnapAxisNormal(dx, dy)
     return 0.0, (dy >= 0.0 and 1.0 or -1.0)
 end
 
--- Resolves port `idx1` (1-based) in stop-actor local space: { lx, ly, lz, nx, ny }
-local function ResolvePortLocalOffset(stack, stackCount, idx1, bottomAddr)
-    -- Pass 1: derive exact local side, tangent offset, and Z from any connected conveyor/machine in the shaft
-    for sIdx = 1, stackCount do
-        local stopObj = stack[sIdx]
-        if Core.IsValidObj(stopObj) then
-            local stopPos, stopYaw, stopActor = GetSimObjWorldPos(stopObj)
-            if stopPos then
-                local connObj = nil
-                local okIn, inRaw = pcall(function() return stopObj.InputMachines end)
-                if okIn and inRaw then
-                    local inMach = ExtractArray(inRaw)
-                    if Core.IsValidObj(inMach[idx1]) then
-                        connObj = inMach[idx1]
-                    end
-                end
-                if not Core.IsValidObj(connObj) then
-                    local okOut, outRaw = pcall(function() return stopObj.OutputMachines end)
-                    if okOut and outRaw then
-                        local outMach = ExtractArray(outRaw)
-                        if Core.IsValidObj(outMach[idx1]) then
-                            connObj = outMach[idx1]
-                        end
-                    end
-                end
-
-                if Core.IsValidObj(connObj) then
-                    local connPos = GetSimObjWorldPos(connObj)
-                    if connPos then
-                        local dxW = connPos.X - stopPos.X
-                        local dyW = connPos.Y - stopPos.Y
-                        local dz  = connPos.Z - stopPos.Z
-                        local rx, ry = RotateXYDeg(dxW, dyW, -stopYaw)
-                        local nx, ny = SnapAxisNormal(rx, ry)
-
-                        -- Place icon flush on the outer wall face above the port collar,
-                        -- using connected machine's axis-projected distance or actor half-extent.
-                        local axisDist = math.abs(nx) * math.abs(rx) + math.abs(ny) * math.abs(ry)
-                        local wallDist = DEFAULT_WALL_DIST
-                        if axisDist > 260.0 and axisDist < 420.0 then
-                            wallDist = math.max(245.0, math.min(295.0, axisDist - 42.0))
-                        elseif Core.IsValidObj(stopActor) and stopActor.GetActorBounds then
-                            local okB, _, ext = pcall(function()
-                                local o = { X = 0.0, Y = 0.0, Z = 0.0 }
-                                local e = { X = 0.0, Y = 0.0, Z = 0.0 }
-                                stopActor:GetActorBounds(false, o, e)
-                                return o, e
-                            end)
-                            if okB and ext then
-                                local minXY = math.min(tonumber(ext.X) or 0.0, tonumber(ext.Y) or 0.0)
-                                if minXY >= 200.0 and minXY <= 320.0 then
-                                    wallDist = minXY + 4.0
-                                end
-                            end
-                        end
-
-                        local lx = (nx ~= 0.0) and (nx * wallDist) or rx
-                        local ly = (ny ~= 0.0) and (ny * wallDist) or ry
-                        local lz = dz + PANEL_ABOVE_BELT_Z
-
-                        if not LoggedShafts[bottomAddr .. ":c" .. idx1] then
-                            LoggedShafts[bottomAddr .. ":c" .. idx1] = true
-                            Core.Log(string.format(
-                                "[ElevatorLabels] Shaft port#%d calibrated from belt: delta=(%.1f,%.1f,%.1f) local=(%.1f,%.1f,%.1f) n=(%.0f,%.0f)",
-                                idx1, dxW, dyW, dz, lx, ly, lz, nx, ny))
-                        end
-
-                        return { lx = lx, ly = ly, lz = lz, nx = nx, ny = ny }
-                    end
-                end
-            end
-        end
-    end
-
-    -- Pass 2: fallback to UMachineObject.Inputs / MachineDimensions when no belt is currently attached
-    local refStop = nil
-    for sIdx = 1, stackCount do
-        if Core.IsValidObj(stack[sIdx]) then
-            refStop = stack[sIdx]
-            break
-        end
-    end
-    if not Core.IsValidObj(refStop) then return nil end
-
+-- Computes exact machine-local port offset { lx, ly, gridZ, nx, ny } from UMachineObject.Inputs
+local function ResolvePortLocalFromInputs(stopObj, idx1, bAddr)
     local inputs, inCount = {}, 0
-    local okInputs, inputsRaw = pcall(function() return refStop.Inputs end)
+    local okInputs, inputsRaw = pcall(function() return stopObj.Inputs end)
     if okInputs and inputsRaw then
         inputs, inCount = ExtractArray(inputsRaw)
     end
     local portVec = inputs[idx1]
     if not portVec then
-        local okOutputs, outputsRaw = pcall(function() return refStop.Outputs end)
-        if okOutputs and outputsRaw then
-            local outputs = ExtractArray(outputsRaw)
+        local okOut, outRaw = pcall(function() return stopObj.Outputs end)
+        if okOut and outRaw then
+            local outputs, outCount = ExtractArray(outRaw)
             portVec = outputs[idx1]
+            if inCount == 0 then
+                inputs, inCount = outputs, outCount
+            end
         end
     end
     if not portVec then return nil end
@@ -297,7 +339,7 @@ local function ResolvePortLocalOffset(stack, stackCount, idx1, bottomAddr)
         end
     else
         pcall(function()
-            local dim = refStop.MachineDimensions
+            local dim = stopObj.MachineDimensions
             if dim then
                 cx = ((tonumber(dim.X) or 1.0) - 1.0) * 0.5
                 cy = ((tonumber(dim.Y) or 1.0) - 1.0) * 0.5
@@ -311,31 +353,22 @@ local function ResolvePortLocalOffset(stack, stackCount, idx1, bottomAddr)
         py = tonumber(portVec.Y) or 0.0
         pz = tonumber(portVec.Z) or 0.0
     end)
-    local rawDx = px - cx
-    local rawDy = py - cy
-    local gridRot = 0
-    pcall(function()
-        if refStop.GridTransform then
-            gridRot = tonumber(refStop.GridTransform.GridRotation) or 0
-        end
-    end)
-    local gx, gy = RotateGridSteps(rawDx, rawDy, gridRot)
-    local _, refYaw = GetSimObjWorldPos(refStop)
-    local lx, ly = RotateXYDeg(gx * 100.0, gy * 100.0, -refYaw)
-    local nx, ny = SnapAxisNormal(lx, ly)
-    local wallDist = DEFAULT_WALL_DIST
-    local fx = (nx ~= 0.0) and (nx * wallDist) or lx
-    local fy = (ny ~= 0.0) and (ny * wallDist) or ly
-    local fz = (pz * 100.0) + FALLBACK_PANEL_Z
 
-    if not LoggedShafts[bottomAddr .. ":f" .. idx1] then
-        LoggedShafts[bottomAddr .. ":f" .. idx1] = true
+    -- Machine-local offset from module center in cm (1 grid unit = 100 cm)
+    local rawLx = (px - cx) * 100.0
+    local rawLy = (py - cy) * 100.0
+    local nx, ny = SnapAxisNormal(rawLx, rawLy)
+    local lx = (nx ~= 0.0) and (nx * DEFAULT_WALL_DIST) or rawLx
+    local ly = (ny ~= 0.0) and (ny * DEFAULT_WALL_DIST) or rawLy
+
+    if not LoggedShafts[bAddr .. ":inp" .. idx1] then
+        LoggedShafts[bAddr .. ":inp" .. idx1] = true
         Core.Log(string.format(
-            "[ElevatorLabels] Shaft port#%d fallback from Inputs: raw=(%.1f,%.1f,%.1f) local=(%.1f,%.1f,%.1f) n=(%.0f,%.0f)",
-            idx1, rawDx, rawDy, pz, fx, fy, fz, nx, ny))
+            "[ElevatorLabels] Port#%d Inputs raw=(%.1f,%.1f,%.1f) centroid=(%.2f,%.2f) local=(%.1f,%.1f) n=(%.0f,%.0f)",
+            idx1, px, py, pz, cx, cy, lx, ly, nx, ny))
     end
 
-    return { lx = fx, ly = fy, lz = fz, nx = nx, ny = ny }
+    return { lx = lx, ly = ly, gridZ = pz, nx = nx, ny = ny }
 end
 
 local function RefreshCachedWorldPorts()
@@ -404,23 +437,37 @@ local function RefreshCachedWorldPorts()
                             end
 
                             for _, colInfo in ipairs(activeCols) do
-                                local localPort = ResolvePortLocalOffset(stack, stackCount, colInfo.Idx1, bAddr)
+                                local localPort = ResolvePortLocalFromInputs(bottomElev, colInfo.Idx1, bAddr)
                                 if localPort then
                                     for sIdx = 1, stackCount do
                                         local stopObj = stack[sIdx]
-                                        local stopPos, stopYaw = GetSimObjWorldPos(stopObj)
-                                        if stopPos then
-                                            local wxOff, wyOff = RotateXYDeg(localPort.lx, localPort.ly, stopYaw)
-                                            local wnx, wny = RotateXYDeg(localPort.nx, localPort.ny, stopYaw)
-                                            worldPorts[#worldPorts + 1] = {
-                                                X = stopPos.X + wxOff,
-                                                Y = stopPos.Y + wyOff,
-                                                Z = stopPos.Z + localPort.lz,
-                                                Nx = wnx,
-                                                Ny = wny,
-                                                Item = colInfo.Item,
-                                                ItemAddr = colInfo.ItemAddr,
-                                            }
+                                        if Core.IsValidObj(stopObj) then
+                                            local frame = GetStopFrameInfo(stopObj)
+                                            if frame then
+                                                local wxOff, wyOff = RotateXYDeg(localPort.lx, localPort.ly, frame.Yaw)
+                                                local wnx, wny = RotateXYDeg(localPort.nx, localPort.ny, frame.Yaw)
+                                                local wz = frame.FloorZ + PANEL_Z_ABOVE_FLOOR + (localPort.gridZ * 100.0)
+
+                                                if not LoggedShafts[bAddr .. ":frame"] then
+                                                    LoggedShafts[bAddr .. ":frame"] = true
+                                                    local bStr = frame.Bounds and string.format("origZ=%.1f ext=(%.1f,%.1f,%.1f)",
+                                                        frame.Bounds.oz, frame.Bounds.ex, frame.Bounds.ey, frame.Bounds.ez) or "nil"
+                                                    Core.Log(string.format(
+                                                        "[ElevatorLabels] Stop frame: stopZ=%.1f floorZ=%.1f yaw=%.1f panelZ=%.1f bounds=[%s]",
+                                                        frame.Pos.Z, frame.FloorZ, frame.Yaw, wz, bStr))
+                                                end
+
+                                                worldPorts[#worldPorts + 1] = {
+                                                    X = frame.Pos.X + wxOff,
+                                                    Y = frame.Pos.Y + wyOff,
+                                                    Z = wz,
+                                                    Nx = wnx,
+                                                    Ny = wny,
+                                                    Up = frame.Up,
+                                                    Item = colInfo.Item,
+                                                    ItemAddr = colInfo.ItemAddr,
+                                                }
+                                            end
                                         end
                                     end
                                 end
@@ -435,163 +482,26 @@ local function RefreshCachedWorldPorts()
     CachedWorldPorts = worldPorts
 end
 
-local function CollectVisibleElevatorPorts(camLoc)
-    RefreshCachedWorldPorts()
-    local ports = {}
-    for _, wp in ipairs(CachedWorldPorts) do
-        if Core.IsValidObj(wp.Item) then
-            local toCamX = camLoc.X - wp.X
-            local toCamY = camLoc.Y - wp.Y
-            local toCamZ = camLoc.Z - wp.Z
-            local distSq = toCamX * toCamX + toCamY * toCamY + toCamZ * toCamZ
-            local facingDot = toCamX * wp.Nx + toCamY * wp.Ny
-
-            if distSq <= MAX_RENDER_DIST_SQ and facingDot >= MIN_FACING_DOT then
-                ports[#ports + 1] = {
-                    X = wp.X,
-                    Y = wp.Y,
-                    Z = wp.Z,
-                    Dist = math.sqrt(distSq),
-                    Item = wp.Item,
-                    ItemAddr = wp.ItemAddr,
-                }
-            end
-        end
-    end
-    return ports
-end
-
-local function EnsureHudOverlay(hud)
-    if not Core.IsValidObj(hud) then return nil end
-    local addr = hud:GetAddress()
-    local st = HudOverlays[addr]
-    if st and Core.IsValidObj(st.Canvas) then
-        return st
-    end
-
-    local mainOverlay = hud.MainOverlay
-    if not Core.IsValidObj(mainOverlay) then return nil end
-
-    local outer = Core.GetWidgetOuter(hud)
-    local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
-    local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
-    local canvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
-    if not Core.IsValidObj(canvas) then return nil end
-
-    local slot = mainOverlay:AddChildToOverlay(canvas)
-    if Core.IsValidObj(slot) then
-        pcall(function()
-            slot:SetHorizontalAlignment(0) -- Fill
-            slot:SetVerticalAlignment(0)   -- Fill
-        end)
-    end
-    pcall(function() canvas:SetVisibility(4) end) -- SelfHitTestInvisible
-
-    st = {
-        Hud = hud,
-        PC = pc,
-        Outer = outer,
-        Canvas = canvas,
-        Pool = {},
-    }
-    HudOverlays[addr] = st
-    return st
-end
-
-local function HideAllPool(st)
-    for _, entry in ipairs(st.Pool) do
-        if Core.IsValidObj(entry.ItemWidget) then
-            pcall(function() entry.ItemWidget:SetVisibility(1) end)
-        end
-    end
-end
-
-local function GetOrCreatePoolEntry(st, idx)
-    local entry = st.Pool[idx]
-    if entry and Core.IsValidObj(entry.ItemWidget) and Core.IsValidObj(entry.Slot) then
-        return entry
-    end
-
-    if not Core.IsValidObj(st.PC) then
-        st.PC = Core.GetLocalPlayerController()
-    end
-    local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, st.Hud, st.PC)
-    if not Core.IsValidObj(itemW) then return nil end
-
-    pcall(function()
-        itemW.TooltipEnabled = false
-        itemW:SetVisibility(1)
-        itemW:SetIconSize(48.0)
-    end)
-
-    local cSlot = st.Canvas:AddChildToCanvas(itemW)
-    if not Core.IsValidObj(cSlot) then return nil end
-
-    pcall(function()
-        cSlot:SetAutoSize(true)
-        cSlot:SetAlignment({ X = 0.5, Y = 0.5 })
-        cSlot:SetZOrder(25)
-    end)
-
-    entry = {
-        ItemWidget = itemW,
-        Slot = cSlot,
-        LastItemAddr = nil,
-        LastSize = 48,
-    }
-    st.Pool[idx] = entry
-    return entry
-end
-
 local function UpdateElevatorPortIcons()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
     RefreshElevatorActorCache(false)
+    RefreshCachedWorldPorts()
 
-    if next(HudOverlays) == nil then
-        local now = os.clock()
-        if now - LastHudScan >= 1.5 then
-            LastHudScan = now
-            local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-            if okHuds and huds then
-                for _, hud in ipairs(huds) do
-                    if Core.IsValidObj(hud) then
-                        EnsureHudOverlay(hud)
-                    end
-                end
-            end
-        end
-    end
-
-    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
-    local menuOpen = false
-    if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
-        menuOpen = true
-    end
-    local showCursor = false
-    pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
-
-    if menuOpen or showCursor then
-        for addr, st in pairs(HudOverlays) do
-            if Core.IsValidObj(st.Hud) and Core.IsValidObj(st.Canvas) then
-                HideAllPool(st)
-            else
-                HudOverlays[addr] = nil
-            end
-        end
-        return
-    end
+    local camMgr = pc.PlayerCameraManager
+    local mathLib = Core.GetCDO(PATHS.KismetMathLib)
+    if not Core.IsValidObj(mathLib) then return end
 
     local camLoc = nil
-    pcall(function()
-        if Core.IsValidObj(pc.PlayerCameraManager) then
-            local loc = pc.PlayerCameraManager:GetCameraLocation()
+    if Core.IsValidObj(camMgr) then
+        pcall(function()
+            local loc = camMgr:GetCameraLocation()
             if loc then
                 camLoc = { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }
             end
-        end
-    end)
+        end)
+    end
     if not camLoc and Core.IsValidObj(pc.Pawn) then
         pcall(function()
             local loc = pc.Pawn:K2_GetActorLocation()
@@ -602,90 +512,49 @@ local function UpdateElevatorPortIcons()
     end
     if not camLoc then return end
 
-    local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLib)
-    if not Core.IsValidObj(layoutLib) then return end
-
-    local ports = CollectVisibleElevatorPorts(camLoc)
-
-    for addr, st in pairs(HudOverlays) do
-        if not (Core.IsValidObj(st.Hud) and Core.IsValidObj(st.Canvas)) then
-            HudOverlays[addr] = nil
-        else
-            local okVis, hudVis = pcall(function() return st.Hud:IsVisible() end)
-            if not okVis or not hudVis then
-                HideAllPool(st)
-            else
-                local used = 0
-                for _, p in ipairs(ports) do
-                    local screenPos = { X = 0.0, Y = 0.0 }
-                    local okProj, projected = pcall(function()
-                        return layoutLib:ProjectWorldLocationToWidgetPosition(
-                            pc,
-                            { X = p.X, Y = p.Y, Z = p.Z },
-                            screenPos,
-                            false
-                        )
-                    end)
-                    if okProj and projected and screenPos then
-                        used = used + 1
-                        local entry = GetOrCreatePoolEntry(st, used)
-                        if entry then
-                            local iconPx = math.floor(math.max(24, math.min(72, 19500.0 / math.max(180.0, p.Dist))))
-                            if entry.LastItemAddr ~= p.ItemAddr then
-                                pcall(function() entry.ItemWidget:SetItem(p.Item) end)
-                                entry.LastItemAddr = p.ItemAddr
-                            end
-                            if math.abs((entry.LastSize or 0) - iconPx) >= 2 then
-                                pcall(function() entry.ItemWidget:SetIconSize(iconPx) end)
-                                entry.LastSize = iconPx
-                            end
-                            pcall(function()
-                                entry.Slot:SetPosition({ X = screenPos.X, Y = screenPos.Y })
-                                entry.ItemWidget:SetVisibility(3) -- HitTestInvisible
-                            end)
-                            if not LoggedShafts["firstRender"] then
-                                LoggedShafts["firstRender"] = true
-                                Core.Log(string.format("[ElevatorLabels] First icon rendered at screen=(%.1f,%.1f) dist=%.1f size=%d ports=%d",
-                                    tonumber(screenPos.X) or 0.0, tonumber(screenPos.Y) or 0.0, p.Dist, iconPx, #ports))
-                            end
+    local count = 0
+    for _, wp in ipairs(CachedWorldPorts) do
+        if Core.IsValidObj(wp.Item) then
+            local dx = camLoc.X - wp.X
+            local dy = camLoc.Y - wp.Y
+            local dz = camLoc.Z - wp.Z
+            local distSq = dx * dx + dy * dy + dz * dz
+            if distSq <= MAX_VIEW_DIST_SQ then
+                count = count + 1
+                local entry = GetOrCreateIconActor(pc, count)
+                if entry then
+                    pcall(function()
+                        if entry.LastItemAddr ~= wp.ItemAddr then
+                            entry.ItemWidget:SetItem(wp.Item)
+                            entry.LastItemAddr = wp.ItemAddr
                         end
-                    end
-                end
-
-                for i = used + 1, #st.Pool do
-                    local entry = st.Pool[i]
-                    if entry and Core.IsValidObj(entry.ItemWidget) then
-                        pcall(function() entry.ItemWidget:SetVisibility(1) end)
+                        local rot = mathLib:MakeRotFromXZ({ X = wp.Nx, Y = wp.Ny, Z = 0.0 }, wp.Up)
+                        entry.Comp:K2_SetWorldLocationAndRotation(
+                            { X = wp.X, Y = wp.Y, Z = wp.Z },
+                            rot,
+                            false,
+                            {},
+                            true
+                        )
+                        entry.Comp:SetVisibility(true, false)
+                    end)
+                    if not LoggedShafts["first3d"] then
+                        LoggedShafts["first3d"] = true
+                        Core.Log(string.format(
+                            "[ElevatorLabels] First 3D port icon active: pos=(%.1f,%.1f,%.1f) n=(%.2f,%.2f) totalPorts=%d",
+                            wp.X, wp.Y, wp.Z, wp.Nx, wp.Ny, #CachedWorldPorts))
                     end
                 end
             end
         end
     end
-end
 
-Feature.WatchWidgets = {
-    WBP_CharacterHUD_C = function(hud)
-        Feature.RegisterHooks()
-        if Core.IsValidObj(hud) then
-            EnsureHudOverlay(hud)
+    for i = count + 1, #IconPool do
+        local entry = IconPool[i]
+        if entry and Core.IsValidObj(entry.Comp) then
+            pcall(function() entry.Comp:SetVisibility(false, false) end)
         end
-    end,
-}
-
-function Feature.RegisterHooks()
-    if HooksRegistered then return end
-    HooksRegistered = true
-
-    Core.TryRegisterHook(
-        "ElevatorLabels_HUDConstruct",
-        "/Game/Blueprints/Widgets/HUD/WBP_CharacterHUD.WBP_CharacterHUD_C:Construct",
-        function(Context)
-            local hud = Context and Context:get() or nil
-            if Core.IsValidObj(hud) then
-                EnsureHudOverlay(hud)
-            end
-        end
-    )
+    end
 end
 
 local function StartPoll()
@@ -693,21 +562,24 @@ local function StartPoll()
     PollActive = true
     local function Tick()
         pcall(UpdateElevatorPortIcons)
-        ExecuteInGameThreadWithDelay(16, Tick)
+        ExecuteInGameThreadWithDelay(33, Tick)
     end
-    ExecuteInGameThreadWithDelay(16, Tick)
+    ExecuteInGameThreadWithDelay(33, Tick)
 end
 
 function Feature.Init()
-    Feature.RegisterHooks()
     StartPoll()
-    Core.Log("[ElevatorLabels] Initialized (UElevatorObject.ItemColumns port icons).")
+    Core.Log("[ElevatorLabels] Initialized (3D WidgetComponent ItemColumns port icons).")
+end
+
+function Feature.OnClientRestart()
+    DestroyIconPool()
 end
 
 function Feature.PruneCaches()
-    for addr, st in pairs(HudOverlays) do
-        if not Core.IsValidObj(st.Canvas) then
-            HudOverlays[addr] = nil
+    for i, entry in ipairs(IconPool) do
+        if not entry or not Core.IsValidObj(entry.Actor) then
+            IconPool[i] = nil
         end
     end
 end
