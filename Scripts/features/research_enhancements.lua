@@ -17,6 +17,8 @@ local PATHS = {
     TextInputClass              = "/Game/Blueprints/Widgets/Basic/WBP_TextInput.WBP_TextInput_C",
     VerticalBoxClass            = Core.PATHS.VerticalBoxClass,
     SizeBoxClass                = Core.PATHS.SizeBoxClass,
+    WidgetLayoutLibCDO          = Core.PATHS.WidgetLayoutLibCDO,
+    SlateLibCDO                 = "/Script/UMG.Default__SlateBlueprintLibrary",
 }
 
 local InjectedTrees = {} -- treeAddr -> state
@@ -206,6 +208,9 @@ local function ApplyResearchFilter(st, overrideQuery)
     local treeView = nil
     pcall(function() treeView = st.Tree.ResearchTreeView end)
 
+    st.BaseVisible = st.BaseVisible or {}
+    local captureBase = (st.FilterDirty == true)
+
     local container = nil
     pcall(function() container = st.ResearchList.Container end)
     if Core.IsValidObj(container) then
@@ -214,9 +219,16 @@ local function ApplyResearchFilter(st, overrideQuery)
             for i = 0, count - 1 do
                 local child = container:GetChildAt(i)
                 if Core.IsValidObj(child) then
+                    local cAddr = child:GetAddress()
+                    if captureBase or st.BaseVisible[cAddr] == nil then
+                        local vis = true
+                        pcall(function() vis = child:IsVisible() == true end)
+                        st.BaseVisible[cAddr] = vis
+                    end
+                    local baseVis = (st.BaseVisible[cAddr] ~= false)
                     local tech = ResolveTechFromWidget(child)
                     local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower)
-                    child:SetVisibility(matched and 0 or 1) -- 0 = Visible, 1 = Collapsed
+                    child:SetVisibility((baseVis and matched) and 0 or 1) -- 0 = Visible, 1 = Collapsed
 
                     if Core.IsValidObj(treeView) and Core.IsValidObj(tech) and treeView.GetWidget then
                         local okW, wideW = pcall(function() return treeView:GetWidget(tech) end)
@@ -228,6 +240,7 @@ local function ApplyResearchFilter(st, overrideQuery)
             end
         end)
     end
+    st.FilterDirty = false
 
     SetWideTreeDimming(st.Tree, queryLower)
 end
@@ -246,8 +259,13 @@ EnsureResearchSearchBar = function(tree)
     pcall(function() rList = tree.WBP_ResearchList end)
     if not Core.IsValidObj(rList) then return nil end
 
+    local container = nil
+    pcall(function() container = rList.Container end)
+    if not Core.IsValidObj(container) then return nil end
+
+    -- ScrollBox_63 and SizeBox_94 are layout-only ancestors of Container (not exposed as UProperties)
     local scrollBox = nil
-    pcall(function() scrollBox = rList.ScrollBox_63 end)
+    pcall(function() scrollBox = container:GetParent() end)
     if not Core.IsValidObj(scrollBox) then return nil end
 
     local sizeBox = nil
@@ -276,6 +294,8 @@ EnsureResearchSearchBar = function(tree)
                 Tree = tree,
                 ResearchList = rList,
                 SearchInput = existingInput,
+                BaseVisible = {},
+                FilterDirty = true,
             }
             InjectedTrees[treeAddr] = st
             InputToTree[existingInput:GetAddress()] = st
@@ -358,6 +378,8 @@ EnsureResearchSearchBar = function(tree)
         Tree = tree,
         ResearchList = rList,
         SearchInput = searchInput,
+        BaseVisible = {},
+        FilterDirty = true,
     }
     InjectedTrees[treeAddr] = st
     InputToTree[searchInput:GetAddress()] = st
@@ -366,10 +388,13 @@ EnsureResearchSearchBar = function(tree)
     return st
 end
 
-local function EnsureAndFilterTree(tree)
+local function EnsureAndFilterTree(tree, markFilterDirty)
     if not Core.IsValidObj(tree) then return end
     local st = EnsureResearchSearchBar(tree)
     if st then
+        if markFilterDirty then
+            st.FilterDirty = true
+        end
         ApplyResearchFilter(st)
     end
 end
@@ -398,29 +423,42 @@ end
 -- Queue Drag-and-Drop Reordering
 --------------------------------------------------------------------------------
 
-local function GetMouseViewportPos(pc)
-    local layoutLib = Core.GetCDO(Core.PATHS.WidgetLayoutLibCDO)
-    if Core.IsValidObj(layoutLib) and Core.IsValidObj(pc) then
+local function GetMousePos(pc)
+    local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
+    local platPos, px, py = nil, nil, nil
+    if Core.IsValidObj(layoutLib) then
+        local okP, pos = pcall(function()
+            return layoutLib:GetMousePositionOnPlatform()
+        end)
+        if okP and pos ~= nil then
+            pcall(function()
+                local x = tonumber(pos.X)
+                local y = tonumber(pos.Y)
+                if x and y then
+                    platPos = pos
+                    px, py = x, y
+                end
+            end)
+        end
+    end
+    if (px == nil or py == nil) and Core.IsValidObj(layoutLib) and Core.IsValidObj(pc) then
         local okVP, pos = pcall(function()
             return layoutLib:GetMousePositionOnViewport(pc)
         end)
-        if okVP and pos and type(pos.X) == "number" and type(pos.Y) == "number" then
-            return pos.X, pos.Y
+        if okVP and pos ~= nil then
+            pcall(function()
+                local x = tonumber(pos.X)
+                local y = tonumber(pos.Y)
+                if x and y then
+                    px, py = x, y
+                end
+            end)
         end
     end
-    if Core.IsValidObj(pc) then
-        local okMP, res, x, y = pcall(function() return pc:GetMousePosition() end)
-        if okMP and type(res) == "number" and type(x) == "number" then
-            return res, x
-        end
-        if okMP and type(x) == "number" and type(y) == "number" then
-            return x, y
-        end
-    end
-    return nil, nil
+    return platPos, px, py
 end
 
-local function ResetQueueChildVisuals(queueBox, deferredVisibilityWidget)
+local function ResetQueueChildVisuals(queueBox)
     if Core.IsValidObj(queueBox) then
         pcall(function()
             local count = queueBox:GetChildrenCount()
@@ -429,17 +467,7 @@ local function ResetQueueChildVisuals(queueBox, deferredVisibilityWidget)
                 if Core.IsValidObj(ch) then
                     ch:SetRenderOpacity(1.0)
                     ch:SetRenderTranslation({ X = 0.0, Y = 0.0 })
-                    if not deferredVisibilityWidget or ch:GetAddress() ~= deferredVisibilityWidget:GetAddress() then
-                        ch:SetVisibility(0)
-                    end
                 end
-            end
-        end)
-    end
-    if Core.IsValidObj(deferredVisibilityWidget) then
-        ExecuteInGameThreadWithDelay(1, function()
-            if Core.IsValidObj(deferredVisibilityWidget) then
-                pcall(function() deferredVisibilityWidget:SetVisibility(0) end)
             end
         end)
     end
@@ -496,6 +524,13 @@ local function ReorderResearchQueue(tree, fromIdx, toIdx)
     pcall(function() queueBox = tree.ResearchQueueContainer end)
     if not Core.IsValidObj(queueBox) then return end
 
+    local pc = nil
+    pcall(function() pc = tree.OwningPlayerController end)
+    if not Core.IsValidObj(pc) then
+        pc = Core.GetLocalPlayerController()
+    end
+    if not Core.IsValidObj(pc) then return end
+
     local oldTechs = CollectQueuedTechs(tree, queueBox)
     local count = #oldTechs
     if count < 2 or fromIdx < 1 or fromIdx > count or toIdx < 1 or toIdx > count then
@@ -514,44 +549,31 @@ local function ReorderResearchQueue(tree, fromIdx, toIdx)
     local moved = table.remove(newTechs, fromIdx)
     table.insert(newTechs, toIdx, moved)
 
-    local origSelected = nil
-    local origShouldAdd = false
-    pcall(function()
-        origSelected = tree.SelectedTechnology
-        origShouldAdd = tree.ShouldAdd == true
-    end)
-
+    -- Call AddQueueResearchCommand directly because WBP_ResearchTree_2_C:QueueResearch uses DelayUntilNextFrame
     local firstChanged = math.min(fromIdx, toIdx)
     for i = count, firstChanged, -1 do
         pcall(function()
-            tree.SelectedTechnology = oldTechs[i]
-            tree.ShouldAdd = false
-            tree:QueueResearch()
+            pc:AddQueueResearchCommand({ Technology = oldTechs[i], bAdd = false })
         end)
     end
     for i = firstChanged, count do
         pcall(function()
-            tree.SelectedTechnology = newTechs[i]
-            tree.ShouldAdd = true
-            tree:QueueResearch()
+            pc:AddQueueResearchCommand({ Technology = newTechs[i], bAdd = true })
         end)
     end
 
-    pcall(function()
-        tree.SelectedTechnology = origSelected
-        tree.ShouldAdd = origShouldAdd
-        if tree.RefreshResearchQueue then tree:RefreshResearchQueue() end
-        if tree.RefreshQueueButton then tree:RefreshQueueButton() end
-    end)
-
-    ExecuteInGameThreadWithDelay(20, function()
+    local function RefreshUI()
         if Core.IsValidObj(tree) then
             pcall(function()
                 if tree.RefreshResearchQueue then tree:RefreshResearchQueue() end
                 if tree.RefreshQueueButton then tree:RefreshQueueButton() end
             end)
         end
-    end)
+    end
+
+    RefreshUI()
+    ExecuteInGameThreadWithDelay(20, RefreshUI)
+    ExecuteInGameThreadWithDelay(80, RefreshUI)
 end
 
 local function FindOwningTreeForQueueParent(parentWidget)
@@ -584,8 +606,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
-    local startX, startY = GetMouseViewportPos(pc)
-    if not startX or not startY then return end
+    local _, startX, startY = GetMousePos(pc)
 
     local dragState = {
         Tree = tree,
@@ -606,6 +627,15 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
         local treeOk = Core.IsValidObj(dragState.Tree)
             and Core.IsValidObj(dragState.QueueBox)
             and Core.IsValidObj(dragState.DragWidget)
+
+        local btnPressed = false
+        if treeOk then
+            pcall(function()
+                btnPressed = Core.IsValidObj(dragState.DragWidget.Button)
+                    and dragState.DragWidget.Button:IsPressed() == true
+            end)
+        end
+
         local mouseDown = false
         if Core.IsValidObj(pc) then
             local okDown, down = pcall(function()
@@ -620,77 +650,105 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
             treeVisible = okVis and vis == true
         end
 
-        if not treeOk or not treeVisible or not mouseDown then
+        if not treeOk or not treeVisible or (not btnPressed and not mouseDown) then
             ActiveDrag = nil
             local wasDragging = dragState.IsDragging
             local fromIdx = dragState.StartIdx
             local toIdx = dragState.TargetIdx
-            ResetQueueChildVisuals(dragState.QueueBox, wasDragging and dragState.DragWidget or nil)
+            ResetQueueChildVisuals(dragState.QueueBox)
             if treeOk and wasDragging and toIdx ~= fromIdx then
                 ReorderResearchQueue(dragState.Tree, fromIdx, toIdx)
             end
             return
         end
 
-        local curX, curY = GetMouseViewportPos(pc)
+        local platPos, curX, curY = GetMousePos(pc)
+        local dx, dy = 0.0, 0.0
         if curX and curY then
-            local dx = curX - dragState.StartX
-            local dy = curY - dragState.StartY
+            if not dragState.StartX or not dragState.StartY then
+                dragState.StartX = curX
+                dragState.StartY = curY
+            end
+            dx = curX - dragState.StartX
+            dy = curY - dragState.StartY
             if not dragState.IsDragging and (dx * dx + dy * dy) > 25.0 then
                 dragState.IsDragging = true
-                -- Make dragged item HitTestInvisible while moving so siblings beneath can hover and Button won't fire OnClicked on drop
-                pcall(function() dragState.DragWidget:SetVisibility(3) end)
             end
+        end
 
-            if dragState.IsDragging then
-                local hoveredIdx = nil
-                pcall(function()
-                    local qCount = dragState.QueueBox:GetChildrenCount()
+        if dragState.IsDragging then
+            local hoveredIdx = nil
+            local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+            pcall(function()
+                local qCount = dragState.QueueBox:GetChildrenCount()
+                if Core.IsValidObj(slateLib) and platPos ~= nil then
                     for i = 0, qCount - 1 do
-                        local slotIdx = i + 1
-                        if slotIdx ~= dragState.StartIdx then
-                            local ch = dragState.QueueBox:GetChildAt(i)
-                            if Core.IsValidObj(ch) and ch.IsHovered and ch:IsHovered() == true then
-                                hoveredIdx = slotIdx
+                        local ch = dragState.QueueBox:GetChildAt(i)
+                        if Core.IsValidObj(ch) then
+                            local okU, under = pcall(function()
+                                return slateLib:IsUnderLocation(ch:GetCachedGeometry(), platPos)
+                            end)
+                            if okU and under == true then
+                                hoveredIdx = i + 1
                                 break
                             end
                         end
                     end
-                end)
-
-                if hoveredIdx then
-                    dragState.TargetIdx = hoveredIdx
-                else
-                    local slotDelta = math.floor((dx + 28.0) / 56.0)
-                    dragState.TargetIdx = Core.Clamp(dragState.StartIdx + slotDelta, 1, dragState.Count)
                 end
-
-                pcall(function()
-                    local qCount = dragState.QueueBox:GetChildrenCount()
+                if not hoveredIdx then
                     for i = 0, qCount - 1 do
-                        local slotIdx = i + 1
                         local ch = dragState.QueueBox:GetChildAt(i)
-                        if Core.IsValidObj(ch) then
-                            if slotIdx == dragState.StartIdx then
-                                ch:SetRenderOpacity(0.45)
-                                ch:SetRenderTranslation({ X = dx, Y = dy })
-                            elseif slotIdx == dragState.TargetIdx and dragState.TargetIdx ~= dragState.StartIdx then
-                                ch:SetRenderOpacity(0.75)
-                                ch:SetRenderTranslation({ X = 0.0, Y = -4.0 })
-                            else
-                                ch:SetRenderOpacity(1.0)
-                                ch:SetRenderTranslation({ X = 0.0, Y = 0.0 })
-                            end
+                        if Core.IsValidObj(ch) and ch.IsHovered and ch:IsHovered() == true then
+                            hoveredIdx = i + 1
+                            break
                         end
                     end
-                end)
+                end
+            end)
+
+            if hoveredIdx then
+                dragState.TargetIdx = hoveredIdx
+            elseif curX and dragState.StartX then
+                local slotDelta = math.floor((dx + 28.0) / 56.0)
+                dragState.TargetIdx = Core.Clamp(dragState.StartIdx + slotDelta, 1, dragState.Count)
             end
+
+            pcall(function()
+                local qCount = dragState.QueueBox:GetChildrenCount()
+                for i = 0, qCount - 1 do
+                    local slotIdx = i + 1
+                    local ch = dragState.QueueBox:GetChildAt(i)
+                    if Core.IsValidObj(ch) then
+                        if slotIdx == dragState.StartIdx then
+                            ch:SetRenderOpacity(0.45)
+                            ch:SetRenderTranslation({ X = 0.0, Y = -4.0 })
+                        elseif slotIdx == dragState.TargetIdx and dragState.TargetIdx ~= dragState.StartIdx then
+                            ch:SetRenderOpacity(0.75)
+                            ch:SetRenderTranslation({ X = 0.0, Y = 5.0 })
+                        else
+                            ch:SetRenderOpacity(1.0)
+                            ch:SetRenderTranslation({ X = 0.0, Y = 0.0 })
+                        end
+                    end
+                end
+            end)
         end
 
         ExecuteInGameThreadWithDelay(16, DragPoll)
     end
 
     ExecuteInGameThreadWithDelay(16, DragPoll)
+end
+
+local function ScanExistingTrees()
+    local okTrees, trees = pcall(FindAllOf, "WBP_ResearchTree_2_C")
+    if okTrees and trees then
+        for _, tree in ipairs(trees) do
+            if Core.IsValidObj(tree) then
+                EnsureAndFilterTree(tree, true)
+            end
+        end
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -701,7 +759,7 @@ Feature.WatchWidgets = {
     WBP_ResearchTree_2_C = function(tree)
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(60, function()
-            EnsureAndFilterTree(tree)
+            EnsureAndFilterTree(tree, true)
         end)
     end,
 }
@@ -721,7 +779,7 @@ function Feature.RegisterHooks()
                 local tree = Context:get()
                 if Core.IsValidObj(tree) then
                     ExecuteInGameThreadWithDelay(30, function()
-                        EnsureAndFilterTree(tree)
+                        EnsureAndFilterTree(tree, true)
                     end)
                 end
             end
@@ -737,7 +795,7 @@ function Feature.RegisterHooks()
                 ExecuteInGameThreadWithDelay(20, function()
                     local tree = ResolveTreeForList(rList)
                     if Core.IsValidObj(tree) then
-                        EnsureAndFilterTree(tree)
+                        EnsureAndFilterTree(tree, true)
                     end
                 end)
             end
@@ -795,10 +853,13 @@ function Feature.RegisterHooks()
             end
         end
     )
+
+    ScanExistingTrees()
 end
 
 function Feature.OnClientRestart()
     Feature.RegisterHooks()
+    ScanExistingTrees()
 end
 
 function Feature.PruneCaches()
