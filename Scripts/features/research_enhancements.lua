@@ -102,11 +102,7 @@ local function TechMatchesQuery(tech, queryLower)
         local unlockFields = { "Block", "Recipe", "Item", "Buildable" }
         StationData.ForEachArray(unlocks, function(_, elem)
             if matchedUnlock then return end
-            local unlock = elem
-            if unlock ~= nil and type(unlock.get) == "function" then
-                local okGet, inner = pcall(function() return unlock:get() end)
-                if okGet and inner ~= nil then unlock = inner end
-            end
+            local unlock = Core.UnwrapStruct(elem)
             if not unlock then return end
 
             local okUDisp, uDisp = pcall(function() return unlock.DisplayName end)
@@ -437,39 +433,77 @@ end
 -- Queue Drag-and-Drop Reordering
 --------------------------------------------------------------------------------
 
-local function GetMousePos(pc)
+local function GetViewportMousePos(pc)
     local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
-    local platPos, px, py = nil, nil, nil
+    if Core.IsValidObj(layoutLib) and Core.IsValidObj(pc) then
+        local okVP, pos = pcall(function()
+            return layoutLib:GetMousePositionOnViewport(pc)
+        end)
+        if okVP and pos ~= nil then
+            local x, y = nil, nil
+            pcall(function()
+                x = tonumber(pos.X)
+                y = tonumber(pos.Y)
+            end)
+            if x and y then
+                return x, y
+            end
+        end
+    end
     if Core.IsValidObj(layoutLib) then
         local okP, pos = pcall(function()
             return layoutLib:GetMousePositionOnPlatform()
         end)
         if okP and pos ~= nil then
+            local x, y = nil, nil
             pcall(function()
-                local x = tonumber(pos.X)
-                local y = tonumber(pos.Y)
-                if x and y then
-                    platPos = pos
-                    px, py = x, y
-                end
+                x = tonumber(pos.X)
+                y = tonumber(pos.Y)
             end)
+            if x and y then
+                local scale = 1.0
+                pcall(function()
+                    if Core.IsValidObj(pc) and layoutLib.GetViewportScale then
+                        local s = tonumber(layoutLib:GetViewportScale(pc))
+                        if s and s > 0.01 then scale = s end
+                    end
+                end)
+                return x / scale, y / scale
+            end
         end
     end
-    if (px == nil or py == nil) and Core.IsValidObj(layoutLib) and Core.IsValidObj(pc) then
-        local okVP, pos = pcall(function()
-            return layoutLib:GetMousePositionOnViewport(pc)
-        end)
-        if okVP and pos ~= nil then
-            pcall(function()
-                local x = tonumber(pos.X)
-                local y = tonumber(pos.Y)
-                if x and y then
-                    px, py = x, y
+    return nil, nil
+end
+
+local function MeasureQueueSlotStep(queueBox)
+    local step = 64.0
+    if not Core.IsValidObj(queueBox) then return step end
+    local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+    pcall(function()
+        local ch = queueBox:GetChildAt(0)
+        if Core.IsValidObj(ch) then
+            local w = nil
+            if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and ch.GetCachedGeometry then
+                local okS, sz = pcall(function()
+                    return slateLib:GetLocalSize(ch:GetCachedGeometry())
+                end)
+                if okS and sz ~= nil then
+                    w = tonumber(sz.X)
                 end
-            end)
+            end
+            if (not w or w < 10.0) and ch.GetDesiredSize then
+                local okD, dsz = pcall(function() return ch:GetDesiredSize() end)
+                if okD and dsz ~= nil then
+                    w = tonumber(dsz.X)
+                end
+            end
+            if w and w >= 20.0 and w <= 240.0 then
+                -- RefreshResearchQueue applies 4.0 right margin on WrapBoxSlot
+                step = w + 4.0
+            end
         end
-    end
-    return platPos, px, py
+    end)
+    return step
 end
 
 local function ResetQueueChildVisuals(queueBox)
@@ -481,6 +515,9 @@ local function ResetQueueChildVisuals(queueBox)
                 if Core.IsValidObj(ch) then
                     ch:SetRenderOpacity(1.0)
                     ch:SetRenderTranslation({ X = 0.0, Y = 0.0 })
+                    if ch.SetRenderScale then
+                        ch:SetRenderScale({ X = 1.0, Y = 1.0 })
+                    end
                 end
             end
         end)
@@ -506,16 +543,11 @@ local function CollectQueuedTechs(tree, queueBox)
         if okAllRes and allRes and okQIdx and qIndices then
             local queueFromState = {}
             StationData.ForEachArray(qIndices, function(_, elem)
-                local idx = tonumber(elem)
-                if not idx and elem ~= nil and type(elem.get) == "function" then
-                    pcall(function() idx = tonumber(elem:get()) end)
-                end
+                local unwrapped = Core.UnwrapStruct(elem)
+                local idx = tonumber(unwrapped)
                 if idx ~= nil then
                     pcall(function()
-                        local entry = allRes[idx + 1]
-                        if entry ~= nil and type(entry.get) == "function" then
-                            entry = entry:get()
-                        end
+                        local entry = Core.UnwrapStruct(allRes[idx + 1])
                         local t = entry and Core.UnwrapArrayElem(entry.Technology) or nil
                         table.insert(queueFromState, t)
                     end)
@@ -530,6 +562,86 @@ local function CollectQueuedTechs(tree, queueBox)
     end
 
     return techs
+end
+
+local function GetTechPrerequisites(tech)
+    local reqs = {}
+    if not Core.IsValidObj(tech) then return reqs end
+    local seen = {}
+
+    local function addReq(candidate)
+        local obj = Core.UnwrapArrayElem(candidate)
+        if Core.IsValidObj(obj) then
+            local addr = obj:GetAddress()
+            if not seen[addr] then
+                seen[addr] = true
+                table.insert(reqs, obj)
+            end
+        end
+    end
+
+    pcall(function() addReq(tech.PrimaryPrerequisite) end)
+    local okPrereqs, prereqs = pcall(function() return tech.Prerequisites end)
+    if okPrereqs and prereqs then
+        StationData.ForEachArray(prereqs, function(_, elem)
+            addReq(Core.UnwrapStruct(elem))
+        end)
+    end
+    return reqs
+end
+
+local function IsQueueOrderValid(techs)
+    if type(techs) ~= "table" then return false end
+    local count = #techs
+    local posByAddr = {}
+    for i = 1, count do
+        if not Core.IsValidObj(techs[i]) then
+            return false
+        end
+        posByAddr[techs[i]:GetAddress()] = i
+    end
+
+    -- No queued research may appear at or before any of its pending prerequisites in the queue
+    for i = 1, count do
+        local reqs = GetTechPrerequisites(techs[i])
+        for _, req in ipairs(reqs) do
+            local reqPos = posByAddr[req:GetAddress()]
+            if reqPos ~= nil and reqPos >= i then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+local function BuildReorderedTechs(oldTechs, fromIdx, toIdx)
+    local newTechs = {}
+    for i = 1, #oldTechs do
+        newTechs[i] = oldTechs[i]
+    end
+    local moved = table.remove(newTechs, fromIdx)
+    table.insert(newTechs, toIdx, moved)
+    return newTechs
+end
+
+local function ClampValidDropTarget(oldTechs, fromIdx, desiredIdx)
+    if not oldTechs or #oldTechs < 2 then return fromIdx, true end
+    desiredIdx = Core.Clamp(desiredIdx, 1, #oldTechs)
+    if desiredIdx == fromIdx then return fromIdx, true end
+
+    if IsQueueOrderValid(BuildReorderedTechs(oldTechs, fromIdx, desiredIdx)) then
+        return desiredIdx, true
+    end
+
+    local step = (desiredIdx > fromIdx) and -1 or 1
+    local cand = desiredIdx + step
+    while (step < 0 and cand > fromIdx) or (step > 0 and cand < fromIdx) do
+        if IsQueueOrderValid(BuildReorderedTechs(oldTechs, fromIdx, cand)) then
+            return cand, false
+        end
+        cand = cand + step
+    end
+    return fromIdx, false
 end
 
 local function ReorderResearchQueue(tree, fromIdx, toIdx)
@@ -556,12 +668,11 @@ local function ReorderResearchQueue(tree, fromIdx, toIdx)
         end
     end
 
-    local newTechs = {}
-    for i = 1, count do
-        newTechs[i] = oldTechs[i]
+    local newTechs = BuildReorderedTechs(oldTechs, fromIdx, toIdx)
+    if not IsQueueOrderValid(newTechs) then
+        Core.Log(string.format("[ResearchEnhancements] Blocked invalid reorder %d -> %d (prerequisite constraint)", fromIdx, toIdx))
+        return
     end
-    local moved = table.remove(newTechs, fromIdx)
-    table.insert(newTechs, toIdx, moved)
 
     -- Call AddQueueResearchCommand directly because WBP_ResearchTree_2_C:QueueResearch uses DelayUntilNextFrame
     Core.Log(string.format("[ResearchEnhancements] Reordering research queue: %d -> %d (count=%d)", fromIdx, toIdx, count))
@@ -621,15 +732,19 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
-    local _, startX, startY = GetMousePos(pc)
+    local startX, startY = GetViewportMousePos(pc)
+    local slotStep = MeasureQueueSlotStep(queueBox)
+    local snapshotTechs = CollectQueuedTechs(tree, queueBox)
 
     local dragState = {
         Tree = tree,
         QueueBox = queueBox,
         DragWidget = dragWidget,
+        SnapshotTechs = snapshotTechs,
         StartIdx = startIdx,
         TargetIdx = startIdx,
         Count = count,
+        SlotStep = slotStep,
         IsDragging = false,
         StartX = startX,
         StartY = startY,
@@ -677,7 +792,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
             return
         end
 
-        local platPos, curX, curY = GetMousePos(pc)
+        local curX, curY = GetViewportMousePos(pc)
         local dx, dy = 0.0, 0.0
         if curX and curY then
             if not dragState.StartX or not dragState.StartY then
@@ -692,41 +807,13 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
         end
 
         if dragState.IsDragging then
-            local hoveredIdx = nil
-            local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
-            pcall(function()
-                local qCount = dragState.QueueBox:GetChildrenCount()
-                if Core.IsValidObj(slateLib) and platPos ~= nil then
-                    for i = 0, qCount - 1 do
-                        local ch = dragState.QueueBox:GetChildAt(i)
-                        if Core.IsValidObj(ch) then
-                            local okU, under = pcall(function()
-                                return slateLib:IsUnderLocation(ch:GetCachedGeometry(), platPos)
-                            end)
-                            if okU and under == true then
-                                hoveredIdx = i + 1
-                                break
-                            end
-                        end
-                    end
-                end
-                if not hoveredIdx then
-                    for i = 0, qCount - 1 do
-                        local ch = dragState.QueueBox:GetChildAt(i)
-                        if Core.IsValidObj(ch) and ch.IsHovered and ch:IsHovered() == true then
-                            hoveredIdx = i + 1
-                            break
-                        end
-                    end
-                end
-            end)
-
-            if hoveredIdx then
-                dragState.TargetIdx = hoveredIdx
-            elseif curX and dragState.StartX then
-                local slotDelta = math.floor((dx + 28.0) / 56.0)
-                dragState.TargetIdx = Core.Clamp(dragState.StartIdx + slotDelta, 1, dragState.Count)
-            end
+            local step = dragState.SlotStep or 64.0
+            local rawSlotDelta = (dx >= 0.0)
+                and math.floor((dx + step * 0.5) / step)
+                or math.ceil((dx - step * 0.5) / step)
+            local desiredIdx = Core.Clamp(dragState.StartIdx + rawSlotDelta, 1, dragState.Count)
+            local validTargetIdx, isDesiredValid = ClampValidDropTarget(dragState.SnapshotTechs, dragState.StartIdx, desiredIdx)
+            dragState.TargetIdx = validTargetIdx
 
             pcall(function()
                 local qCount = dragState.QueueBox:GetChildrenCount()
@@ -735,14 +822,24 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
                     local ch = dragState.QueueBox:GetChildAt(i)
                     if Core.IsValidObj(ch) then
                         if slotIdx == dragState.StartIdx then
-                            ch:SetRenderOpacity(0.45)
-                            ch:SetRenderTranslation({ X = 0.0, Y = -4.0 })
-                        elseif slotIdx == dragState.TargetIdx and dragState.TargetIdx ~= dragState.StartIdx then
-                            ch:SetRenderOpacity(0.75)
-                            ch:SetRenderTranslation({ X = 0.0, Y = 5.0 })
+                            -- Picked-up card tracks cursor 1:1 with subtle lift scale; dims if clamped by a prerequisite
+                            ch:SetRenderTranslation({ X = dx, Y = dy })
+                            if ch.SetRenderScale then
+                                ch:SetRenderScale({ X = 1.08, Y = 1.08 })
+                            end
+                            ch:SetRenderOpacity(isDesiredValid and 0.95 or 0.65)
                         else
+                            if ch.SetRenderScale then
+                                ch:SetRenderScale({ X = 1.0, Y = 1.0 })
+                            end
                             ch:SetRenderOpacity(1.0)
-                            ch:SetRenderTranslation({ X = 0.0, Y = 0.0 })
+                            local shiftX = 0.0
+                            if dragState.StartIdx < validTargetIdx and slotIdx > dragState.StartIdx and slotIdx <= validTargetIdx then
+                                shiftX = -step
+                            elseif dragState.StartIdx > validTargetIdx and slotIdx >= validTargetIdx and slotIdx < dragState.StartIdx then
+                                shiftX = step
+                            end
+                            ch:SetRenderTranslation({ X = shiftX, Y = 0.0 })
                         end
                     end
                 end
