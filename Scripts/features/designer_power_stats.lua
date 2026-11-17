@@ -25,27 +25,6 @@ local COLORS = {
     GreenValue = { R = 0.30, G = 0.90, B = 0.40, A = 1.0 },
 }
 
-local GEN_PROPS = {
-    "PowerGenRate",
-    "PowerGeneration",
-    "PowerProduction",
-    "MaxPowerProduction",
-    "GeneratedPower",
-}
-
-local CONS_PROPS = {
-    "PowerConsumptionRate",
-    "PowerDraw",
-    "ThrusterPower",
-    "AssemblerPowerDraw",
-    "RefineryPowerDraw",
-    "ThrusterPowerDraw",
-    "PowerConsumption",
-    "MaxPowerConsumption",
-    "RequiredPower",
-    "ConsumedPower",
-}
-
 local InjectedDesigners = {} -- hudAddr -> { Hud, PowerText, PowerLabel, LabelColor }
 local HookedBlueprintStats = false
 local RefreshDesignerPowerStats -- forward declaration
@@ -90,41 +69,49 @@ local function GetCDOFromUClass(uclass)
     return Core.GetCDO(pkg .. ".Default__" .. clsName)
 end
 
-local function IsSolarPanelObject(obj)
-    local okDE, hasDE = pcall(function() return obj.DistanceEfficiency ~= nil end)
-    if okDE and hasDE == true then return true end
-    local okCls, clsName = pcall(function() return obj:GetClass():GetFName():ToString() end)
-    return okCls and type(clsName) == "string" and string.find(clsName, "SolarPanel", 1, true) ~= nil
-end
-
-local function IsProducerObject(obj)
-    local okPG, hasPG = pcall(function() return obj.PowerGenRate ~= nil end)
-    if okPG and hasPG == true then return true end
-    local okCls, clsName = pcall(function() return obj:GetClass():GetFName():ToString() end)
-    if okCls and type(clsName) == "string" then
-        if string.find(clsName, "Shield", 1, true) then
-            return false
-        end
-        if string.find(clsName, "SolarPanel", 1, true)
-            or string.find(clsName, "Reactor", 1, true)
-            or string.find(clsName, "Generator", 1, true) then
+local function HasClassOrName(obj, classPath, nameSubstrings, excludeSubstring)
+    if not Core.IsValidObj(obj) then return false end
+    if classPath then
+        local okIsA, isA = pcall(function() return obj:IsA(classPath) end)
+        if okIsA and isA == true then
             return true
+        end
+    end
+    local okCls, clsName = pcall(function() return obj:GetClass():GetFName():ToString() end)
+    if not okCls or type(clsName) ~= "string" then
+        return false
+    end
+    if excludeSubstring and string.find(clsName, excludeSubstring, 1, true) then
+        return false
+    end
+    if nameSubstrings then
+        for _, sub in ipairs(nameSubstrings) do
+            if string.find(clsName, sub, 1, true) then
+                return true
+            end
         end
     end
     return false
 end
 
-local function FirstPositiveProp(obj, propList)
-    for _, prop in ipairs(propList) do
-        local ok, v = pcall(function() return obj[prop] end)
-        if ok and v ~= nil then
-            local num = ReadFPNum(v)
-            if num > 0 then
-                return num
-            end
-        end
+local function IsMachineObject(obj)
+    if not Core.IsValidObj(obj) then return false end
+    if HasClassOrName(obj, "/Script/MainSequence.MachineObject", { "Machine", "SolarPanel", "Reactor", "Generator" }, nil) then
+        return true
     end
-    return 0.0
+    local okFn, hasFn = pcall(function()
+        return type(obj.GetDisplayMaxPower) == "function" or type(obj.GetDisplayPower) == "function"
+    end)
+    return okFn and hasFn == true
+end
+
+local function IsSolarPanelObject(obj)
+    return HasClassOrName(obj, "/Script/MainSequence.SolarPanelObject", { "SolarPanel" }, nil)
+end
+
+local function IsProducerObject(obj)
+    if IsSolarPanelObject(obj) then return true end
+    return HasClassOrName(obj, "/Script/MainSequence.ReactorObject", { "SolarPanel", "Reactor", "Generator" }, "Shield")
 end
 
 local function ReadDisplayPower(obj)
@@ -145,18 +132,31 @@ end
 
 local function ComputePowerFromObject(obj, solarEfficiency)
     local gen, cons = 0.0, 0.0
-    if not Core.IsValidObj(obj) then return gen, cons end
+    if not IsMachineObject(obj) then return gen, cons end
 
     local eff = (type(solarEfficiency) == "number" and solarEfficiency > 0) and solarEfficiency or 1.0
-    local rawGen = FirstPositiveProp(obj, GEN_PROPS)
-    local rawCons = FirstPositiveProp(obj, CONS_PROPS)
     local maxP = ReadDisplayPower(obj)
 
     if IsProducerObject(obj) then
-        local baseGen = math.max(rawGen, maxP > 0 and maxP or 0.0)
-        gen = IsSolarPanelObject(obj) and (baseGen * eff) or baseGen
+        local isSolar = IsSolarPanelObject(obj)
+        local baseGen = maxP > 0 and maxP or 0.0
+        if baseGen == 0.0 then
+            local okRate, rateVal = pcall(function() return obj.PowerGenRate end)
+            if okRate and rateVal ~= nil then
+                local r = ReadFPNum(rateVal)
+                if r > 0 then baseGen = r end
+            end
+            if baseGen == 0.0 and isSolar then
+                local okME, meVal = pcall(function() return obj.MaxEfficiency end)
+                if okME and meVal ~= nil then
+                    local me = ReadFPNum(meVal)
+                    if me > 0 then baseGen = me end
+                end
+            end
+        end
+        gen = isSolar and (baseGen * eff) or baseGen
     else
-        cons = math.max(rawCons, maxP ~= 0 and math.abs(maxP) or 0.0)
+        cons = maxP ~= 0 and math.abs(maxP) or 0.0
     end
 
     return gen, cons
@@ -165,14 +165,22 @@ end
 local function AddMachineEntryPower(entry, solarEfficiency, gen, cons, checkInstance)
     if not entry then return gen, cons end
     local mObj = nil
-    if checkInstance then
-        pcall(function() mObj = Core.UnwrapArrayElem(entry.Machine) end)
-    end
-    if not Core.IsValidObj(mObj) then
-        local mCls = nil
-        pcall(function() mCls = entry.Class end)
-        if mCls then
-            mObj = GetCDOFromUClass(mCls)
+    if Core.IsValidObj(entry) then
+        if IsMachineObject(entry) then
+            mObj = entry
+        else
+            mObj = GetCDOFromUClass(entry)
+        end
+    else
+        if checkInstance then
+            pcall(function() mObj = Core.UnwrapArrayElem(entry.Machine) end)
+        end
+        if not Core.IsValidObj(mObj) then
+            local mCls = nil
+            pcall(function() mCls = entry.Class end)
+            if mCls then
+                mObj = GetCDOFromUClass(mCls)
+            end
         end
     end
     if Core.IsValidObj(mObj) then
@@ -200,6 +208,17 @@ local function ComputePowerFromBlockClass(blockCls, solarEfficiency, cache)
             StationData.ForEachArray(defMachines, function(_, elem)
                 gen, cons = AddMachineEntryPower(UnwrapStruct(elem), solarEfficiency, gen, cons, true)
             end)
+        end
+
+        if gen == 0.0 and cons == 0.0 then
+            local okGDM, defMachine = pcall(function()
+                return blockCDO.GetDefaultMachine and blockCDO:GetDefaultMachine() or nil
+            end)
+            if okGDM and Core.IsValidObj(defMachine) then
+                local g, c = ComputePowerFromObject(defMachine, solarEfficiency)
+                gen = gen + g
+                cons = cons + c
+            end
         end
 
         if gen == 0.0 and cons == 0.0 then
@@ -330,7 +349,7 @@ local function ComputeDesignerPower(designerHud)
                 StationData.ForEachArray(prods, function(_, elem)
                     if foundSolarEff then return end
                     local prod = Core.UnwrapArrayElem(elem)
-                    if not Core.IsValidObj(prod) then return end
+                    if not IsSolarPanelObject(prod) then return end
                     local okDE, deVal = pcall(function() return prod.DistanceEfficiency end)
                     if okDE and deVal ~= nil then
                         local de = ReadFPNum(deVal)
@@ -340,7 +359,7 @@ local function ComputeDesignerPower(designerHud)
                             return
                         end
                     end
-                    if IsSolarPanelObject(prod) and prod.GetDisplayMaxPower then
+                    if prod.GetDisplayMaxPower then
                         local okMaxP, maxP = pcall(function() return prod:GetDisplayMaxPower() end)
                         local okRate, rateVal = pcall(function() return prod.PowerGenRate end)
                         if okMaxP and type(maxP) == "number" and maxP > 0 and okRate and rateVal ~= nil then
