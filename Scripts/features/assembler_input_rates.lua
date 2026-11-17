@@ -90,7 +90,21 @@ local function GetItemDisplayName(item)
     return SafeName(item):gsub("^ITEM_", ""):gsub("_", " ")
 end
 
-local function CopyTextStyle(dstWbpText, refWbpText, fallbackSize, fallbackColor)
+local function GetRefFontSize(refWbpText, defaultSz)
+    local sz = nil
+    if Core.IsValidObj(refWbpText) then
+        local refTB = Core.IsValidObj(refWbpText.TextBlock) and refWbpText.TextBlock or refWbpText
+        pcall(function()
+            if refTB and refTB.Font and refTB.Font.Size then
+                local n = tonumber(refTB.Font.Size)
+                if n and n > 0 then sz = n end
+            end
+        end)
+    end
+    return sz or defaultSz
+end
+
+local function CopyTextStyle(dstWbpText, refWbpText, maxOrExactSize, fallbackColor)
     if not Core.IsValidObj(dstWbpText) then return end
     local dstTB = Core.IsValidObj(dstWbpText.TextBlock) and dstWbpText.TextBlock or dstWbpText
     local refTB = (Core.IsValidObj(refWbpText) and Core.IsValidObj(refWbpText.TextBlock)) and refWbpText.TextBlock or refWbpText
@@ -100,8 +114,12 @@ local function CopyTextStyle(dstWbpText, refWbpText, fallbackSize, fallbackColor
             dstTB:SetFont(refTB.Font)
         end
     end)
-    if fallbackSize and dstWbpText.SetSize then
-        pcall(function() dstWbpText:SetSize(fallbackSize) end)
+    local targetSz = GetRefFontSize(refWbpText, maxOrExactSize or 11)
+    if maxOrExactSize and targetSz > maxOrExactSize then
+        targetSz = maxOrExactSize
+    end
+    if dstWbpText.SetSize then
+        pcall(function() dstWbpText:SetSize(targetSz) end)
     end
     pcall(function()
         if dstTB.SetColorAndOpacity then
@@ -379,25 +397,36 @@ local function CreateRightSideContainer(w, refs)
     if not Core.IsValidObj(pc) then return nil end
 
     local outer = Core.GetWidgetOuter(w)
-    local rootPanel = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+    local rootPanel = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+    local vWrap = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local labelTxt = Core.CreateUserWidget(PATHS.WBPTextClass, w, pc)
     local itemsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    if not (Core.IsValidObj(rootPanel) and Core.IsValidObj(labelTxt) and Core.IsValidObj(itemsBox)) then
+    if not (Core.IsValidObj(rootPanel) and Core.IsValidObj(vWrap) and Core.IsValidObj(labelTxt) and Core.IsValidObj(itemsBox)) then
         return nil
     end
 
-    CopyTextStyle(labelTxt, refs.CraftingText or refs.RateText, 14, COLORS.LabelMuted)
+    pcall(function()
+        rootPanel:SetMaxDesiredWidth(185.0)
+        rootPanel:SetMaxDesiredHeight(68.0)
+        if rootPanel.SetClipping then
+            rootPanel:SetClipping(1) -- EWidgetClipping::ClipToBounds
+        end
+    end)
+    rootPanel:AddChild(vWrap)
+
+    local lblSz = math.min(GetRefFontSize(refs.CraftingText, 10), 10)
+    CopyTextStyle(labelTxt, refs.CraftingText or refs.RateText, lblSz, COLORS.LabelMuted)
     pcall(function() labelTxt:SetText(Core.MakeText("Requires")) end)
 
-    local lblSlot = rootPanel:AddChildToHorizontalBox(labelTxt)
+    local lblSlot = vWrap:AddChildToVerticalBox(labelTxt)
     if Core.IsValidObj(lblSlot) then
         pcall(function()
-            lblSlot:SetVerticalAlignment(2) -- VAlign_Center
-            lblSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 10.0, Bottom = 0.0 })
+            lblSlot:SetHorizontalAlignment(1) -- HAlign_Left
+            lblSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 2.0 })
         end)
     end
 
-    local itemsSlot = rootPanel:AddChildToHorizontalBox(itemsBox)
+    local itemsSlot = vWrap:AddChildToVerticalBox(itemsBox)
     if Core.IsValidObj(itemsSlot) then
         pcall(function()
             itemsSlot:SetVerticalAlignment(2)
@@ -406,9 +435,18 @@ local function CreateRightSideContainer(w, refs)
     end
 
     local attached = false
-    if Core.IsValidObj(refs.HeaderHBox) then
+    if Core.IsValidObj(refs.CardOverlay) then
+        local oSlot = refs.CardOverlay:AddChildToOverlay(rootPanel)
+        if Core.IsValidObj(oSlot) then
+            pcall(function()
+                oSlot:SetHorizontalAlignment(3) -- HAlign_Right
+                oSlot:SetVerticalAlignment(2)   -- VAlign_Center
+                oSlot:SetPadding({ Left = 8.0, Top = 4.0, Right = 22.0, Bottom = 4.0 })
+            end)
+            attached = true
+        end
+    elseif Core.IsValidObj(refs.HeaderHBox) then
         pcall(function()
-            -- Ensure HeaderHBox stretches across the card so a Fill spacer aligns us to the right edge
             if Core.IsValidObj(refs.HeaderHBox.Slot) and refs.HeaderHBox.Slot.SetHorizontalAlignment then
                 refs.HeaderHBox.Slot:SetHorizontalAlignment(0) -- HAlign_Fill
             end
@@ -419,7 +457,7 @@ local function CreateRightSideContainer(w, refs)
             local spSlot = refs.HeaderHBox:AddChildToHorizontalBox(spacer)
             if Core.IsValidObj(spSlot) then
                 pcall(function()
-                    spSlot:SetSize({ SizeRule = 1, Value = 1.0 }) -- Fill remaining space
+                    spSlot:SetSize({ SizeRule = 1, Value = 1.0 })
                 end)
             end
         end
@@ -429,17 +467,7 @@ local function CreateRightSideContainer(w, refs)
             pcall(function()
                 rSlot:SetVerticalAlignment(2)   -- VAlign_Center
                 rSlot:SetHorizontalAlignment(3) -- HAlign_Right
-                rSlot:SetPadding({ Left = 16.0, Top = 0.0, Right = 16.0, Bottom = 0.0 })
-            end)
-            attached = true
-        end
-    elseif Core.IsValidObj(refs.CardOverlay) then
-        local oSlot = refs.CardOverlay:AddChildToOverlay(rootPanel)
-        if Core.IsValidObj(oSlot) then
-            pcall(function()
-                oSlot:SetHorizontalAlignment(3) -- HAlign_Right
-                oSlot:SetVerticalAlignment(2)   -- VAlign_Center
-                oSlot:SetPadding({ Left = 8.0, Top = 4.0, Right = 24.0, Bottom = 4.0 })
+                rSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
             end)
             attached = true
         end
@@ -449,8 +477,7 @@ local function CreateRightSideContainer(w, refs)
         return nil
     end
 
-    -- Re-apply style after parenting because WBP_Text_C Construct resets defaults
-    CopyTextStyle(labelTxt, refs.CraftingText or refs.RateText, 14, COLORS.LabelMuted)
+    CopyTextStyle(labelTxt, refs.CraftingText or refs.RateText, lblSz, COLORS.LabelMuted)
     return {
         RootPanel = rootPanel,
         LabelTxt = labelTxt,
@@ -474,7 +501,8 @@ local function RebuildInputRateEntries(st, inputs)
     local outer = Core.GetWidgetOuter(st.Widget)
 
     local isSingle = (#inputs == 1)
-    local iconPx = isSingle and 36.0 or ((#inputs == 2) and 22.0 or 18.0)
+    local iconPx = isSingle and 26.0 or ((#inputs == 2) and 18.0 or 15.0)
+    local padPx = isSingle and 3.0 or 2.0
 
     for _, inp in ipairs(inputs) do
         local rowBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
@@ -485,19 +513,18 @@ local function RebuildInputRateEntries(st, inputs)
                 itemW:SetItem(inp.Item)
             end)
 
-            -- Wrap icon in subtle dark rounded backing box matching left side
             local iconBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
             if Core.IsValidObj(iconBorder) then
                 pcall(function()
                     iconBorder:SetBrushColor(COLORS.SlotBg)
-                    iconBorder:SetPadding({ Left = 4.0, Top = 4.0, Right = 4.0, Bottom = 4.0 })
+                    iconBorder:SetPadding({ Left = padPx, Top = padPx, Right = padPx, Bottom = padPx })
                     iconBorder:AddChild(itemW)
                 end)
                 local iSlot = rowBox:AddChildToHorizontalBox(iconBorder)
                 if Core.IsValidObj(iSlot) then
                     pcall(function()
                         iSlot:SetVerticalAlignment(2)
-                        iSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
+                        iSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 6.0, Bottom = 0.0 })
                     end)
                 end
             else
@@ -505,7 +532,7 @@ local function RebuildInputRateEntries(st, inputs)
                 if Core.IsValidObj(iSlot) then
                     pcall(function()
                         iSlot:SetVerticalAlignment(2)
-                        iSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
+                        iSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 6.0, Bottom = 0.0 })
                     end)
                 end
             end
@@ -515,28 +542,28 @@ local function RebuildInputRateEntries(st, inputs)
                 local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, st.Widget, pc)
                 local rateTxt = Core.CreateUserWidget(PATHS.WBPTextClass, st.Widget, pc)
                 if Core.IsValidObj(vBox) and Core.IsValidObj(nameTxt) and Core.IsValidObj(rateTxt) then
-                    CopyTextStyle(nameTxt, st.Refs.NameText or st.Refs.RateText, 15, COLORS.WhiteText)
-                    CopyTextStyle(rateTxt, st.Refs.RateText, 14, COLORS.RateTint)
+                    CopyTextStyle(nameTxt, st.Refs.NameText or st.Refs.RateText, 11, COLORS.WhiteText)
+                    CopyTextStyle(rateTxt, st.Refs.RateText, 11, COLORS.RateTint)
                     pcall(function()
                         nameTxt:SetText(Core.MakeText(GetItemDisplayName(inp.Item)))
                         rateTxt:SetText(Core.MakeText(FormatRate(inp.Rate)))
                     end)
                     local s1 = vBox:AddChildToVerticalBox(nameTxt)
                     if Core.IsValidObj(s1) then
-                        pcall(function() s1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 2.0 }) end)
+                        pcall(function() s1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 1.0 }) end)
                     end
                     vBox:AddChildToVerticalBox(rateTxt)
                     local vSlot = rowBox:AddChildToHorizontalBox(vBox)
                     if Core.IsValidObj(vSlot) then
                         pcall(function() vSlot:SetVerticalAlignment(2) end)
                     end
-                    CopyTextStyle(nameTxt, st.Refs.NameText or st.Refs.RateText, 15, COLORS.WhiteText)
-                    CopyTextStyle(rateTxt, st.Refs.RateText, 14, COLORS.RateTint)
+                    CopyTextStyle(nameTxt, st.Refs.NameText or st.Refs.RateText, 11, COLORS.WhiteText)
+                    CopyTextStyle(rateTxt, st.Refs.RateText, 11, COLORS.RateTint)
                 end
             else
                 local lineTxt = Core.CreateUserWidget(PATHS.WBPTextClass, st.Widget, pc)
                 if Core.IsValidObj(lineTxt) then
-                    local fontSz = (#inputs == 2) and 13 or 12
+                    local fontSz = (#inputs == 2) and 10 or 9
                     CopyTextStyle(lineTxt, st.Refs.RateText, fontSz, COLORS.WhiteText)
                     pcall(function()
                         lineTxt:SetText(Core.MakeText(string.format("%s  %s", FormatRate(inp.Rate), GetItemDisplayName(inp.Item))))
@@ -552,7 +579,7 @@ local function RebuildInputRateEntries(st, inputs)
             local rowSlot = st.ItemsBox:AddChildToVerticalBox(rowBox)
             if Core.IsValidObj(rowSlot) then
                 pcall(function()
-                    rowSlot:SetPadding({ Left = 0.0, Top = 1.5, Right = 0.0, Bottom = 1.5 })
+                    rowSlot:SetPadding({ Left = 0.0, Top = 1.0, Right = 0.0, Bottom = 1.0 })
                 end)
             end
         end

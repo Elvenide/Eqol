@@ -1,7 +1,7 @@
--- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 1/4 Height
--- 1. Allows players to walk through splitters and belt balancers (ignores ECC_Pawn only)
---    while keeping building placement / world channels blocking so structures cannot be built on top.
--- 2. Scales splitter and belt balancer housing meshes to 1/4 height (0.25x Z), anchored at floor Z.
+-- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 1/2 Height
+-- 1. Allows players to walk through splitters and belt balancers (ignores Pawn/movement channels +
+--    MoveIgnoreActors) while keeping WorldStatic/WorldDynamic/Trace channels blocking for building placement.
+-- 2. Scales splitter and belt balancer housing meshes to 1/2 height (0.50x Z), anchored at floor Z.
 
 local Core = require("core")
 
@@ -9,7 +9,7 @@ local Feature = {
     Name = "SplitterBalancerTweaks",
 }
 
-local HEIGHT_SCALE     = 0.25
+local HEIGHT_SCALE     = 0.50
 local ECC_PAWN         = 3   -- ECollisionChannel::ECC_Pawn
 local ECR_IGNORE       = 0   -- ECollisionResponse::ECR_Ignore
 local ECR_BLOCK        = 2   -- ECollisionResponse::ECR_Block
@@ -30,9 +30,10 @@ local REF_ACTOR_CLASSES = {
     "BP_UndergroundBeltActor_C",
 }
 
-local OrigMeshState = {} -- compAddr -> { Comp, OrigLocX, OrigLocY, OrigLocZ, OrigScaleX, OrigScaleY, OrigScaleZ, TargetScaleZ, TargetLocZ }
-local LoggedClasses = {} -- key -> true
-local PollActive    = false
+local OrigMeshState     = {} -- compAddr -> { ... }
+local IgnoredPawnActors = {} -- pawnAddr -> { actorAddr -> true }
+local LoggedClasses     = {} -- key -> true
+local PollActive        = false
 
 local function SafeName(obj)
     if not Core.IsValidObj(obj) then return "nil" end
@@ -125,29 +126,85 @@ local function LogActorCollisionDiag(actor, tag)
         tag, clsName, n, table.concat(details, " | ")))
 end
 
-local function EnsureWalkThroughCollision(actor)
+local function GetPawnCollisionContext()
+    local pc = Core.GetLocalPlayerController()
+    local pawn = Core.IsValidObj(pc) and pc.Pawn or nil
+    if not Core.IsValidObj(pawn) then return nil, {}, {} end
+
+    local primCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
+    if not Core.IsValidObj(primCls) or not pawn.K2_GetComponentsByClass then
+        return pawn, {}, { [ECC_PAWN] = true }
+    end
+
+    local comps, n = ExtractArray(pawn:K2_GetComponentsByClass(primCls))
+    local pawnComps = {}
+    local ignoreChannels = { [ECC_PAWN] = true }
+    for i = 1, n do
+        local c = comps[i]
+        if Core.IsValidObj(c) then
+            pawnComps[#pawnComps + 1] = c
+            pcall(function()
+                local colEn = c.GetCollisionEnabled and tonumber(c:GetCollisionEnabled()) or 0
+                if colEn ~= 0 and c.GetCollisionObjectType then
+                    local ot = tonumber(c:GetCollisionObjectType())
+                    -- Include Pawn's own movement collider channel (e.g. ECC_PawnMovement),
+                    -- never generic WorldStatic(0) or WorldDynamic(1).
+                    if ot and ot >= 2 then
+                        ignoreChannels[ot] = true
+                    end
+                end
+            end)
+        end
+    end
+
+    if not LoggedClasses["pawn"] then
+        LoggedClasses["pawn"] = true
+        LogActorCollisionDiag(pawn, "pawn")
+    end
+    return pawn, pawnComps, ignoreChannels
+end
+
+local function EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels)
     local primCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
     if not Core.IsValidObj(primCls) or not actor.K2_GetComponentsByClass then return false end
 
     local changed = false
     local comps, n = ExtractArray(actor:K2_GetComponentsByClass(primCls))
+    local pawnAddr = Core.IsValidObj(pawn) and pawn:GetAddress() or nil
+    local actorAddr = actor:GetAddress()
+    local needIgnorePair = pawnAddr and not (IgnoredPawnActors[pawnAddr] and IgnoredPawnActors[pawnAddr][actorAddr])
+
     for i = 1, n do
         local c = comps[i]
         if Core.IsValidObj(c) and c.GetCollisionEnabled and c.GetCollisionResponseToChannel and c.SetCollisionResponseToChannel then
             pcall(function()
                 local colEn = tonumber(c:GetCollisionEnabled()) or 0
                 if colEn ~= 0 then
-                    local pawnResp = tonumber(c:GetCollisionResponseToChannel(ECC_PAWN))
-                    if pawnResp == ECR_BLOCK then
-                        -- Ignore ONLY ECC_Pawn so the player walks through cleanly while all
-                        -- WorldStatic/WorldDynamic/GameTrace building checks remain intact.
-                        c:SetCollisionResponseToChannel(ECC_PAWN, ECR_IGNORE)
-                        changed = true
+                    for ch, _ in pairs(ignoreChannels) do
+                        local resp = tonumber(c:GetCollisionResponseToChannel(ch))
+                        if resp == ECR_BLOCK then
+                            c:SetCollisionResponseToChannel(ch, ECR_IGNORE)
+                            changed = true
+                        end
+                    end
+                    if needIgnorePair and Core.IsValidObj(pawn) and c.IgnoreActorWhenMoving then
+                        c:IgnoreActorWhenMoving(pawn, true)
                     end
                 end
             end)
         end
     end
+
+    if needIgnorePair then
+        IgnoredPawnActors[pawnAddr] = IgnoredPawnActors[pawnAddr] or {}
+        IgnoredPawnActors[pawnAddr][actorAddr] = true
+        for _, pcComp in ipairs(pawnComps) do
+            if Core.IsValidObj(pcComp) and pcComp.IgnoreActorWhenMoving then
+                pcall(function() pcComp:IgnoreActorWhenMoving(actor, true) end)
+            end
+        end
+    end
+
     return changed
 end
 
@@ -204,8 +261,12 @@ local function EnsureQuarterHeight(actor)
                 end)
 
                 local targetSz = sz * HEIGHT_SCALE
-                local bottomZ = rz + (oz - ez) * sz
-                local targetLz = bottomZ - (oz - ez) * targetSz
+                local targetLz = rz
+                -- Only compensate RelativeLocation.Z if the mesh pivot is centered (not at floor Z=0)
+                if ez > 15.0 and math.abs(oz - ez) > 2.0 then
+                    local bottomZ = rz + (oz - ez) * sz
+                    targetLz = bottomZ - (oz - ez) * targetSz
+                end
 
                 st = {
                     Comp = c,
@@ -265,6 +326,7 @@ end
 
 local function ScanAndApplyTweaks()
     ProcessRefDiagnostics()
+    local pawn, pawnComps, ignoreChannels = GetPawnCollisionContext()
 
     for _, clsShort in ipairs(TARGET_ACTOR_CLASSES) do
         local ok, list = pcall(FindAllOf, clsShort)
@@ -272,7 +334,7 @@ local function ScanAndApplyTweaks()
             for _, actor in ipairs(list) do
                 if Core.IsValidObj(actor) then
                     LogActorCollisionDiag(actor, "before")
-                    local colChanged = EnsureWalkThroughCollision(actor)
+                    local colChanged = EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels)
                     local scaleChanged = EnsureQuarterHeight(actor)
                     if colChanged or scaleChanged then
                         LogActorCollisionDiag(actor, "after")
@@ -295,11 +357,12 @@ end
 
 function Feature.Init()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (ECC_Pawn walk-through + 0.25x Z housing height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized (Pawn walk-through + 0.50x Z housing height).")
 end
 
 function Feature.OnClientRestart()
     OrigMeshState = {}
+    IgnoredPawnActors = {}
 end
 
 function Feature.PruneCaches()
