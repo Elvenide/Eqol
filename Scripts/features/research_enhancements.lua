@@ -43,88 +43,135 @@ local function SafeTextToString(val)
     return ""
 end
 
+local TechSearchTextCache = {}
+local ObjectSearchTextCache = {}
+local PendingFilterToken = 0
+
 local function ContainsQuery(text, queryLower)
     if queryLower == "" then return true end
     if type(text) ~= "string" or text == "" then return false end
-    return string.find(string.lower(text), queryLower, 1, true) ~= nil
+    return string.find(text, queryLower, 1, true) ~= nil
 end
 
-local function ObjectMatchesQuery(obj, queryLower)
+local function GetObjectSearchText(obj)
     obj = Core.UnwrapArrayElem(obj)
-    if not Core.IsValidObj(obj) then return false end
+    if not Core.IsValidObj(obj) then return "" end
 
+    local addr = obj:GetAddress()
+    local cached = ObjectSearchTextCache[addr]
+    if cached ~= nil then
+        return cached
+    end
+
+    local parts = {}
     local okName, fName = pcall(function() return obj:GetFName():ToString() end)
-    if okName and ContainsQuery(fName, queryLower) then
-        return true
+    if okName and type(fName) == "string" and fName ~= "" then
+        parts[#parts + 1] = fName
     end
 
+    local hasDisp = false
     local okDisp, dispVal = pcall(function() return obj.DisplayName end)
-    if okDisp and ContainsQuery(SafeTextToString(dispVal), queryLower) then
-        return true
+    if okDisp then
+        local dispStr = SafeTextToString(dispVal)
+        if dispStr ~= "" then
+            parts[#parts + 1] = dispStr
+            hasDisp = true
+        end
     end
 
-    -- Check CDO DisplayName when obj is a UClass
-    local okFull, full = pcall(function() return obj:GetFullName() end)
-    if okFull and type(full) == "string" then
-        local objPath = full:match("^%S+ (.+)$") or full
-        local pkg, clsName = objPath:match("^(.-)%.([^.]+)$")
-        if pkg and clsName and string.sub(clsName, 1, 9) ~= "Default__" then
-            local cdo = Core.GetCDO(pkg .. ".Default__" .. clsName)
-            if Core.IsValidObj(cdo) then
-                local okCdoDisp, cdoDisp = pcall(function() return cdo.DisplayName end)
-                if okCdoDisp and ContainsQuery(SafeTextToString(cdoDisp), queryLower) then
-                    return true
+    -- Check CDO DisplayName when obj is a UClass with no direct DisplayName
+    if not hasDisp then
+        local okFull, full = pcall(function() return obj:GetFullName() end)
+        if okFull and type(full) == "string" then
+            local objPath = full:match("^%S+ (.+)$") or full
+            local pkg, clsName = objPath:match("^(.-)%.([^.]+)$")
+            if pkg and clsName and string.sub(clsName, 1, 9) ~= "Default__" then
+                local cdo = Core.GetCDO(pkg .. ".Default__" .. clsName)
+                if Core.IsValidObj(cdo) then
+                    local okCdoDisp, cdoDisp = pcall(function() return cdo.DisplayName end)
+                    if okCdoDisp then
+                        local cdoStr = SafeTextToString(cdoDisp)
+                        if cdoStr ~= "" then
+                            parts[#parts + 1] = cdoStr
+                        end
+                    end
                 end
             end
         end
     end
 
-    return false
+    local result = string.lower(table.concat(parts, "\n"))
+    ObjectSearchTextCache[addr] = result
+    return result
 end
 
-local function TechMatchesQuery(tech, queryLower)
-    if queryLower == "" then return true end
-    if not Core.IsValidObj(tech) then return false end
+local function GetTechSearchText(tech)
+    if not Core.IsValidObj(tech) then return "" end
 
+    local addr = tech:GetAddress()
+    local cached = TechSearchTextCache[addr]
+    if cached ~= nil then
+        return cached
+    end
+
+    local parts = {}
     local okDisp, dispVal = pcall(function() return tech.DisplayName end)
-    if okDisp and ContainsQuery(SafeTextToString(dispVal), queryLower) then
-        return true
+    if okDisp then
+        local s = SafeTextToString(dispVal)
+        if s ~= "" then parts[#parts + 1] = s end
     end
 
     local okDesc, descVal = pcall(function() return tech.Description end)
-    if okDesc and ContainsQuery(SafeTextToString(descVal), queryLower) then
-        return true
+    if okDesc then
+        local s = SafeTextToString(descVal)
+        if s ~= "" then parts[#parts + 1] = s end
     end
 
     local okUnlocks, unlocks = pcall(function() return tech.Unlocks end)
     if okUnlocks and unlocks then
-        local matchedUnlock = false
         local unlockFields = { "Block", "Recipe", "Item", "Buildable" }
         StationData.ForEachArray(unlocks, function(_, elem)
-            if matchedUnlock then return end
             local unlock = Core.UnwrapStruct(elem)
             if not unlock then return end
 
             local okUDisp, uDisp = pcall(function() return unlock.DisplayName end)
-            if okUDisp and ContainsQuery(SafeTextToString(uDisp), queryLower) then
-                matchedUnlock = true
-                return
+            if okUDisp then
+                local s = SafeTextToString(uDisp)
+                if s ~= "" then parts[#parts + 1] = s end
             end
 
             for _, fieldName in ipairs(unlockFields) do
                 local okField, ref = pcall(function() return unlock[fieldName] end)
-                if okField and ref ~= nil and ObjectMatchesQuery(ref, queryLower) then
-                    matchedUnlock = true
-                    return
+                if okField and ref ~= nil then
+                    local s = GetObjectSearchText(ref)
+                    if s ~= "" then parts[#parts + 1] = s end
                 end
             end
         end)
-        if matchedUnlock then
-            return true
-        end
     end
 
-    return ObjectMatchesQuery(tech, queryLower)
+    local objText = GetObjectSearchText(tech)
+    if objText ~= "" then
+        parts[#parts + 1] = objText
+    end
+
+    local result = string.lower(table.concat(parts, "\n"))
+    TechSearchTextCache[addr] = result
+    return result
+end
+
+local function TechMatchesQuery(tech, queryLower, matchCache)
+    if queryLower == "" then return true end
+    if not Core.IsValidObj(tech) then return false end
+    local addr = tech:GetAddress()
+    if matchCache and matchCache[addr] ~= nil then
+        return matchCache[addr]
+    end
+    local matched = ContainsQuery(GetTechSearchText(tech), queryLower)
+    if matchCache then
+        matchCache[addr] = matched
+    end
+    return matched
 end
 
 local function ResolveTechFromWidget(widget)
@@ -158,10 +205,19 @@ local function ReadSearchQuery(st)
     return type(raw) == "string" and raw or ""
 end
 
-local function SetWideTreeDimming(tree, queryLower)
+local function SetWideWidgetAlpha(st, wideW, targetAlpha)
+    if not Core.IsValidObj(wideW) then return end
+    st.LastWideAlpha = st.LastWideAlpha or {}
+    local wAddr = wideW:GetAddress()
+    if st.LastWideAlpha[wAddr] == targetAlpha then return end
+    st.LastWideAlpha[wAddr] = targetAlpha
+    pcall(function() wideW:SetRenderOpacity(targetAlpha) end)
+end
+
+local function SetWideTreeDimming(st, tree, queryLower, matchCache, handledWide)
     if not Core.IsValidObj(tree) then return end
 
-    local updatedAny = false
+    local updatedAny = handledWide ~= nil and next(handledWide) ~= nil
     local treeView = nil
     pcall(function() treeView = tree.ResearchTreeView end)
     if Core.IsValidObj(treeView) then
@@ -171,9 +227,11 @@ local function SetWideTreeDimming(tree, queryLower)
                 local w = Core.UnwrapArrayElem(elem)
                 if not Core.IsValidObj(w) then return end
                 updatedAny = true
+                local wAddr = w:GetAddress()
+                if handledWide and handledWide[wAddr] then return end
                 local tech = ResolveTechFromWidget(w)
-                local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower)
-                pcall(function() w:SetRenderOpacity(matched and 1.0 or 0.22) end)
+                local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower, matchCache)
+                SetWideWidgetAlpha(st, w, matched and 1.0 or 0.22)
             end)
         end
     end
@@ -183,9 +241,12 @@ local function SetWideTreeDimming(tree, queryLower)
         if okAll and wideWidgets then
             for _, w in ipairs(wideWidgets) do
                 if Core.IsValidObj(w) then
-                    local tech = ResolveTechFromWidget(w)
-                    local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower)
-                    pcall(function() w:SetRenderOpacity(matched and 1.0 or 0.22) end)
+                    local wAddr = w:GetAddress()
+                    if not (handledWide and handledWide[wAddr]) then
+                        local tech = ResolveTechFromWidget(w)
+                        local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower, matchCache)
+                        SetWideWidgetAlpha(st, w, matched and 1.0 or 0.22)
+                    end
                 end
             end
         end
@@ -201,11 +262,17 @@ local function ApplyResearchFilter(st, overrideQuery)
     local trimmed = rawText:match("^%s*(.-)%s*$") or ""
     local queryLower = string.lower(trimmed)
 
+    if not st.FilterDirty and st.LastAppliedQuery == queryLower then
+        return
+    end
+
     local treeView = nil
     pcall(function() treeView = st.Tree.ResearchTreeView end)
 
     st.BaseVisible = st.BaseVisible or {}
     local captureBase = (st.FilterDirty == true)
+    local matchCache = {}
+    local handledWide = {}
 
     local container = nil
     pcall(function() container = st.ResearchList.Container end)
@@ -216,29 +283,45 @@ local function ApplyResearchFilter(st, overrideQuery)
                 local child = container:GetChildAt(i)
                 if Core.IsValidObj(child) then
                     local cAddr = child:GetAddress()
+                    local curVis = true
+                    pcall(function() curVis = child:IsVisible() == true end)
                     if captureBase or st.BaseVisible[cAddr] == nil then
-                        local vis = true
-                        pcall(function() vis = child:IsVisible() == true end)
-                        st.BaseVisible[cAddr] = vis
+                        st.BaseVisible[cAddr] = curVis
                     end
                     local baseVis = (st.BaseVisible[cAddr] ~= false)
                     local tech = ResolveTechFromWidget(child)
-                    local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower)
-                    child:SetVisibility((baseVis and matched) and 0 or 1) -- 0 = Visible, 1 = Collapsed
+                    local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower, matchCache)
+                    local wantVis = baseVis and matched
+                    if curVis ~= wantVis then
+                        child:SetVisibility(wantVis and 0 or 1) -- 0 = Visible, 1 = Collapsed
+                    end
 
                     if Core.IsValidObj(treeView) and Core.IsValidObj(tech) and treeView.GetWidget then
                         local okW, wideW = pcall(function() return treeView:GetWidget(tech) end)
                         if okW and Core.IsValidObj(wideW) then
-                            pcall(function() wideW:SetRenderOpacity(matched and 1.0 or 0.22) end)
+                            handledWide[wideW:GetAddress()] = true
+                            SetWideWidgetAlpha(st, wideW, matched and 1.0 or 0.22)
                         end
                     end
                 end
             end
         end)
     end
-    st.FilterDirty = false
 
-    SetWideTreeDimming(st.Tree, queryLower)
+    SetWideTreeDimming(st, st.Tree, queryLower, matchCache, handledWide)
+    st.FilterDirty = false
+    st.LastAppliedQuery = queryLower
+end
+
+local function ScheduleResearchFilter(st, overrideQuery)
+    if not st then return end
+    PendingFilterToken = PendingFilterToken + 1
+    local myToken = PendingFilterToken
+    st.PendingQuery = overrideQuery
+    ExecuteWithDelay(50, function()
+        if myToken ~= PendingFilterToken then return end
+        ApplyResearchFilter(st, st.PendingQuery)
+    end)
 end
 
 EnsureResearchSearchBar = function(tree)
@@ -727,11 +810,86 @@ local function FindOwningTreeForQueueParent(parentWidget)
     return nil, nil
 end
 
+local ActiveDragGhost = nil
+
+local function DestroyDragGhost()
+    local ghost = ActiveDragGhost
+    ActiveDragGhost = nil
+    if Core.IsValidObj(ghost) then
+        pcall(function() ghost:SetVisibility(1) end)
+        pcall(function() ghost:RemoveFromParent() end)
+    end
+end
+
+local function EnsureDragGhost(tree, pc, srcWidget)
+    if Core.IsValidObj(ActiveDragGhost) then
+        return ActiveDragGhost
+    end
+    local ghost = Core.CreateUserWidget(PATHS.ResearchTechnologyClass, tree, pc)
+    if not Core.IsValidObj(ghost) then return nil end
+
+    pcall(function()
+        local tech = nil
+        pcall(function() tech = srcWidget.Technology end)
+        if not Core.IsValidObj(tech) then
+            pcall(function() tech = srcWidget.Research end)
+        end
+        local resState = nil
+        pcall(function() resState = srcWidget.ResearchState end)
+        local treeView = nil
+        pcall(function() treeView = srcWidget.ResearchTreeView end)
+
+        if tech ~= nil then pcall(function() ghost.Technology = tech end) end
+        pcall(function() ghost.Research = srcWidget.Research end)
+        if resState ~= nil then pcall(function() ghost.ResearchState = resState end) end
+        if Core.IsValidObj(treeView) then
+            pcall(function() ghost.ResearchTreeView = treeView end)
+            if ghost.SetView then
+                pcall(function() ghost:SetView(treeView) end)
+            end
+        end
+        if ghost.SetTechnology and Core.IsValidObj(tech) then
+            pcall(function() ghost:SetTechnology(tech, resState) end)
+        end
+        if ghost.RefreshAvailable then pcall(function() ghost:RefreshAvailable() end) end
+        if ghost.RefreshProgress then pcall(function() ghost:RefreshProgress() end) end
+
+        -- Render above all ResearchTree / Queue children without intercepting mouse input
+        ghost:SetVisibility(3) -- 3 = HitTestInvisible
+        ghost:AddToViewport(200)
+        if ghost.SetAnchorsInViewport then
+            ghost:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.0, Y = 0.0 } })
+        end
+        if ghost.SetAlignmentInViewport then
+            ghost:SetAlignmentInViewport({ X = 0.5, Y = 0.5 })
+        end
+        local w, h = 60.0, 60.0
+        local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+        if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and srcWidget.GetCachedGeometry then
+            local okS, sz = pcall(function()
+                return slateLib:GetLocalSize(srcWidget:GetCachedGeometry())
+            end)
+            if okS and sz ~= nil then
+                local sx, sy = tonumber(sz.X), tonumber(sz.Y)
+                if sx and sx >= 20.0 and sx <= 240.0 then w = sx end
+                if sy and sy >= 20.0 and sy <= 240.0 then h = sy end
+            end
+        end
+        if ghost.SetDesiredSizeInViewport then
+            ghost:SetDesiredSizeInViewport({ X = w, Y = h })
+        end
+    end)
+
+    ActiveDragGhost = ghost
+    return ghost
+end
+
 local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
     if ActiveDrag then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
+    DestroyDragGhost()
     local startX, startY = GetViewportMousePos(pc)
     local slotStep = MeasureQueueSlotStep(queueBox)
     local snapshotTechs = CollectQueuedTechs(tree, queueBox)
@@ -782,6 +940,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
 
         if not treeOk or not treeVisible or (not btnPressed and not mouseDown) then
             ActiveDrag = nil
+            DestroyDragGhost()
             local wasDragging = dragState.IsDragging
             local fromIdx = dragState.StartIdx
             local toIdx = dragState.TargetIdx
@@ -815,6 +974,19 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
             local validTargetIdx, isDesiredValid = ClampValidDropTarget(dragState.SnapshotTechs, dragState.StartIdx, desiredIdx)
             dragState.TargetIdx = validTargetIdx
 
+            local ghost = EnsureDragGhost(dragState.Tree, pc, dragState.DragWidget)
+            if Core.IsValidObj(ghost) then
+                pcall(function()
+                    if curX and curY and ghost.SetPositionInViewport then
+                        ghost:SetPositionInViewport({ X = curX, Y = curY }, false)
+                    end
+                    if ghost.SetRenderScale then
+                        ghost:SetRenderScale({ X = 1.08, Y = 1.08 })
+                    end
+                    ghost:SetRenderOpacity(isDesiredValid and 0.95 or 0.65)
+                end)
+            end
+
             pcall(function()
                 local qCount = dragState.QueueBox:GetChildrenCount()
                 for i = 0, qCount - 1 do
@@ -822,12 +994,12 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
                     local ch = dragState.QueueBox:GetChildAt(i)
                     if Core.IsValidObj(ch) then
                         if slotIdx == dragState.StartIdx then
-                            -- Picked-up card tracks cursor 1:1 with subtle lift scale; dims if clamped by a prerequisite
-                            ch:SetRenderTranslation({ X = dx, Y = dy })
+                            -- Dim original queue slot in place while the viewport ghost floats on top
+                            ch:SetRenderTranslation({ X = 0.0, Y = 0.0 })
                             if ch.SetRenderScale then
-                                ch:SetRenderScale({ X = 1.08, Y = 1.08 })
+                                ch:SetRenderScale({ X = 1.0, Y = 1.0 })
                             end
-                            ch:SetRenderOpacity(isDesiredValid and 0.95 or 0.65)
+                            ch:SetRenderOpacity(Core.IsValidObj(ghost) and 0.18 or (isDesiredValid and 0.95 or 0.65))
                         else
                             if ch.SetRenderScale then
                                 ch:SetRenderScale({ X = 1.0, Y = 1.0 })
@@ -935,7 +1107,7 @@ function Feature.RegisterHooks()
                     override = SafeTextToString(raw)
                 end
             end)
-            ApplyResearchFilter(st, override)
+            ScheduleResearchFilter(st, override)
         end
     )
 
@@ -973,6 +1145,10 @@ function Feature.RegisterHooks()
 end
 
 function Feature.OnClientRestart()
+    ActiveDrag = nil
+    DestroyDragGhost()
+    TechSearchTextCache = {}
+    ObjectSearchTextCache = {}
     Feature.RegisterHooks()
     ScanExistingTrees()
 end
@@ -992,6 +1168,9 @@ function Feature.PruneCaches()
         if not Core.IsValidObj(st.Tree) or not Core.IsValidObj(st.ResearchList) then
             ListToTree[listAddr] = nil
         end
+    end
+    if not ActiveDrag then
+        DestroyDragGhost()
     end
 end
 
