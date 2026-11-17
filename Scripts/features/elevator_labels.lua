@@ -128,6 +128,7 @@ local function GetOrCreateIconActor(pc, idx)
         itemW:SetIconSize(ICON_PIXEL_SIZE)
         itemW:SetVisibility(0)
         comp:SetWidgetSpace(0) -- World space
+        comp:SetBlendMode(0)   -- EWidgetBlendMode::Opaque (keeps PanelBg visible around item sprite)
         comp:SetDrawSize({ X = ICON_PIXEL_SIZE, Y = ICON_PIXEL_SIZE })
         comp:SetDrawAtDesiredSize(true)
         comp:SetPivot({ X = 0.5, Y = 0.5 })
@@ -149,10 +150,16 @@ local function GetOrCreateIconActor(pc, idx)
     end
     pcall(function() comp:SetCollisionEnabled(0) end)
 
+    local opqMatStr, curMatStr, bmStr = "nil", "nil", "nil"
+    pcall(function()
+        if comp.OpaqueMaterial then opqMatStr = SafeObjName(comp.OpaqueMaterial) end
+        if comp.GetMaterial then curMatStr = SafeObjName(comp:GetMaterial(0)) end
+        if comp.BlendMode ~= nil then bmStr = tostring(comp.BlendMode) end
+    end)
     LogOnce("pool:" .. idx,
-        "Step[IconPool#%d] Created actor=0x%X comp=0x%X widget=0x%X scale=%.2f px=%.0f",
+        "Step[IconPool#%d] Created actor=0x%X comp=0x%X widget=0x%X scale=%.2f px=%.0f blend=%s opqMat=%s curMat=%s",
         idx, tonumber(actor:GetAddress()) or 0, tonumber(comp:GetAddress()) or 0,
-        tonumber(itemW:GetAddress()) or 0, ICON_WORLD_SCALE, ICON_PIXEL_SIZE)
+        tonumber(itemW:GetAddress()) or 0, ICON_WORLD_SCALE, ICON_PIXEL_SIZE, bmStr, opqMatStr, curMatStr)
 
     entry = {
         Actor = actor,
