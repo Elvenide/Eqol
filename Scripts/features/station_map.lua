@@ -36,7 +36,9 @@ local PATHS = {
 }
 
 local CELL_CM = 100.0
-local FLOOR_PAGE_SIZE = 5
+local BASE_CELL_PX = 48.0
+local BASE_PX_PER_CM = BASE_CELL_PX / CELL_CM
+local FLOOR_PAGE_SIZE = 7
 local DEFAULT_CANVAS_W = 1060.0
 local DEFAULT_CANVAS_H = 740.0
 
@@ -101,8 +103,10 @@ local FloorIconButtons = {}  -- mAddr -> { btn, widget }
 local FloorRailButtons = {}  -- list of WBP_Button_C instances in floor selector
 local TrackedButtons = {}    -- list of static WBP_Button_C instances for hover check
 local IconDiagLogged = false
+local MissingIconsLogged = {}
 local CursorDiagLogged = false
-local LastPanRedrawClock = 0.0
+local LastHoveredConvAddr = nil
+local LastHadDynamicOverlay = false
 
 -- Selection, Ghosts, Build & Clipboard State
 local SelectedMachines = {}  -- mAddr -> entry
@@ -186,6 +190,29 @@ local function WorldToCanvas(wx, wy)
     local mx = ViewTransform.canvasW * 0.5 + (wx - ViewTransform.cx) * ViewTransform.scale
     local my = ViewTransform.canvasH * 0.5 + (wy - ViewTransform.cy) * ViewTransform.scale
     return mx, my
+end
+
+local function WorldToBaseCanvas(wx, wy)
+    return wx * BASE_PX_PER_CM, wy * BASE_PX_PER_CM
+end
+
+local function ApplyViewTransform()
+    if not MapUI then return end
+    local zoomRatio = ViewTransform.scale / BASE_PX_PER_CM
+    local tx = ViewTransform.canvasW * 0.5 - ViewTransform.cx * ViewTransform.scale
+    local ty = ViewTransform.canvasH * 0.5 - ViewTransform.cy * ViewTransform.scale
+    local pivot = { X = 0.0, Y = 0.0 }
+    local sc = { X = zoomRatio, Y = zoomRatio }
+    local tr = { X = tx, Y = ty }
+    for _, p in ipairs({ MapUI.BgPanZoom, MapUI.IconPanZoom }) do
+        if Core.IsValidObj(p) then
+            pcall(function()
+                p:SetRenderTransformPivot(pivot)
+                p:SetRenderScale(sc)
+                p:SetRenderTranslation(tr)
+            end)
+        end
+    end
 end
 
 local function CanvasToWorld(mx, my)
@@ -388,6 +415,7 @@ end
 
 local function ResetSpriteCache()
     MachineSpriteCache = {}
+    MissingIconsLogged = {}
     IconDiagLogged = false
 end
 
@@ -402,7 +430,13 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
 
     local typeKey, tier, dispName = StationData.GetMachineTypeAndTier(machine, buildableOpt)
     local bgCol, borderCol = GetShadedColorForTypeAndTier(typeKey, tier)
-    local tex = StationData.GetBuildableIconTexture(machine, buildableOpt)
+    local tex = nil
+    if cat == "Conveyor" and Core.IsValidObj(machine) then
+        tex = StationData.GetConveyorBeltTexture(machine)
+    end
+    if not Core.IsValidObj(tex) then
+        tex = StationData.GetBuildableIconTexture(machine, buildableOpt)
+    end
     local directional = (cat == "Conveyor")
         or typeKey:find("conveyor", 1, true) ~= nil
         or typeKey:find("belt", 1, true) ~= nil
@@ -417,6 +451,12 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
         Core.Log(string.format("[StationMap] 2DIconSample type=%s tier=%d name=%s bldValid=%s texValid=%s",
             tostring(typeKey), tier, tostring(dispName), tostring(Core.IsValidObj(bld)), tostring(Core.IsValidObj(tex))))
     end
+    if not Core.IsValidObj(tex) and clsKey and not MissingIconsLogged[clsKey] then
+        MissingIconsLogged[clsKey] = true
+        local hasBld = Core.IsValidObj(buildableOpt) or (Core.IsValidObj(machine) and pcall(function() return Core.IsValidObj(machine.Buildable) end) and Core.IsValidObj(machine.Buildable))
+        Core.Log(string.format("[StationMap] Missing2DIcon cls=%s type=%s tier=%d name=%s bldValid=%s",
+            tostring(clsKey), tostring(typeKey), tier, tostring(dispName), tostring(hasBld)))
+    end
 
     local entry = {
         tex = tex,
@@ -425,6 +465,7 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
         typeKey = typeKey,
         tier = tier,
         directional = directional,
+        fullTileTex = (cat == "Conveyor"),
     }
     if clsKey then
         MachineSpriteCache[clsKey] = entry
@@ -766,14 +807,19 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
         SetCanvasSlot(fs, mx, my, fillW, fillH, 0.5, 0.5, zBase + 1)
     end
 
-    -- Centered 2D build-menu machine asset inside the colored rectangle
+    -- Centered 2D build-menu machine asset inside the colored rectangle (or full-tile belt texture for conveyors)
     if spriteEntry and Core.IsValidObj(spriteEntry.tex) then
         local img = Core.CreateRawWidget(PATHS.ImageClass, outer)
         if Core.IsValidObj(img) then
             local shiftUp = (hasBottomOverlay and pxH >= 52.0)
-            local availH = shiftUp and (fillH * 0.56) or (fillH * 0.80)
-            local availW = fillW * 0.80
-            local iconDim = math.max(6.0, math.min(availW, availH))
+            local iconDim
+            if spriteEntry.fullTileTex then
+                iconDim = math.max(6.0, math.min(fillW, fillH))
+            else
+                local availH = shiftUp and (fillH * 0.56) or (fillH * 0.82)
+                local availW = fillW * 0.82
+                iconDim = math.max(6.0, math.min(availW, availH))
+            end
             local iconY = shiftUp and (my - fillH * 0.17) or my
             pcall(function()
                 img:SetVisibility(3)
@@ -868,15 +914,30 @@ local function FitViewTransformToFloor()
         if b.cy + b.ey > maxY then maxY = b.cy + b.ey end
     end
 
+    local cx, cy = (minX + maxX) * 0.5, (minY + maxY) * 0.5
+    if floor.machines and #floor.machines > 0 then
+        local xs, ys = {}, {}
+        for _, me in ipairs(floor.machines) do
+            table.insert(xs, me.x)
+            table.insert(ys, me.y)
+        end
+        table.sort(xs)
+        table.sort(ys)
+        cx = xs[math.ceil(#xs * 0.5)]
+        cy = ys[math.ceil(#ys * 0.5)]
+    end
+
     local spanX = math.max(1200.0, maxX - minX)
     local spanY = math.max(1200.0, maxY - minY)
     local pad = 90.0
     local availW = math.max(300.0, ViewTransform.canvasW - pad)
     local availH = math.max(300.0, ViewTransform.canvasH - pad)
 
-    ViewTransform.cx = (minX + maxX) * 0.5
-    ViewTransform.cy = (minY + maxY) * 0.5
-    ViewTransform.scale = Core.Clamp(math.min(availW / spanX, availH / spanY), 0.05, 0.75)
+    -- Default base scale makes 1x1 cells larger (~28px) for comfortable inspection while still fitting smaller floors
+    local fitted = math.min(availW / spanX, availH / spanY)
+    ViewTransform.cx = cx
+    ViewTransform.cy = cy
+    ViewTransform.scale = Core.Clamp(math.max(fitted, 0.28), 0.14, 0.90)
     ViewTransform.floorZ = floor.z
     ViewTransform.hasFitted = true
 end
@@ -1011,13 +1072,13 @@ RefreshDynamicOverlay = function()
     end
 
     -- 3. Conveyor item hover tooltip (only shown while cursor hovers a conveyor carrying an item)
+    local hoveredConv = nil
     if InteractionMode == "Select" and not MouseState.lDraggingBox and not MouseState.rPanning
         and MouseState.lastCursorMx and MouseState.lastCursorMy
         and MouseState.lastCursorMx >= 0 and MouseState.lastCursorMx <= ViewTransform.canvasW
         and MouseState.lastCursorMy >= 0 and MouseState.lastCursorMy <= ViewTransform.canvasH
     then
         local wx, wy = CanvasToWorld(MouseState.lastCursorMx, MouseState.lastCursorMy)
-        local hoveredConv = nil
         for _, cm in ipairs(RenderedConveyors) do
             if math.abs(wx - cm.x) <= cm.halfW and math.abs(wy - cm.y) <= cm.halfH then
                 hoveredConv = cm
@@ -1063,6 +1124,53 @@ RefreshDynamicOverlay = function()
             end
         end
     end
+
+    LastHoveredConvAddr = hoveredConv and hoveredConv.addr or nil
+    LastHadDynamicOverlay = (MouseState.lDraggingBox or InteractionMode ~= "Select" or hoveredConv ~= nil)
+end
+
+local function RefreshSelectionLayer()
+    if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
+    ClearCanvasChildren(MapUI.SelectionCanvas)
+
+    local floor = CurrentFloors[SelectedFloorIdx]
+    if not floor then return end
+    local outer = Core.GetWidgetOuter(MapUI.Window)
+    local pc = MapUI.PC
+
+    for _, rm in ipairs(RenderedMachines) do
+        if SelectedMachines[rm.addr] ~= nil then
+            local bx, by = WorldToBaseCanvas(rm.x, rm.y)
+            local rx, ry = GetRotatedCellDims(rm.cellsX or 1, rm.cellsY or 1, rm.yaw or 0)
+            local pxW = math.max(8.0, rx * BASE_CELL_PX)
+            local pxH = math.max(8.0, ry * BASE_CELL_PX)
+            local selFill = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(selFill) then
+                pcall(function()
+                    selFill:SetVisibility(3)
+                    selFill:SetBrushColor(COLORS.SelectedFill)
+                end)
+                local ss = MapUI.SelectionCanvas:AddChildToCanvas(selFill)
+                SetCanvasSlot(ss, bx, by, pxW, pxH, 0.5, 0.5, 1)
+            end
+            RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
+        end
+    end
+
+    for _, gp in ipairs(PendingGhosts) do
+        if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+            local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
+            local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
+            local pxW = math.max(8.0, rx * BASE_CELL_PX)
+            local pxH = math.max(8.0, ry * BASE_CELL_PX)
+            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, "Other", gp.buildable) or gp.sprite
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, "Other", sprite, true, true, 5, false)
+            RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.0, COLORS.GhostBorderOk, 6)
+        end
+    end
+
+    UpdateActionBar()
+    UpdateStatusBanner()
 end
 
 RefreshStationMapCanvas = function()
@@ -1074,6 +1182,7 @@ RefreshStationMapCanvas = function()
     end
 
     ClearCanvasChildren(MapUI.MapCanvas)
+    ClearCanvasChildren(MapUI.SelectionCanvas)
     ClearCanvasChildren(MapUI.IconCanvas)
     RenderedMachines = {}
     RenderedConveyors = {}
@@ -1081,6 +1190,7 @@ RefreshStationMapCanvas = function()
 
     local floor = CurrentFloors[SelectedFloorIdx]
     if not floor or #floor.platforms == 0 then
+        ApplyViewTransform()
         UpdateStatusBanner("No station modules on this floor")
         RefreshDynamicOverlay()
         return
@@ -1088,49 +1198,70 @@ RefreshStationMapCanvas = function()
 
     local outer = Core.GetWidgetOuter(MapUI.Window)
     local pc = MapUI.PC
-    local cw, ch = ViewTransform.canvasW, ViewTransform.canvasH
-    local scale = ViewTransform.scale
-    local cellPx = CELL_CM * scale
+    local cellPx = BASE_CELL_PX
 
-    -- Visible world bounds for grid line clipping
-    local visMinX, visMinY = CanvasToWorld(0.0, 0.0)
-    local visMaxX, visMaxY = CanvasToWorld(cw, ch)
+    -- Compute generous world bounds for the static 1x1 cell grid (covers floor + build margin around all modules)
+    local bMinX, bMaxX, bMinY, bMaxY = math.huge, -math.huge, math.huge, -math.huge
+    for _, pe in ipairs(floor.platforms) do
+        local b = pe.bounds
+        if b.cx - b.ex < bMinX then bMinX = b.cx - b.ex end
+        if b.cx + b.ex > bMaxX then bMaxX = b.cx + b.ex end
+        if b.cy - b.ey < bMinY then bMinY = b.cy - b.ey end
+        if b.cy + b.ey > bMaxY then bMaxY = b.cy + b.ey end
+    end
+    local padCm = 2400.0
+    local gridMinX = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM) * CELL_CM + ViewTransform.gridOriginX
+    local gridMaxX = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM) * CELL_CM + ViewTransform.gridOriginX
+    local gridMinY = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM) * CELL_CM + ViewTransform.gridOriginY
+    local gridMaxY = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM) * CELL_CM + ViewTransform.gridOriginY
+    local totalCols = math.floor((gridMaxX - gridMinX) / CELL_CM + 0.5)
+    local totalRows = math.floor((gridMaxY - gridMinY) / CELL_CM + 0.5)
+    local stepCm = CELL_CM
+    if totalCols > 140 or totalRows > 140 then
+        stepCm = CELL_CM * 2.0
+    end
 
-    -- 1. Full background 1x1 cell grid lines (step by >1 cell only if zoomed way out < 6px/cell)
-    local cellStep = 1
-    if cellPx < 6.0 then cellStep = 4
-    elseif cellPx < 10.0 then cellStep = 2 end
-    local stepCm = CELL_CM * cellStep
+    local bGridMinX, bGridMinY = WorldToBaseCanvas(gridMinX, gridMinY)
+    local bGridMaxX, bGridMaxY = WorldToBaseCanvas(gridMaxX, gridMaxY)
+    local gridSpanW = math.max(100.0, bGridMaxX - bGridMinX)
+    local gridSpanH = math.max(100.0, bGridMaxY - bGridMinY)
+    local gridMidX = (bGridMinX + bGridMaxX) * 0.5
+    local gridMidY = (bGridMinY + bGridMaxY) * 0.5
 
-    local startGx = math.floor((visMinX - ViewTransform.gridOriginX) / stepCm) * stepCm + ViewTransform.gridOriginX
-    local gx = startGx
-    local maxLines = 220
+    -- 1. Full static 1x1 grid lines (vertical + horizontal) inside PanZoomPanel
+    local gx = gridMinX
+    local maxLines = 160
     local drawnV = 0
-    while gx <= visMaxX and drawnV < maxLines do
+    while gx <= gridMaxX and drawnV < maxLines do
         drawnV = drawnV + 1
-        local mx = WorldToCanvas(gx, ViewTransform.cy)
+        local bmx = WorldToBaseCanvas(gx, 0.0)
         local line = Core.CreateRawWidget(PATHS.BorderClass, outer)
         if Core.IsValidObj(line) then
             local isMajor = (math.abs(((gx - ViewTransform.gridOriginX) / CELL_CM) % 4) < 0.01)
-            pcall(function() line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine) end)
+            pcall(function()
+                line:SetVisibility(3)
+                line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine)
+            end)
             local s = MapUI.MapCanvas:AddChildToCanvas(line)
-            SetCanvasSlot(s, mx, ch * 0.5, 1.5, ch, 0.5, 0.5, 1)
+            SetCanvasSlot(s, bmx, gridMidY, isMajor and 2.2 or 1.4, gridSpanH, 0.5, 0.5, 1)
         end
         gx = gx + stepCm
     end
 
-    local startGy = math.floor((visMinY - ViewTransform.gridOriginY) / stepCm) * stepCm + ViewTransform.gridOriginY
-    local gy = startGy
+    local gy = gridMinY
     local drawnH = 0
-    while gy <= visMaxY and drawnH < maxLines do
+    while gy <= gridMaxY and drawnH < maxLines do
         drawnH = drawnH + 1
-        local my = WorldToCanvas(ViewTransform.cx, gy)
+        local _, bmy = WorldToBaseCanvas(0.0, gy)
         local line = Core.CreateRawWidget(PATHS.BorderClass, outer)
         if Core.IsValidObj(line) then
             local isMajor = (math.abs(((gy - ViewTransform.gridOriginY) / CELL_CM) % 4) < 0.01)
-            pcall(function() line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine) end)
+            pcall(function()
+                line:SetVisibility(3)
+                line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine)
+            end)
             local s = MapUI.MapCanvas:AddChildToCanvas(line)
-            SetCanvasSlot(s, cw * 0.5, my, cw, 1.5, 0.5, 0.5, 1)
+            SetCanvasSlot(s, gridMidX, bmy, gridSpanW, isMajor and 2.2 or 1.4, 0.5, 0.5, 1)
         end
         gy = gy + stepCm
     end
@@ -1138,35 +1269,30 @@ RefreshStationMapCanvas = function()
     -- 2. Render station modules (interior fill + crisp 4-edge module borders)
     for _, pe in ipairs(floor.platforms) do
         local b = pe.bounds
-        local mx, my = WorldToCanvas(b.cx, b.cy)
-        local mw = math.max(12.0, b.ex * 2.0 * scale)
-        local mh = math.max(12.0, b.ey * 2.0 * scale)
+        local mx, my = WorldToBaseCanvas(b.cx, b.cy)
+        local mw = math.max(12.0, b.ex * 2.0 * BASE_PX_PER_CM)
+        local mh = math.max(12.0, b.ey * 2.0 * BASE_PX_PER_CM)
 
         local modFill = Core.CreateRawWidget(PATHS.BorderClass, outer)
         if Core.IsValidObj(modFill) then
-            pcall(function() modFill:SetBrushColor(COLORS.ModuleFill) end)
+            pcall(function()
+                modFill:SetVisibility(3)
+                modFill:SetBrushColor(COLORS.ModuleFill)
+            end)
             local slot = MapUI.MapCanvas:AddChildToCanvas(modFill)
             SetCanvasSlot(slot, mx, my, mw, mh, 0.5, 0.5, 2)
         end
-        RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 2.0, COLORS.ModuleBorder, 4)
+        RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 2.5, COLORS.ModuleBorder, 4)
     end
 
-    -- 3. Collect & render placed machines on this floor
+    -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX
     local floorMachines = floor.machines
-    if not floorMachines or #floorMachines == 0 then
-        -- Safety fallback: gather from StationData directly if floor.machines wasn't populated
+    if not floorMachines then
         floorMachines = {}
-        local seen = {}
         local allM = StationData.GetAllStationMachines(CurrentStation, {}, CurrentWalkFrame)
         for _, m in ipairs(allM) do
-            local addr = m:GetAddress()
-            if not seen[addr] then
-                seen[addr] = true
-                local mwx, mwy, mwz, myaw = StationData.GetMachineWorldPosAndYaw(m, floor.platforms[1] and floor.platforms[1].bounds)
-                if math.abs(mwz - floor.z) <= 350.0 then
-                    table.insert(floorMachines, { machine = m, x = mwx, y = mwy, z = mwz, yaw = myaw })
-                end
-            end
+            local mwx, mwy, mwz, myaw = StationData.GetMachineWorldPosAndYaw(m, floor.platforms[1] and floor.platforms[1].bounds)
+            table.insert(floorMachines, { machine = m, x = mwx, y = mwy, z = mwz, yaw = myaw })
         end
         floor.machines = floorMachines
     end
@@ -1175,7 +1301,7 @@ RefreshStationMapCanvas = function()
         local m = me.machine
         if Core.IsValidObj(m) then
             local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
-            local mx, my = WorldToCanvas(mwx, mwy)
+            local mx, my = WorldToBaseCanvas(mwx, mwy)
             local cat = StationData.GetMachineCategory(m)
             local cellsX, cellsY = StationData.GetMachineFootprintCells(m)
             local rx, ry = GetRotatedCellDims(cellsX, cellsY, myaw)
@@ -1187,9 +1313,7 @@ RefreshStationMapCanvas = function()
             local clsKey = select(1, GetMachineClassKey(m, bld))
             local sprite = RequestMachineSprite(clsKey, m, cat, bld)
             local mAddr = m:GetAddress()
-            local isSel = SelectedMachines[mAddr] ~= nil
 
-            -- Prepare Container items OR Producer output items & rates/min
             local overlayChips = {}
             local isContainer = (cat == "Container")
             local isProducer = false
@@ -1233,27 +1357,16 @@ RefreshStationMapCanvas = function()
                 table.insert(RenderedConveyors, recEntry)
             end
 
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, isSel and 16 or 10, hasBottomOverlay)
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
 
-            if isSel then
-                local selFill = Core.CreateRawWidget(PATHS.BorderClass, outer)
-                if Core.IsValidObj(selFill) then
-                    pcall(function() selFill:SetBrushColor(COLORS.SelectedFill) end)
-                    local ss = MapUI.MapCanvas:AddChildToCanvas(selFill)
-                    SetCanvasSlot(ss, mx, my, pxW, pxH, 0.5, 0.5, 17)
-                end
-                RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, pxW, pxH, 2.0, COLORS.Selected, 18)
-            end
-
-            -- Clickable item / production-rate badge overlays on Containers (items only) & Producers (items + rate/min)
             if hasBottomOverlay then
                 local isHidden = StationData.IsMachineIconHidden(m)
-                local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 14.0, 26.0)
+                local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 16.0, 32.0)
                 local badgeW = #overlayChips * (iconSize + 10.0) + ((#overlayChips > 1) and 4.0 or 0.0)
                 if isProducer then
-                    badgeW = math.max(badgeW, #overlayChips * math.max(38.0, iconSize + 18.0))
+                    badgeW = math.max(badgeW, #overlayChips * math.max(44.0, iconSize + 20.0))
                 end
-                local badgeH = isProducer and (iconSize + 16.0) or (iconSize + 6.0)
+                local badgeH = isProducer and (iconSize + 18.0) or (iconSize + 6.0)
                 local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
 
                 local ov = Core.CreateRawWidget(PATHS.OverlayClass, outer)
@@ -1295,7 +1408,7 @@ RefreshStationMapCanvas = function()
                                         if Core.IsValidObj(rtSlot) then rtSlot:SetHorizontalAlignment(2) end
                                         local rateStr = (chip.rate >= 10.0) and string.format("%.0f/min", chip.rate) or string.format("%.1f/min", chip.rate)
                                         rTxt:SetVisibility(3)
-                                        rTxt:SetSize(9)
+                                        rTxt:SetSize(10)
                                         rTxt:SetText(Core.MakeText(rateStr))
                                     end
                                 end
@@ -1331,40 +1444,30 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 4. Render queued pending ghost placements on this floor (awaiting Apply Changes)
-    for _, gp in ipairs(PendingGhosts) do
-        if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
-            local gmx, gmy = WorldToCanvas(gp.x, gp.y)
-            local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
-            local pxW = math.max(8.0, rx * cellPx)
-            local pxH = math.max(8.0, ry * cellPx)
-            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, "Other", gp.buildable) or gp.sprite
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, gmx, gmy, pxW, pxH, gp.yaw or 0, "Other", sprite, true, true, 22, false)
-            RenderBorderOutline(outer, MapUI.MapCanvas, gmx, gmy, pxW, pxH, 1.5, COLORS.GhostBorderOk, 23)
-        end
-    end
-
-    -- 5. Render player markers & nametags on this floor (converted into station-local space)
+    -- 4. Render player markers & nametags on this floor (converted into station-local space)
     local allPlayers = StationData.GetAllPlayersInfo(pc)
     for _, p in ipairs(allPlayers) do
         if p.HasPos then
             local plx, ply, plz = StationData.WorldToStationLocal(CurrentFrameXform, p.X, p.Y, p.Z, nil, nil, nil)
             if math.abs(plz - floor.z) <= 220.0 then
-                local pmx, pmy = WorldToCanvas(plx, ply)
+                local pmx, pmy = WorldToBaseCanvas(plx, ply)
                 local pDot = Core.CreateRawWidget(PATHS.BorderClass, outer)
                 if Core.IsValidObj(pDot) then
                     local col = p.IsLocal and COLORS.PlayerLocal or (p.IsOnline and COLORS.PlayerOnline or COLORS.PlayerOffline)
-                    pcall(function() pDot:SetBrushColor(col) end)
+                    pcall(function()
+                        pDot:SetVisibility(3)
+                        pDot:SetBrushColor(col)
+                    end)
                     local pSlot = MapUI.MapCanvas:AddChildToCanvas(pDot)
-                    SetCanvasSlot(pSlot, pmx, pmy, 10.0, 10.0, 0.5, 0.5, 45)
+                    SetCanvasSlot(pSlot, pmx, pmy, 12.0, 12.0, 0.5, 0.5, 45)
                 end
                 local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
                 if Core.IsValidObj(nameTxt) then
                     local nSlot = MapUI.MapCanvas:AddChildToCanvas(nameTxt)
-                    SetCanvasSlot(nSlot, pmx, pmy - 14.0, 120.0, 18.0, 0.5, 1.0, 46)
+                    SetCanvasSlot(nSlot, pmx, pmy - 16.0, 140.0, 20.0, 0.5, 1.0, 46)
                     pcall(function()
                         nameTxt:SetVisibility(3)
-                        nameTxt:SetSize(10)
+                        nameTxt:SetSize(11)
                         nameTxt:SetText(Core.MakeText(p.Name))
                     end)
                 end
@@ -1372,8 +1475,8 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    UpdateActionBar()
-    UpdateStatusBanner()
+    RefreshSelectionLayer()
+    ApplyViewTransform()
     RefreshDynamicOverlay()
 end
 
@@ -1416,7 +1519,7 @@ RebuildFloorButtons = function()
         local bgCol = isSel and { R = 0.45, G = 0.28, B = 0.04, A = 0.96 } or COLORS.FloorNormal
         local txtCol = isSel and COLORS.FloorSelected or COLORS.PlayerLocal
         local btnWrap, btn = CreateLabeledButton(
-            MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 18, 96.0, 72.0, bgCol, txtCol,
+            MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 17, 96.0, 58.0, bgCol, txtCol,
             function()
                 SelectedFloorIdx = thisIdx
                 ViewTransform.hasFitted = false
@@ -1430,7 +1533,7 @@ RebuildFloorButtons = function()
             local slot = MapUI.FloorSlotsBox:AddChildToVerticalBox(btnWrap)
             if Core.IsValidObj(slot) then
                 pcall(function()
-                    slot:SetPadding({ Left = 4.0, Top = 6.0, Right = 4.0, Bottom = 6.0 })
+                    slot:SetPadding({ Left = 4.0, Top = 4.0, Right = 4.0, Bottom = 4.0 })
                     slot:SetHorizontalAlignment(2)
                 end)
             end
@@ -1578,7 +1681,7 @@ local function HandleMapLeftClick(mx, my, isShift)
             sprite = clsKey and MachineSpriteCache[clsKey] or nil,
         })
         UpdateActionBar()
-        RefreshStationMapCanvas()
+        RefreshSelectionLayer()
         return
     end
 
@@ -1621,7 +1724,7 @@ local function HandleMapLeftClick(mx, my, isShift)
             table.insert(PendingGhosts, g)
         end
         UpdateActionBar()
-        RefreshStationMapCanvas()
+        RefreshSelectionLayer()
         return
     end
 
@@ -1648,7 +1751,7 @@ local function HandleMapLeftClick(mx, my, isShift)
             SelectedMachines[hit.addr] = hit
         end
     end
-    RefreshStationMapCanvas()
+    RefreshSelectionLayer()
 end
 
 local function FinishBoxSelect(x1, y1, x2, y2, isShift)
@@ -1665,7 +1768,7 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
             SelectedMachines[rm.addr] = rm
         end
     end
-    RefreshStationMapCanvas()
+    RefreshSelectionLayer()
 end
 
 --------------------------------------------------------------------------------
@@ -1676,12 +1779,13 @@ local function ZoomMapByFactor(factor, anchorMx, anchorMy)
     local mx = anchorMx or (ViewTransform.canvasW * 0.5)
     local my = anchorMy or (ViewTransform.canvasH * 0.5)
     local beforeWx, beforeWy = CanvasToWorld(mx, my)
-    local newScale = Core.Clamp(ViewTransform.scale * factor, 0.03, 1.50)
+    local newScale = Core.Clamp(ViewTransform.scale * factor, 0.04, 1.80)
     if math.abs(newScale - ViewTransform.scale) > 0.0001 then
         ViewTransform.scale = newScale
         ViewTransform.cx = beforeWx - (mx - ViewTransform.canvasW * 0.5) / newScale
         ViewTransform.cy = beforeWy - (my - ViewTransform.canvasH * 0.5) / newScale
-        RefreshStationMapCanvas()
+        ApplyViewTransform()
+        RefreshDynamicOverlay()
     end
 end
 
@@ -1845,7 +1949,7 @@ local function EnsureInputPoll()
         -- Detect layout size changes once canvas settles
         if MeasureMapCanvasSize() then
             if not ViewTransform.hasFitted then FitViewTransformToFloor() end
-            RefreshStationMapCanvas()
+            ApplyViewTransform()
         end
 
         local mx, my = GetMapCanvasCursorPos(pc)
@@ -1876,14 +1980,12 @@ local function EnsureInputPoll()
         MouseState.lastCursorMx = mx
         MouseState.lastCursorMy = my
 
-        -- Keyboard WASD/Arrow Pan (smooth pan scaled to current zoom)
-        local nowClk = os.clock()
-        if (keyPanX ~= 0.0 or keyPanY ~= 0.0) and (nowClk - LastPanRedrawClock) >= 0.03 then
-            local stepCm = 28.0 / ViewTransform.scale
+        -- Keyboard WASD/Arrow Pan (zero widget rebuild; instant GPU RenderTransform update!)
+        if keyPanX ~= 0.0 or keyPanY ~= 0.0 then
+            local stepCm = 14.0 / ViewTransform.scale
             ViewTransform.cx = ViewTransform.cx + keyPanX * stepCm
             ViewTransform.cy = ViewTransform.cy + keyPanY * stepCm
-            LastPanRedrawClock = nowClk
-            RefreshStationMapCanvas()
+            ApplyViewTransform()
         end
 
         -- Handle Left Mouse Button transitions (Box Select / Click, or Space+LeftDrag to Pan)
@@ -1902,13 +2004,12 @@ local function EnsureInputPoll()
             end
         elseif lDown and MouseState.lDownInMap and mx and my then
             if MouseState.lPanning then
-                if cursorMoved and (nowClk - LastPanRedrawClock) >= 0.03 then
+                if cursorMoved then
                     local dx = mx - MouseState.lStartX
                     local dy = my - MouseState.lStartY
                     ViewTransform.cx = MouseState.lPanStartCx - dx / ViewTransform.scale
                     ViewTransform.cy = MouseState.lPanStartCy - dy / ViewTransform.scale
-                    LastPanRedrawClock = nowClk
-                    RefreshStationMapCanvas()
+                    ApplyViewTransform()
                 end
             elseif InteractionMode == "Select" and not MouseState.lDraggingBox and insideMap then
                 local dx = mx - MouseState.lStartX
@@ -1924,10 +2025,10 @@ local function EnsureInputPoll()
                     local dy = my - MouseState.lStartY
                     ViewTransform.cx = MouseState.lPanStartCx - dx / ViewTransform.scale
                     ViewTransform.cy = MouseState.lPanStartCy - dy / ViewTransform.scale
-                    RefreshStationMapCanvas()
+                    ApplyViewTransform()
                 elseif MouseState.lDraggingBox and mx and my then
                     FinishBoxSelect(MouseState.lStartX, MouseState.lStartY, mx, my, shiftDown)
-                elseif insideMap and not IsAnyButtonHovered() then
+                elseif insideMap then
                     HandleMapLeftClick(mx, my, shiftDown)
                 end
             end
@@ -1936,7 +2037,7 @@ local function EnsureInputPoll()
             MouseState.lPanning = false
         end
 
-        -- Handle Right or Middle Mouse Button (drag to pan anywhere over map, quick right-click cancels Place/Paste)
+        -- Handle Right or Middle Mouse Button (drag to pan anywhere over map at 120 FPS; quick right-click cancels Place/Paste)
         local panDown = rDown or mDown
         if panDown and not MouseState.wasRDown then
             if insideMap and not WaitingForBuildMenuSelection then
@@ -1955,11 +2056,10 @@ local function EnsureInputPoll()
             if not MouseState.rPanning and (dx * dx + dy * dy) > 25.0 then
                 MouseState.rPanning = true
             end
-            if MouseState.rPanning and cursorMoved and (nowClk - LastPanRedrawClock) >= 0.03 then
+            if MouseState.rPanning and cursorMoved then
                 ViewTransform.cx = MouseState.panStartCx - dx / ViewTransform.scale
                 ViewTransform.cy = MouseState.panStartCy - dy / ViewTransform.scale
-                LastPanRedrawClock = nowClk
-                RefreshStationMapCanvas()
+                ApplyViewTransform()
             end
         elseif not panDown and MouseState.wasRDown then
             if MouseState.rDownInMap then
@@ -1968,7 +2068,7 @@ local function EnsureInputPoll()
                     local dy = my - MouseState.rStartY
                     ViewTransform.cx = MouseState.panStartCx - dx / ViewTransform.scale
                     ViewTransform.cy = MouseState.panStartCy - dy / ViewTransform.scale
-                    RefreshStationMapCanvas()
+                    ApplyViewTransform()
                 elseif InteractionMode == "Place" or InteractionMode == "Paste" then
                     InteractionMode = "Select"
                     PendingBuildable = nil
@@ -2011,8 +2111,25 @@ local function EnsureInputPoll()
         MouseState.wasLDown = lDown
         MouseState.wasRDown = panDown
 
-        if cursorMoved or MouseState.lDraggingBox then
-            RefreshDynamicOverlay()
+        -- Only rebuild screen-space overlay when dragging, placing/pasting, or hovering a different conveyor
+        if MouseState.lDraggingBox or InteractionMode ~= "Select" then
+            if cursorMoved or MouseState.lDraggingBox then
+                RefreshDynamicOverlay()
+            end
+        elseif cursorMoved then
+            local curConv = nil
+            if insideMap and not MouseState.rPanning and #RenderedConveyors > 0 then
+                local wx, wy = CanvasToWorld(mx, my)
+                for _, cm in ipairs(RenderedConveyors) do
+                    if math.abs(wx - cm.x) <= cm.halfW and math.abs(wy - cm.y) <= cm.halfH then
+                        curConv = cm.addr
+                        break
+                    end
+                end
+            end
+            if curConv ~= LastHoveredConvAddr or (curConv == nil and LastHadDynamicOverlay) then
+                RefreshDynamicOverlay()
+            end
         end
 
         ExecuteInGameThreadAfterFrames(1, Tick)
@@ -2136,16 +2253,20 @@ local function OpenStationMap()
     local bodyHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
     local mapBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local mapOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
+    local bgPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local mapCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local selectionCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local wheelScrollBox = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
     local wheelSpacer = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+    local iconPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local iconCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local overlayCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local rightVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local statusText = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
 
     if not (Core.IsValidObj(rootVBox) and Core.IsValidObj(topHBox) and Core.IsValidObj(bodyHBox)
-        and Core.IsValidObj(mapBg) and Core.IsValidObj(mapOverlay) and Core.IsValidObj(mapCanvas)
+        and Core.IsValidObj(mapBg) and Core.IsValidObj(mapOverlay) and Core.IsValidObj(bgPanZoom)
+        and Core.IsValidObj(mapCanvas) and Core.IsValidObj(selectionCanvas)
         and Core.IsValidObj(overlayCanvas) and Core.IsValidObj(rightVBox)) then
         CloseStationMap()
         return
@@ -2153,17 +2274,39 @@ local function OpenStationMap()
 
     TrackedButtons = {}
     CursorDiagLogged = false
+    LastHoveredConvAddr = nil
+    LastHadDynamicOverlay = false
 
     pcall(function()
         mapBg:SetBrushColor(COLORS.WindowBg)
-        mapCanvas:SetClipping(1)
+        mapBg:SetClipping(1)
+        mapOverlay:SetClipping(1)
+        bgPanZoom:SetClipping(0)
+        bgPanZoom:SetVisibility(4) -- SelfHitTestInvisible
+        mapCanvas:SetClipping(0)
+        selectionCanvas:SetClipping(0)
+        selectionCanvas:SetVisibility(4)
         overlayCanvas:SetClipping(1)
         overlayCanvas:SetVisibility(4) -- SelfHitTestInvisible
-        local mcSlot = mapOverlay:AddChildToOverlay(mapCanvas)
+
+        local mcSlot = bgPanZoom:AddChildToCanvas(mapCanvas)
         if Core.IsValidObj(mcSlot) then
-            mcSlot:SetHorizontalAlignment(0) -- Fill
-            mcSlot:SetVerticalAlignment(0)   -- Fill
+            mcSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+            mcSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            mcSlot:SetZOrder(0)
         end
+        local scSlot = bgPanZoom:AddChildToCanvas(selectionCanvas)
+        if Core.IsValidObj(scSlot) then
+            scSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+            scSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            scSlot:SetZOrder(1)
+        end
+        local bpSlot = mapOverlay:AddChildToOverlay(bgPanZoom)
+        if Core.IsValidObj(bpSlot) then
+            bpSlot:SetHorizontalAlignment(0)
+            bpSlot:SetVerticalAlignment(0)
+        end
+
         if Core.IsValidObj(wheelScrollBox) and Core.IsValidObj(wheelSpacer) then
             wheelSpacer:SetHeightOverride(5000.0)
             wheelSpacer:SetVisibility(4)
@@ -2181,10 +2324,18 @@ local function OpenStationMap()
                 wsSlot:SetVerticalAlignment(0)
             end
         end
-        if Core.IsValidObj(iconCanvas) then
-            iconCanvas:SetClipping(1)
+
+        if Core.IsValidObj(iconPanZoom) and Core.IsValidObj(iconCanvas) then
+            iconPanZoom:SetClipping(0)
+            iconPanZoom:SetVisibility(4)
+            iconCanvas:SetClipping(0)
             iconCanvas:SetVisibility(4) -- SelfHitTestInvisible; child icon buttons remain clickable!
-            local icSlot = mapOverlay:AddChildToOverlay(iconCanvas)
+            local icChildSlot = iconPanZoom:AddChildToCanvas(iconCanvas)
+            if Core.IsValidObj(icChildSlot) then
+                icChildSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+                icChildSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            end
+            local icSlot = mapOverlay:AddChildToOverlay(iconPanZoom)
             if Core.IsValidObj(icSlot) then
                 icSlot:SetHorizontalAlignment(0)
                 icSlot:SetVerticalAlignment(0)
@@ -2231,7 +2382,8 @@ local function OpenStationMap()
     end)
     local fitWrap = CreateLabeledButton(win, pc, outer, "Fit", 11, 40.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         FitViewTransformToFloor()
-        RefreshStationMapCanvas()
+        ApplyViewTransform()
+        RefreshDynamicOverlay()
     end)
     local buildWrap = CreateLabeledButton(win, pc, outer, "Build (B)", 11, 74.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, OpenBuildMenuFromStationMap)
     local copyWrap, copyBtn = CreateLabeledButton(win, pc, outer, "Copy", 11, 56.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, CopySelectedMachines)
@@ -2242,7 +2394,7 @@ local function OpenStationMap()
     end)
     local clearWrap, clearBtn = CreateLabeledButton(win, pc, outer, "Clear", 11, 56.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         SelectedMachines = {}
-        RefreshStationMapCanvas()
+        RefreshSelectionLayer()
     end)
     for _, tb in ipairs({ zoomInWrap, zoomOutWrap, fitWrap, buildWrap, copyWrap, rotWrap, clearWrap }) do
         if Core.IsValidObj(tb) then
@@ -2275,14 +2427,14 @@ local function OpenStationMap()
     local floorFrame = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local floorInnerVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorSlotsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "^", 16, 96.0, 44.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "^", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         local total = #CurrentFloors
         if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
             FloorPageTopIdx = math.min(total, FloorPageTopIdx + 1)
             RebuildFloorButtons()
         end
     end)
-    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "v", 16, 96.0, 44.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "v", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
         if FloorPageTopIdx and FloorPageTopIdx > minTop then
             FloorPageTopIdx = math.max(minTop, FloorPageTopIdx - 1)
@@ -2333,8 +2485,7 @@ local function OpenStationMap()
     local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, CommitPendingGhosts)
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
-        UpdateActionBar()
-        RefreshStationMapCanvas()
+        RefreshSelectionLayer()
     end)
 
     if Core.IsValidObj(discardWrap) then
@@ -2385,8 +2536,11 @@ local function OpenStationMap()
         Window = win,
         PC = pc,
         MapBg = mapBg,
+        BgPanZoom = bgPanZoom,
         MapCanvas = mapCanvas,
+        SelectionCanvas = selectionCanvas,
         WheelScrollBox = wheelScrollBox,
+        IconPanZoom = iconPanZoom,
         IconCanvas = iconCanvas,
         OverlayCanvas = overlayCanvas,
         FloorSlotsBox = floorSlotsBox,
@@ -2438,7 +2592,7 @@ local function OpenStationMap()
     ExecuteInGameThreadAfterFrames(2, function()
         if Core.IsValidObj(ActiveMapWin) and MeasureMapCanvasSize() then
             FitViewTransformToFloor()
-            RefreshStationMapCanvas()
+            ApplyViewTransform()
         end
     end)
 end

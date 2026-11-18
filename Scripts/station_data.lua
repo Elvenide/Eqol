@@ -1125,11 +1125,19 @@ function StationData.GetItemIconTexture(item)
     return nil
 end
 
+local BeltMatDiagLogged = false
+local CachedBeltTexByCls = {}
+local CachedBuildablesByCls = nil
+
 local function ResolveTextureValue(val)
     if val == nil then return nil end
     if Core.IsValidObj(val) then return val end
     local res = nil
     pcall(function()
+        if val.ResourceObject and Core.IsValidObj(val.ResourceObject) then
+            res = val.ResourceObject
+            return
+        end
         if type(val.Get) == "function" then
             local g = val:Get()
             if Core.IsValidObj(g) then res = g return end
@@ -1145,10 +1153,153 @@ local function ResolveTextureValue(val)
     return res
 end
 
+local function FindBuildableForMachineClass(machine)
+    if not Core.IsValidObj(machine) then return nil end
+    if not CachedBuildablesByCls then
+        CachedBuildablesByCls = {}
+        pcall(function()
+            local all = FindAllOf("Buildable")
+            if all then
+                for _, b in ipairs(all) do
+                    if Core.IsValidObj(b) then
+                        for _, cProp in ipairs({ "ObjectClass", "MachineClass", "ActorClass", "ConstructionClass", "BuilderClass" }) do
+                            local okC, cls = pcall(function() return b[cProp] end)
+                            if okC and Core.IsValidObj(cls) then
+                                CachedBuildablesByCls[cls:GetAddress()] = b
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    local res = nil
+    pcall(function()
+        local cls = machine:GetClass()
+        if Core.IsValidObj(cls) and CachedBuildablesByCls[cls:GetAddress()] then
+            res = CachedBuildablesByCls[cls:GetAddress()]
+        end
+        if not res then
+            local actor = StationData.GetObjectActor(machine)
+            if Core.IsValidObj(actor) and actor.GetClass then
+                local aCls = actor:GetClass()
+                if Core.IsValidObj(aCls) then res = CachedBuildablesByCls[aCls:GetAddress()] end
+            end
+        end
+    end)
+    return res
+end
+
+function StationData.GetConveyorBeltTexture(machine)
+    if not Core.IsValidObj(machine) then return nil end
+    local clsAddr = nil
+    pcall(function() clsAddr = machine:GetClass():GetAddress() end)
+    if clsAddr and CachedBeltTexByCls[clsAddr] ~= nil then
+        return CachedBeltTexByCls[clsAddr] or nil
+    end
+
+    local actor = StationData.GetObjectActor(machine)
+    if not Core.IsValidObj(actor) then
+        -- Find any live spawned conveyor of the same class
+        pcall(function()
+            local okAll, list = pcall(FindAllOf, "ConveyorBeltObject")
+            if okAll and list then
+                for _, other in ipairs(list) do
+                    if Core.IsValidObj(other) and other:GetClass():GetAddress() == clsAddr then
+                        local oa = StationData.GetObjectActor(other)
+                        if Core.IsValidObj(oa) then actor = oa break end
+                    end
+                end
+            end
+        end)
+    end
+    if not Core.IsValidObj(actor) then return nil end
+
+    local bestTex = nil
+    local bestScore = -999
+    local diagParts = {}
+    local function inspectMat(mat, depth)
+        if not Core.IsValidObj(mat) or depth > 3 then return end
+        pcall(function()
+            local tpvs = mat.TextureParameterValues
+            if tpvs then
+                StationData.ForEachArray(tpvs, function(_, elem)
+                    local st = Core.UnwrapStruct(elem)
+                    if st then
+                        local tex = st.ParameterValue
+                        local pName = "?"
+                        pcall(function()
+                            if st.ParameterInfo and st.ParameterInfo.Name then
+                                pName = st.ParameterInfo.Name:ToString()
+                            end
+                        end)
+                        if Core.IsValidObj(tex) then
+                            local tName = ""
+                            pcall(function() tName = tex:GetFName():ToString() end)
+                            local low = (pName .. " " .. tName):lower()
+                            if not BeltMatDiagLogged then
+                                table.insert(diagParts, string.format("%s=%s", pName, tName))
+                            end
+                            local score = 0
+                            if low:find("normal", 1, true) or low:find("_n", 1, true) or low:find("rough", 1, true)
+                                or low:find("metal", 1, true) or low:find("_orm", 1, true) or low:find("ao", 1, true)
+                                or low:find("_m", 1, true) or low:find("_r", 1, true) or low:find("opacity", 1, true)
+                            then
+                                score = -100
+                            else
+                                if low:find("arrow", 1, true) or low:find("belt", 1, true) then score = score + 50 end
+                                if low:find("albedo", 1, true) or low:find("diffuse", 1, true) or low:find("basecolor", 1, true) or low:find("color", 1, true) or low:find("_d", 1, true) or low:find("_bc", 1, true) then score = score + 25 end
+                                if score == 0 then score = 5 end
+                            end
+                            if score > bestScore then
+                                bestScore = score
+                                bestTex = tex
+                            end
+                        end
+                    end
+                end)
+            end
+            if Core.IsValidObj(mat.Parent) then
+                inspectMat(mat.Parent, depth + 1)
+            end
+        end)
+    end
+
+    pcall(function()
+        local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+        if Core.IsValidObj(smCls) and actor.K2_GetComponentsByClass then
+            local rawComps = actor:K2_GetComponentsByClass(smCls)
+            StationData.ForEachArray(rawComps, function(_, elem)
+                local c = Core.UnwrapArrayElem(elem)
+                if Core.IsValidObj(c) and c.GetNumMaterials and c.GetMaterial then
+                    local nm = math.min(tonumber(c:GetNumMaterials()) or 0, 8)
+                    for mi = 0, nm - 1 do
+                        inspectMat(c:GetMaterial(mi), 1)
+                    end
+                end
+            end)
+        end
+    end)
+
+    if not BeltMatDiagLogged then
+        BeltMatDiagLogged = true
+        Core.Log(string.format("[StationData] BeltMatDiag bestScore=%d params=[%s]", bestScore, table.concat(diagParts, ", ")))
+    end
+
+    if bestScore <= 0 then bestTex = nil end
+    if clsAddr then
+        CachedBeltTexByCls[clsAddr] = bestTex or false
+    end
+    return bestTex
+end
+
 function StationData.GetBuildableIconTexture(machine, buildableOpt)
     local bld = Core.IsValidObj(buildableOpt) and buildableOpt or nil
     if not bld and Core.IsValidObj(machine) then
         pcall(function() bld = machine.Buildable end)
+        if not Core.IsValidObj(bld) then
+            bld = FindBuildableForMachineClass(machine)
+        end
     end
     if Core.IsValidObj(bld) then
         for _, prop in ipairs({ "Icon", "Texture", "IconTexture", "Image", "Thumbnail" }) do
@@ -1540,6 +1691,10 @@ end
 function StationData.InvalidateCaches()
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
+    CachedFootprintsByClass = {}
+    CachedBeltTexByCls = {}
+    CachedBuildablesByCls = nil
+    BeltMatDiagLogged = false
     StationDiagLoggedKey = nil
 end
 
