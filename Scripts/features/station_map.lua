@@ -879,49 +879,34 @@ local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder
     local sz = math.max(12.0, portSize or 20.0)
     local half = sz * 0.5
 
-    -- Semi-transparent black core + inset bevel layers for a rounded-square silhouette
-    local bgMain = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if Core.IsValidObj(bgMain) then
+    local bg = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    if Core.IsValidObj(bg) then
         pcall(function()
-            bgMain:SetVisibility(3)
-            bgMain:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.55 })
+            bg:SetVisibility(3)
+            bg:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.58 })
         end)
-        local s1 = canvas:AddChildToCanvas(bgMain)
-        SetCanvasSlot(s1, px, py, sz - 4.0, sz, 0.5, 0.5, zOrder)
-    end
-    local bgCross = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if Core.IsValidObj(bgCross) then
-        pcall(function()
-            bgCross:SetVisibility(3)
-            bgCross:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.55 })
-        end)
-        local s2 = canvas:AddChildToCanvas(bgCross)
-        SetCanvasSlot(s2, px, py, sz, sz - 4.0, 0.5, 0.5, zOrder)
+        local bs = canvas:AddChildToCanvas(bg)
+        SetCanvasSlot(bs, px, py, sz - 2.0, sz - 2.0, 0.5, 0.5, zOrder)
     end
 
-    -- Thick black dashed border along all 4 edges (2 dashes per edge)
+    -- Thick black dashed border (centered dash per edge leaving corners open)
     local dashCol = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
     local thick = math.max(2.4, sz * 0.14)
-    local dashLen = math.max(4.0, (sz - 6.0) * 0.40)
-    local dashOff = (sz - 4.0) * 0.25
-    for _, sx in ipairs({ px - dashOff, px + dashOff }) do
-        for _, sy in ipairs({ py - half, py + half }) do
-            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(d) then
-                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
-                local ds = canvas:AddChildToCanvas(d)
-                SetCanvasSlot(ds, sx, sy, dashLen, thick, 0.5, 0.5, zOrder + 1)
-            end
+    local dashLen = math.max(6.0, sz * 0.56)
+    for _, sy in ipairs({ py - half, py + half }) do
+        local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        if Core.IsValidObj(d) then
+            pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
+            local ds = canvas:AddChildToCanvas(d)
+            SetCanvasSlot(ds, px, sy, dashLen, thick, 0.5, 0.5, zOrder + 1)
         end
     end
-    for _, sy in ipairs({ py - dashOff, py + dashOff }) do
-        for _, sx in ipairs({ px - half, px + half }) do
-            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(d) then
-                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
-                local ds = canvas:AddChildToCanvas(d)
-                SetCanvasSlot(ds, sx, sy, thick, dashLen, 0.5, 0.5, zOrder + 1)
-            end
+    for _, sx in ipairs({ px - half, px + half }) do
+        local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        if Core.IsValidObj(d) then
+            pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
+            local ds = canvas:AddChildToCanvas(d)
+            SetCanvasSlot(ds, sx, py, thick, dashLen, 0.5, 0.5, zOrder + 1)
         end
     end
 end
@@ -983,22 +968,19 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
             local ts = targetCanvas:AddChildToCanvas(tile)
             SetCanvasSlot(ts, mx, my, pxW, pxH, 0.5, 0.5, zBase)
 
+            local railThick = math.max(2.0, fillH * 0.12)
+            local railBase = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(railBase) then
+                pcall(function() railBase:SetVisibility(3); railBase:SetBrushColor(railCol) end)
+                local rs = tile:AddChildToCanvas(railBase)
+                SetCanvasSlot(rs, pxW * 0.5, pxH * 0.5, fillW, fillH, 0.5, 0.5, 1)
+            end
+
             local bg = Core.CreateRawWidget(PATHS.BorderClass, outer)
             if Core.IsValidObj(bg) then
                 pcall(function() bg:SetVisibility(3); bg:SetBrushColor(bgCol) end)
                 local bs = tile:AddChildToCanvas(bg)
-                SetCanvasSlot(bs, pxW * 0.5, pxH * 0.5, fillW, fillH, 0.5, 0.5, 1)
-            end
-
-            -- Top and bottom dark rail borders (rotated together with tile along belt axis)
-            local railThick = math.max(2.0, fillH * 0.12)
-            for _, ryOff in ipairs({ railThick * 0.5 + 1.0, pxH - railThick * 0.5 - 1.0 }) do
-                local rail = Core.CreateRawWidget(PATHS.BorderClass, outer)
-                if Core.IsValidObj(rail) then
-                    pcall(function() rail:SetVisibility(3); rail:SetBrushColor(railCol) end)
-                    local rs = tile:AddChildToCanvas(rail)
-                    SetCanvasSlot(rs, pxW * 0.5, ryOff, fillW, railThick, 0.5, 0.5, 2)
-                end
+                SetCanvasSlot(bs, pxW * 0.5, pxH * 0.5, fillW, math.max(4.0, fillH - railThick * 2.0), 0.5, 0.5, 2)
             end
 
             -- Two sharp apex-aligned chevrons (>>) pointing along +X (yaw=0)
@@ -1788,7 +1770,7 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 3b. Render accessible & uncovered machine item ports right outside the machine at the external conveyor cell
+    -- 3b. Render accessible & uncovered machine item ports (2/3 inside machine, 1/3 outside, hidden if external cell occupied)
     local occupiedBoxes = {}
     for _, rm in ipairs(RenderedMachines) do
         table.insert(occupiedBoxes, { x = rm.x, y = rm.y, halfW = rm.halfW, halfH = rm.halfH })
@@ -1809,7 +1791,7 @@ RefreshStationMapCanvas = function()
 
     local portBadgeBasePx = math.max(18.0, BASE_CELL_PX * 0.78)
     local portHalfCm = 42.0
-    local portsByExtCell = {}
+    local portsByKey = {}
     for _, rm in ipairs(RenderedMachines) do
         local cn = ""
         pcall(function() cn = rm.machine:GetClass():GetFName():ToString():lower() end)
@@ -1828,17 +1810,17 @@ RefreshStationMapCanvas = function()
                         end
                     end
                     if not covered then
-                        local cellKey = string.format("%.0f,%.0f", p.adjX / 25.0, p.adjY / 25.0)
-                        local existing = portsByExtCell[cellKey]
+                        local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
+                        local existing = portsByKey[cellKey]
                         if not existing then
                             existing = {
-                                x = p.adjX,
-                                y = p.adjY,
+                                x = p.px,
+                                y = p.py,
                                 isInput = p.isInput == true,
                                 isOutput = p.isOutput == true,
                                 machineName = rm.displayName,
                             }
-                            portsByExtCell[cellKey] = existing
+                            portsByKey[cellKey] = existing
                         else
                             if p.isInput then existing.isInput = true end
                             if p.isOutput then existing.isOutput = true end
@@ -1848,7 +1830,7 @@ RefreshStationMapCanvas = function()
             end
         end
     end
-    for _, pe in pairs(portsByExtCell) do
+    for _, pe in pairs(portsByKey) do
         local pmx, pmy = WorldToBaseCanvas(pe.x, pe.y)
         RenderUnconnectedItemPort(outer, MapUI.MapCanvas, pmx, pmy, portBadgeBasePx, 22)
         table.insert(RenderedPorts, {
