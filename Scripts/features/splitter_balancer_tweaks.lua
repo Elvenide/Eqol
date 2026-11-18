@@ -253,25 +253,16 @@ local function GetCDOFromUClass(uclass)
     return Core.GetCDO(pkg .. ".Default__" .. clsName)
 end
 
-local function LogFrameAndEnvOnce(simObj)
-    if LoggedKeys["frame_diag"] or not Core.IsValidObj(simObj) then return end
-    if not simObj.GetFrame then return end
-    local okF, frame = pcall(function() return simObj:GetFrame() end)
-    if not okF or not Core.IsValidObj(frame) then return end
-    LoggedKeys["frame_diag"] = true
+local LastWorldAddr = nil
 
-    pcall(function()
-        if frame.GetCollisionEnv then
-            local env = frame:GetCollisionEnv()
-            if Core.IsValidObj(env) and env.Colliders then
-                local num = env.Colliders.GetArrayNum and env.Colliders:GetArrayNum() or -1
-                local c1 = (num > 0) and env.Colliders[1] or nil
-                local cid = c1 and pcall(function() return c1.ColliderID end) and tostring(c1.ColliderID) or "?"
-                Core.Log(string.format("[SplitterBalancerTweaks] Frame[%s] Env[%s] Colliders.Num=%s first.ColliderID=%s",
-                    SafeClassName(frame), SafeClassName(env), tostring(num), cid))
-            end
-        end
-    end)
+local function GetCurrentWorldAddr()
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then return nil end
+    local okW, w = pcall(function() return pc:GetWorld() end)
+    if okW and Core.IsValidObj(w) then
+        return w:GetAddress()
+    end
+    return nil
 end
 
 local function EnsureSimCDODisabled(simObj)
@@ -286,13 +277,7 @@ local function EnsureSimCDODisabled(simObj)
             local okVal, prev = pcall(function() return cdo.bColliderEnabled end)
             if okVal and prev == true then
                 cdo.bColliderEnabled = false
-                Core.Log(string.format("[SplitterBalancerTweaks] Set CDO Default__%s.bColliderEnabled = false (was true)", clsName))
-            else
-                Core.Log(string.format("[SplitterBalancerTweaks] CDO Default__%s.bColliderEnabled=%s", clsName, tostring(prev)))
             end
-        elseif not LoggedKeys["cdo_miss_" .. clsName] then
-            LoggedKeys["cdo_miss_" .. clsName] = true
-            Core.Log(string.format("[SplitterBalancerTweaks] Could not resolve CDO for %s", clsName))
         end
     end)
 end
@@ -427,8 +412,11 @@ local function CleanTrackedEnvs()
                 end
 
                 ProcessedEnvNums[envAddr] = num
-                Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] data=0x%X num=%d matched=%d disabled=%d alreadyOff=%d err=%d %s %s",
-                    tostring(envAddr), dataAddr, num, matched, modified, alreadyOff, readErr, sampleMsg or "", firstErr or ""))
+                if readErr > 0 and not LoggedKeys["env_err"] then
+                    LoggedKeys["env_err"] = true
+                    Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] collider write err=%d (%s)",
+                        tostring(envAddr), readErr, firstErr or "?"))
+                end
             end)
         end
     end
@@ -437,7 +425,6 @@ end
 local function DisableSimCollider(simObj, countsByClass)
     if not Core.IsValidObj(simObj) then return end
     EnsureSimCDODisabled(simObj)
-    LogFrameAndEnvOnce(simObj)
     TrackSimEnv(simObj)
     local okVal, enabled = pcall(function() return simObj.bColliderEnabled end)
     if okVal and enabled == true then
@@ -533,13 +520,18 @@ local function EnsureTargetHeight(actor)
                 local sx, sy, sz = 1.0, 1.0, 1.0
                 local oz, ez = 0.0, 0.0
                 pcall(function()
-                    local rl = c.RelativeLocation
+                    -- Always read baseline transform from the unmodified archetype/template component
+                    -- so scaling can never compound across restarts or cache refreshes.
+                    local src = c.GetArchetype and c:GetArchetype() or nil
+                    if not Core.IsValidObj(src) then src = c end
+
+                    local rl = src.RelativeLocation or c.RelativeLocation
                     if rl then
                         rx = tonumber(rl.X) or 0.0
                         ry = tonumber(rl.Y) or 0.0
                         rz = tonumber(rl.Z) or 0.0
                     end
-                    local rs = c.RelativeScale3D
+                    local rs = src.RelativeScale3D or c.RelativeScale3D
                     if rs then
                         sx = tonumber(rs.X) or 1.0
                         sy = tonumber(rs.Y) or 1.0
@@ -573,15 +565,6 @@ local function EnsureTargetHeight(actor)
                     TargetLocZ = targetLz,
                 }
                 OrigMeshState[cAddr] = st
-
-                local clsKey = "mesh:" .. SafeClassName(actor) .. ":" .. SafeName(c)
-                if not LoggedKeys[clsKey] then
-                    LoggedKeys[clsKey] = true
-                    Core.Log(string.format(
-                        "[SplitterBalancerTweaks] Scale[%s.%s] sm=%s origZ=(loc=%.1f,scale=%.2f) -> newZ=(loc=%.1f,scale=%.2f)",
-                        SafeClassName(actor), SafeName(c), SafeName(c.StaticMesh),
-                        rz, sz, targetLz, targetSz))
-                end
             end
 
             pcall(function()
@@ -645,11 +628,20 @@ local function ScanAndApplyTweaks()
         end
     end
 
-    for clsName, cnt in pairs(disabledCounts) do
-        Core.Log(string.format("[SplitterBalancerTweaks] Disabled bColliderEnabled on %s (count=%d)", clsName, cnt))
-    end
-
     CleanTrackedEnvs()
+end
+
+local function ResetWorldCaches()
+    OrigMeshState = {}
+    ProcessedHeightActors = {}
+    ProcessedCollisionActors = {}
+    WalkthroughSimIDs = {}
+    TrackedSimFrames = {}
+    TrackedEnvs = {}
+    ProcessedEnvNums = {}
+    CachedAnchors = {}
+    RegisteredSlotProps = {}
+    NeedsEnvClean = false
 end
 
 local function StartPoll()
@@ -685,28 +677,35 @@ local function RegisterMachineObjectHook()
 end
 
 function Feature.Init()
+    LastWorldAddr = GetCurrentWorldAddr()
     RegisterMachineObjectHook()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (CDO+instance bColliderEnabled=false, Env.Colliders UObject slot override, 2/3 height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized.")
 end
 
 function Feature.OnClientRestart()
-    OrigMeshState = {}
-    ProcessedHeightActors = {}
-    ProcessedCollisionActors = {}
-    WalkthroughSimIDs = {}
-    TrackedSimFrames = {}
-    TrackedEnvs = {}
-    ProcessedEnvNums = {}
-    CachedAnchors = {}
-    RegisteredSlotProps = {}
-    NeedsEnvClean = false
+    local curWorld = GetCurrentWorldAddr()
+    if curWorld == nil or curWorld ~= LastWorldAddr then
+        LastWorldAddr = curWorld
+        ResetWorldCaches()
+    end
+end
+
+function Feature.OnMapLoad()
+    LastWorldAddr = GetCurrentWorldAddr()
+    ResetWorldCaches()
 end
 
 function Feature.PruneCaches()
     for addr, st in pairs(OrigMeshState) do
         if not st or not Core.IsValidObj(st.Comp) then
             OrigMeshState[addr] = nil
+        end
+    end
+    for addr, _ in pairs(CachedAnchors) do
+        local entry = CachedAnchors[addr]
+        if not entry or not Core.IsValidObj(entry.obj) then
+            CachedAnchors[addr] = nil
         end
     end
 end

@@ -39,8 +39,20 @@ local LastElevatorScan = -10.0
 local LastPortRefresh  = -10.0
 local LoggedShafts     = {}
 local PollActive       = false
+local LastWorldAddr    = nil
+
+local function GetCurrentWorldAddr()
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then return nil end
+    local okW, w = pcall(function() return pc:GetWorld() end)
+    if okW and Core.IsValidObj(w) then
+        return w:GetAddress()
+    end
+    return nil
+end
 
 local function LogOnce(key, fmt, ...)
+    if type(key) ~= "string" or key:sub(1, 4) ~= "err:" then return end
     if LoggedShafts[key] then return end
     LoggedShafts[key] = true
     local okMsg, msg = pcall(string.format, fmt, ...)
@@ -1056,12 +1068,7 @@ local function StartPoll()
     ExecuteInGameThreadWithDelay(33, Tick)
 end
 
-function Feature.Init()
-    StartPoll()
-    Core.Log("[ElevatorLabels] Initialized (3D WidgetComponent ItemColumns port icons).")
-end
-
-function Feature.OnClientRestart()
+local function ResetWorldCaches()
     DestroyIconPool()
     CachedElevActors = {}
     CachedObjToActor = {}
@@ -1069,6 +1076,25 @@ function Feature.OnClientRestart()
     LoggedShafts = {}
     LastElevatorScan = -10.0
     LastPortRefresh = -10.0
+end
+
+function Feature.Init()
+    LastWorldAddr = GetCurrentWorldAddr()
+    StartPoll()
+    Core.Log("[ElevatorLabels] Initialized (3D WidgetComponent ItemColumns port icons).")
+end
+
+function Feature.OnClientRestart()
+    local curWorld = GetCurrentWorldAddr()
+    if curWorld == nil or curWorld ~= LastWorldAddr then
+        LastWorldAddr = curWorld
+        ResetWorldCaches()
+    end
+end
+
+function Feature.OnMapLoad()
+    LastWorldAddr = GetCurrentWorldAddr()
+    ResetWorldCaches()
 end
 
 function Feature.PruneCaches()

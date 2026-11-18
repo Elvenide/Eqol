@@ -434,15 +434,6 @@ local function GetActorPowerInfo(actor)
     end
     ActorBlockInfoCache[aAddr] = { actor = actor, info = info, clsAddr = clsAddr, clsName = clsName }
 
-    if clsAddr == 0 or not LoggedActorClasses[clsAddr] then
-        if clsAddr ~= 0 then LoggedActorClasses[clsAddr] = true end
-        Core.Log(string.format(
-            "[DesignerStats Step3] actorCls=%s via=%s blockCDO=%s machSrc=%s machCDO=%s -> nonSolar=%.1f solarBase=%.1f cons=%.1f",
-            clsName, tostring(resolveVia), SafeObjName(blockCDO), tostring(machSrc), tostring(machName),
-            info.nonSolarGen, info.solarBaseGen, info.cons
-        ))
-    end
-
     return info, clsName
 end
 
@@ -746,7 +737,6 @@ local function ComputeDesignerPower(designerHud, st)
     local previewPendingGen, previewPendingCons = 0.0, 0.0
     local previewLoadedGen, previewLoadedCons = 0.0, 0.0
     local previewCount, pendingCount, loadedCount = 0, 0, 0
-    local pendingByClass = {}
 
     local okPreview, previewBlocks = pcall(function()
         if Core.IsValidObj(designer.Visualizer) then
@@ -765,7 +755,7 @@ local function ComputeDesignerPower(designerHud, st)
                 local actor = (elem ~= nil) and Core.UnwrapArrayElem(elem) or nil
                 if Core.IsValidObj(actor) then
                     previewCount = previewCount + 1
-                    local info, clsName = GetActorPowerInfo(actor)
+                    local info = GetActorPowerInfo(actor)
                     local isPending = IsActorDesignerPending(actor)
 
                     local g, c = EvalPowerInfo(info, solarEfficiency)
@@ -773,14 +763,6 @@ local function ComputeDesignerPower(designerHud, st)
                         pendingCount = pendingCount + 1
                         previewPendingGen = previewPendingGen + g
                         previewPendingCons = previewPendingCons + c
-                        local pb = pendingByClass[clsName]
-                        if not pb then
-                            pb = { count = 0, gen = 0.0, cons = 0.0 }
-                            pendingByClass[clsName] = pb
-                        end
-                        pb.count = pb.count + 1
-                        pb.gen = pb.gen + g
-                        pb.cons = pb.cons + c
                     else
                         loadedCount = loadedCount + 1
                         previewLoadedGen = previewLoadedGen + g
@@ -804,20 +786,15 @@ local function ComputeDesignerPower(designerHud, st)
             st.InitialLoadedCons = previewLoadedCons
             st.InitialLoadedCount = loadedCount
             st.ResetBaseline = false
-            Core.Log(string.format(
-                "[DesignerStats Step2] Baseline set: loaded=%d gen=%.1f cons=%.1f (pg=%.1f/%.1f)",
-                loadedCount, st.InitialLoadedGen, st.InitialLoadedCons, pgGen, pgCons
-            ))
         end
     end
 
     local totalGen, totalCons = 0.0, 0.0
-    local deltaLoadedGen, deltaLoadedCons = 0.0, 0.0
     if isStationFrame then
         local baseLoadedGen = st and st.InitialLoadedGen or previewLoadedGen
         local baseLoadedCons = st and st.InitialLoadedCons or previewLoadedCons
-        deltaLoadedGen = previewLoadedGen - baseLoadedGen
-        deltaLoadedCons = previewLoadedCons - baseLoadedCons
+        local deltaLoadedGen = previewLoadedGen - baseLoadedGen
+        local deltaLoadedCons = previewLoadedCons - baseLoadedCons
         totalGen = math.max(0.0, pgGen + deltaLoadedGen + previewPendingGen)
         totalCons = math.max(0.0, pgCons + deltaLoadedCons + previewPendingCons)
     else
@@ -825,26 +802,8 @@ local function ComputeDesignerPower(designerHud, st)
         totalCons = previewLoadedCons + previewPendingCons
     end
 
-    local pendSummaryParts = {}
-    for clsName, pb in pairs(pendingByClass) do
-        table.insert(pendSummaryParts, string.format("%sx%d(+%.1f/-%.1f)", clsName, pb.count, pb.gen, pb.cons))
-    end
-    table.sort(pendSummaryParts)
-    local pendSummary = (#pendSummaryParts > 0) and table.concat(pendSummaryParts, ", ") or "none"
-
-    local diagKey = string.format(
-        "frame=%s(station=%s) solarEff=%.3f | preview=%d(loaded=%d,pend=%d) | pg=%.1f/%.1f loadedDelta=%.1f/%.1f pend=%.1f/%.1f [%s] => display=%.1f/%.1f",
-        frameClsName, tostring(isStationFrame), solarEfficiency,
-        previewCount, loadedCount, pendingCount, pgGen, pgCons, deltaLoadedGen, deltaLoadedCons,
-        previewPendingGen, previewPendingCons, pendSummary, totalGen, totalCons
-    )
-    local diag = string.format(
-        "[DesignerStats Step1-4 trigger=%s] frame=%s(station=%s) solarEff=%.3f[%s] | preview=%d(loaded=%d,pend=%d) | pg=%.1f/%.1f loadedDelta=%.1f/%.1f pend=%.1f/%.1f [%s] => display=%.1f/%.1f",
-        tostring(LastTriggerSource), frameClsName, tostring(isStationFrame), solarEfficiency, solarEffSource,
-        previewCount, loadedCount, pendingCount, pgGen, pgCons, deltaLoadedGen, deltaLoadedCons,
-        previewPendingGen, previewPendingCons, pendSummary, totalGen, totalCons
-    )
-    return totalGen, totalCons, diag, diagKey
+    return totalGen, totalCons
+end
 end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
@@ -1071,15 +1030,12 @@ RefreshDesignerPowerStats = function(hud)
         EnsureDesignerWatcher()
     end
 
-    local gen, cons, diag, diagKey = ComputeDesignerPower(hud, st)
-    if st.LastGen ~= gen or st.LastCons ~= cons or st.LastStepDiag ~= diagKey then
-        st.LastGen = gen
-        st.LastCons = cons
-        st.LastStepDiag = diagKey
-        if diag then
-            Core.Log(diag)
-        end
+    local gen, cons = ComputeDesignerPower(hud, st)
+    if st.LastGen == gen and st.LastCons == cons then
+        return
     end
+    st.LastGen = gen
+    st.LastCons = cons
     pcall(function()
         st.PowerText:SetText(Core.MakeText(string.format("%s / %s", FormatPower(cons), FormatPower(gen))))
         local lblCol = st.LabelColor or COLORS.GoldAccent
@@ -1099,7 +1055,6 @@ end
 
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
-        Core.Log("[DesignerStats WatchWidget] WBP_DesignerHUD_C constructed")
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(150, function()
             if Core.IsValidObj(hud) and not InjectedDesigners[hud:GetAddress()] and IsHudVisible(hud) then
