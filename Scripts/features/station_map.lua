@@ -44,9 +44,9 @@ local DEFAULT_CANVAS_H = 740.0
 
 local COLORS = {
     WindowBg      = { R = 0.024, G = 0.032, B = 0.044, A = 0.96 },
-    GridLine      = { R = 0.140, G = 0.175, B = 0.220, A = 0.45 },
-    GridMajor     = { R = 0.200, G = 0.250, B = 0.315, A = 0.55 },
-    ModuleFill    = { R = 0.075, G = 0.100, B = 0.135, A = 0.96 },
+    GridLine      = { R = 0.240, G = 0.300, B = 0.380, A = 0.28 },
+    GridMajor     = { R = 0.340, G = 0.430, B = 0.540, A = 0.48 },
+    ModuleFill    = { R = 0.085, G = 0.115, B = 0.155, A = 0.92 },
     ModuleBorder  = { R = 0.520, G = 0.620, B = 0.740, A = 0.92 },
     Assembler     = { R = 0.150, G = 0.560, B = 0.760, A = 0.92 },
     Container     = { R = 0.780, G = 0.560, B = 0.140, A = 0.92 },
@@ -99,6 +99,9 @@ local ViewTransform = {
 -- Rendered Floor Cache (for fast hit-testing, box select, and hover without rebuilding widgets)
 local RenderedMachines = {}  -- list of { machine, x, y, z, yaw, cellsX, cellsY, halfW, halfH, cat, buildable, recipe, actorClsPath, displayName }
 local RenderedConveyors = {} -- subset of RenderedMachines where cat == "Conveyor"
+local RenderedGridLines = {} -- { border, slot, isVertical, spanOther, isMajor4, isMajor8 }
+local LastGridTier = nil
+local LastGridZoomRatio = nil
 local FloorIconButtons = {}  -- mAddr -> { btn, widget }
 local FloorRailButtons = {}  -- list of WBP_Button_C instances in floor selector
 local TrackedButtons = {}    -- list of static WBP_Button_C instances for hover check
@@ -196,6 +199,48 @@ local function WorldToBaseCanvas(wx, wy)
     return wx * BASE_PX_PER_CM, wy * BASE_PX_PER_CM
 end
 
+local function UpdateGridAppearanceForZoom(zoomRatio)
+    if #RenderedGridLines == 0 or not zoomRatio or zoomRatio <= 0.001 then return end
+    local screenCellPx = CELL_CM * ViewTransform.scale
+    local tier = (screenCellPx >= 10.0) and 1 or ((screenCellPx >= 3.8) and 2 or 3)
+    local tierChanged = (tier ~= LastGridTier)
+    local ratioChanged = (not LastGridZoomRatio) or (math.abs(zoomRatio - LastGridZoomRatio) / math.max(0.01, LastGridZoomRatio) > 0.08)
+    if not tierChanged and not ratioChanged then return end
+
+    LastGridTier = tier
+    LastGridZoomRatio = zoomRatio
+
+    local minorThick = math.max(1.05, 1.1) / zoomRatio
+    local majorThick = math.max(1.55, 1.7) / zoomRatio
+
+    for _, gl in ipairs(RenderedGridLines) do
+        local show
+        if tier == 1 then
+            show = true
+        elseif tier == 2 then
+            show = gl.isMajor4
+        else
+            show = gl.isMajor8
+        end
+        if Core.IsValidObj(gl.border) then
+            if tierChanged then
+                pcall(function() gl.border:SetVisibility(show and 3 or 1) end)
+            end
+            if show and Core.IsValidObj(gl.slot) then
+                local isEmph = (tier == 1 and gl.isMajor4) or (tier >= 2 and gl.isMajor8)
+                local thick = isEmph and majorThick or minorThick
+                pcall(function()
+                    if gl.isVertical then
+                        gl.slot:SetSize({ X = thick, Y = gl.spanOther })
+                    else
+                        gl.slot:SetSize({ X = gl.spanOther, Y = thick })
+                    end
+                end)
+            end
+        end
+    end
+end
+
 local function ApplyViewTransform()
     if not MapUI then return end
     local zoomRatio = ViewTransform.scale / BASE_PX_PER_CM
@@ -213,6 +258,7 @@ local function ApplyViewTransform()
             end)
         end
     end
+    UpdateGridAppearanceForZoom(zoomRatio)
 end
 
 local function CanvasToWorld(mx, my)
@@ -431,8 +477,10 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
     local typeKey, tier, dispName = StationData.GetMachineTypeAndTier(machine, buildableOpt)
     local bgCol, borderCol = GetShadedColorForTypeAndTier(typeKey, tier)
     local tex = nil
+    local gotBeltTex = false
     if cat == "Conveyor" and Core.IsValidObj(machine) then
         tex = StationData.GetConveyorBeltTexture(machine)
+        gotBeltTex = Core.IsValidObj(tex)
     end
     if not Core.IsValidObj(tex) then
         tex = StationData.GetBuildableIconTexture(machine, buildableOpt)
@@ -465,7 +513,7 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
         typeKey = typeKey,
         tier = tier,
         directional = directional,
-        fullTileTex = (cat == "Conveyor"),
+        fullTileTex = gotBeltTex,
     }
     if clsKey then
         MachineSpriteCache[clsKey] = entry
@@ -1186,6 +1234,9 @@ RefreshStationMapCanvas = function()
     ClearCanvasChildren(MapUI.IconCanvas)
     RenderedMachines = {}
     RenderedConveyors = {}
+    RenderedGridLines = {}
+    LastGridTier = nil
+    LastGridZoomRatio = nil
     FloorIconButtons = {}
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -1210,16 +1261,41 @@ RefreshStationMapCanvas = function()
         if b.cy + b.ey > bMaxY then bMaxY = b.cy + b.ey end
     end
     local padCm = 2400.0
-    local gridMinX = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM) * CELL_CM + ViewTransform.gridOriginX
-    local gridMaxX = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM) * CELL_CM + ViewTransform.gridOriginX
-    local gridMinY = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM) * CELL_CM + ViewTransform.gridOriginY
-    local gridMaxY = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM) * CELL_CM + ViewTransform.gridOriginY
-    local totalCols = math.floor((gridMaxX - gridMinX) / CELL_CM + 0.5)
-    local totalRows = math.floor((gridMaxY - gridMinY) / CELL_CM + 0.5)
-    local stepCm = CELL_CM
-    if totalCols > 140 or totalRows > 140 then
-        stepCm = CELL_CM * 2.0
+    local minCol = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM)
+    local maxCol = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM)
+    local minRow = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM)
+    local maxRow = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM)
+    -- Expand narrow axis symmetrically so tall or wide stations still show a balanced square field
+    if (maxCol - minCol) < 100 then
+        local extra = math.ceil((100 - (maxCol - minCol)) * 0.5)
+        minCol = minCol - extra
+        maxCol = maxCol + extra
     end
+    if (maxRow - minRow) < 80 then
+        local extra = math.ceil((80 - (maxRow - minRow)) * 0.5)
+        minRow = minRow - extra
+        maxRow = maxRow + extra
+    end
+    -- Align grid range to multiples of 8 so 4x4 and 8x8 zoom-out squares stay symmetrical
+    minCol = math.floor(minCol / 8) * 8
+    maxCol = math.ceil(maxCol / 8) * 8
+    minRow = math.floor(minRow / 8) * 8
+    maxRow = math.ceil(maxRow / 8) * 8
+
+    local totalCols = maxCol - minCol
+    local totalRows = maxRow - minRow
+    local maxDim = math.max(totalCols, totalRows)
+    local stepCells = 1
+    if maxDim > 440 then
+        stepCells = 4
+    elseif maxDim > 220 then
+        stepCells = 2
+    end
+
+    local gridMinX = ViewTransform.gridOriginX + minCol * CELL_CM
+    local gridMaxX = ViewTransform.gridOriginX + maxCol * CELL_CM
+    local gridMinY = ViewTransform.gridOriginY + minRow * CELL_CM
+    local gridMaxY = ViewTransform.gridOriginY + maxRow * CELL_CM
 
     local bGridMinX, bGridMinY = WorldToBaseCanvas(gridMinX, gridMinY)
     local bGridMaxX, bGridMaxY = WorldToBaseCanvas(gridMaxX, gridMaxY)
@@ -1228,43 +1304,44 @@ RefreshStationMapCanvas = function()
     local gridMidX = (bGridMinX + bGridMaxX) * 0.5
     local gridMidY = (bGridMinY + bGridMaxY) * 0.5
 
-    -- 1. Full static 1x1 grid lines (vertical + horizontal) inside PanZoomPanel
-    local gx = gridMinX
-    local maxLines = 160
-    local drawnV = 0
-    while gx <= gridMaxX and drawnV < maxLines do
-        drawnV = drawnV + 1
-        local bmx = WorldToBaseCanvas(gx, 0.0)
-        local line = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(line) then
-            local isMajor = (math.abs(((gx - ViewTransform.gridOriginX) / CELL_CM) % 4) < 0.01)
-            pcall(function()
-                line:SetVisibility(3)
-                line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine)
-            end)
-            local s = MapUI.MapCanvas:AddChildToCanvas(line)
-            SetCanvasSlot(s, bmx, gridMidY, isMajor and 2.2 or 1.4, gridSpanH, 0.5, 0.5, 1)
+    local function addGridAxisLines(startIdx, endIdx, isVertical, spanOther, midOther)
+        local maxLines = 240
+        local drawn = 0
+        local originAxis = isVertical and ViewTransform.gridOriginX or ViewTransform.gridOriginY
+        for idx = startIdx, endIdx, stepCells do
+            drawn = drawn + 1
+            if drawn > maxLines then break end
+            local wPos = originAxis + idx * CELL_CM
+            local bx, by = WorldToBaseCanvas(isVertical and wPos or 0.0, isVertical and 0.0 or wPos)
+            local posX = isVertical and bx or midOther
+            local posY = isVertical and midOther or by
+            local isMajor4 = ((idx % 4) == 0)
+            local isMajor8 = ((idx % 8) == 0)
+            local line = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(line) then
+                pcall(function()
+                    line:SetVisibility(3)
+                    line:SetBrushColor(isMajor4 and COLORS.GridMajor or COLORS.GridLine)
+                end)
+                local s = MapUI.MapCanvas:AddChildToCanvas(line)
+                local initThick = isMajor4 and 2.2 or 1.4
+                SetCanvasSlot(s, posX, posY, isVertical and initThick or spanOther, isVertical and spanOther or initThick, 0.5, 0.5, 3)
+                table.insert(RenderedGridLines, {
+                    border = line,
+                    slot = s,
+                    isVertical = isVertical,
+                    spanOther = spanOther,
+                    isMajor4 = isMajor4,
+                    isMajor8 = isMajor8,
+                })
+            end
         end
-        gx = gx + stepCm
     end
 
-    local gy = gridMinY
-    local drawnH = 0
-    while gy <= gridMaxY and drawnH < maxLines do
-        drawnH = drawnH + 1
-        local _, bmy = WorldToBaseCanvas(0.0, gy)
-        local line = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(line) then
-            local isMajor = (math.abs(((gy - ViewTransform.gridOriginY) / CELL_CM) % 4) < 0.01)
-            pcall(function()
-                line:SetVisibility(3)
-                line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine)
-            end)
-            local s = MapUI.MapCanvas:AddChildToCanvas(line)
-            SetCanvasSlot(s, gridMidX, bmy, gridSpanW, isMajor and 2.2 or 1.4, 0.5, 0.5, 1)
-        end
-        gy = gy + stepCm
-    end
+    -- 1. Full static square cell grid lines (Z=3, above ModuleFill so grid is visible across module tiles)
+    addGridAxisLines(minCol, maxCol, true, gridSpanH, gridMidY)
+    addGridAxisLines(minRow, maxRow, false, gridSpanW, gridMidX)
+    UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
 
     -- 2. Render station modules (interior fill + crisp 4-edge module borders)
     for _, pe in ipairs(floor.platforms) do
@@ -2178,6 +2255,9 @@ CloseStationMap = function()
     WaitingForBuildMenuSelection = false
     RenderedMachines = {}
     RenderedConveyors = {}
+    RenderedGridLines = {}
+    LastGridTier = nil
+    LastGridZoomRatio = nil
     FloorIconButtons = {}
     FloorRailButtons = {}
     TrackedButtons = {}
