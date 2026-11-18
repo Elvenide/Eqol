@@ -439,7 +439,7 @@ local function ForEachCollection(col, fn)
     if not col then return end
     if type(col) == "table" then
         for k, v in pairs(col) do
-            fn(k, v)
+            pcall(fn, k, v)
         end
         return
     end
@@ -450,14 +450,18 @@ local function ForEachCollection(col, fn)
         for i = 1, num do
             local okE, elem = pcall(function() return col[i] end)
             if okE and elem ~= nil then
-                fn(i, elem)
+                local okFn, errFn = pcall(fn, i, elem)
+                if not okFn and not LoggedClasses["fe_err"] then
+                    LoggedClasses["fe_err"] = true
+                    Core.Log("[SplitterBalancerTweaks] ForEachCollection(array) cb err: " .. tostring(errFn))
+                end
             end
         end
         return
     end
     local okFE = pcall(function()
         col:ForEach(function(k, v)
-            fn(k, v)
+            pcall(fn, k, v)
         end)
     end)
     if okFE then return end
@@ -466,7 +470,7 @@ local function ForEachCollection(col, fn)
         for i = 1, len do
             local okE, elem = pcall(function() return col[i] end)
             if okE and elem ~= nil then
-                fn(i, elem)
+                pcall(fn, i, elem)
             end
         end
     end
@@ -541,10 +545,13 @@ local function RecordTargetSimObject(simObj, simIds, directColliderObjs, collide
         if simObj.ID ~= nil then
             simIds[tostring(simObj.ID)] = true
         end
+        if Core.IsValidObj(simObj.Buildable) then
+            LogObjectPropsOnce(simObj.Buildable, "buildable")
+        end
     end)
 
-    for _, fieldName in ipairs({ "Colliders", "ExtraColliders" }) do
-        local okArr, arr = pcall(function() return simObj[fieldName] end)
+    local function InspectArr(ownerObj, ownerLabel, fieldName)
+        local okArr, arr = pcall(function() return ownerObj[fieldName] end)
         if okArr and arr then
             local count = 0
             local sampleDesc = nil
@@ -573,14 +580,22 @@ local function RecordTargetSimObject(simObj, simIds, directColliderObjs, collide
                     end
                 end
             end)
-            local logK = "simarr:" .. simCls .. ":" .. fieldName
+            local logK = "simarr:" .. ownerLabel .. ":" .. fieldName
             if not LoggedClasses[logK] then
                 LoggedClasses[logK] = true
                 Core.Log(string.format("[SplitterBalancerTweaks] SimArr[%s.%s] count=%d sample=(%s)",
-                    simCls, fieldName, count, tostring(sampleDesc or "none")))
+                    ownerLabel, fieldName, count, tostring(sampleDesc or "none")))
             end
         end
     end
+
+    InspectArr(simObj, simCls, "Colliders")
+    InspectArr(simObj, simCls, "ExtraColliders")
+    pcall(function()
+        if Core.IsValidObj(simObj.Buildable) then
+            InspectArr(simObj.Buildable, simCls .. ".Buildable", "Colliders")
+        end
+    end)
 end
 
 local function CollectTargetSimColliders(actorsList)
@@ -681,8 +696,11 @@ local function CollectAllCollisionNodes()
                 local envKey = "env_sum:" .. tostring(idx)
                 if not LoggedClasses[envKey] then
                     LoggedClasses[envKey] = true
+                    local nextIdStr, parentStr = "?", "?"
+                    pcall(function() nextIdStr = tostring(env.NextID) end)
+                    pcall(function() parentStr = SafeClassName(env.ParentEnvironment) end)
                     Core.Log(string.format("[SplitterBalancerTweaks] Env#%d (NextID=%s Parent=%s): %s",
-                        idx, tostring(env.NextID), SafeClassName(env.ParentEnvironment), table.concat(summaryParts, " | ")))
+                        idx, nextIdStr, parentStr, table.concat(summaryParts, " | ")))
                 end
             end
         end
@@ -758,6 +776,29 @@ local function ProcessRefDiagnostics()
             local ok, list = pcall(FindAllOf, clsShort)
             if ok and list and #list > 0 and Core.IsValidObj(list[1]) then
                 LogActorCollisionDiag(list[1], "ref")
+                local refActor = list[1]
+                pcall(function()
+                    local rs = refActor.GetSimulationObject and refActor:GetSimulationObject() or refActor.SimulationObject
+                    if not Core.IsValidObj(rs) and refActor.K2_GetComponentsByClass then
+                        local primCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
+                        if Core.IsValidObj(primCls) then
+                            local comps, n = ExtractArray(refActor:K2_GetComponentsByClass(primCls))
+                            for i = 1, n do
+                                local c = comps[i]
+                                if Core.IsValidObj(c) then
+                                    local cs = c.GetSimulationObject and c:GetSimulationObject() or c.SimulationObject
+                                    if Core.IsValidObj(cs) then rs = cs; break end
+                                end
+                            end
+                        end
+                    end
+                    if Core.IsValidObj(rs) then
+                        LogObjectPropsOnce(rs, "refsim")
+                        if Core.IsValidObj(rs.Buildable) then
+                            LogObjectPropsOnce(rs.Buildable, "refbuildable")
+                        end
+                    end
+                end)
             end
         end
     end
@@ -767,6 +808,17 @@ local function ScanAndApplyTweaks()
     ProcessRefDiagnostics()
     local pawn, pawnComps, ignoreChannels = GetPawnCollisionContext()
     local walkthroughActors = {}
+
+    for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
+        local ok, list = pcall(FindAllOf, clsShort)
+        if ok and list then
+            for _, actor in ipairs(list) do
+                if Core.IsValidObj(actor) then
+                    EnsureTargetHeight(actor)
+                end
+            end
+        end
+    end
 
     for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
         local ok, list = pcall(FindAllOf, clsShort)
@@ -790,24 +842,17 @@ local function ScanAndApplyTweaks()
         local simIds, directColliderObjs, colliderIds = CollectTargetSimColliders(walkthroughActors)
         StripTargetsFromCollisionNodes(simIds, directColliderObjs, colliderIds)
     end
-
-    for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
-        local ok, list = pcall(FindAllOf, clsShort)
-        if ok and list then
-            for _, actor in ipairs(list) do
-                if Core.IsValidObj(actor) then
-                    EnsureTargetHeight(actor)
-                end
-            end
-        end
-    end
 end
 
 local function StartPoll()
     if PollActive then return end
     PollActive = true
     local function Tick()
-        pcall(ScanAndApplyTweaks)
+        local okTick, errTick = pcall(ScanAndApplyTweaks)
+        if not okTick and not LoggedClasses["tick_err"] then
+            LoggedClasses["tick_err"] = true
+            Core.Log("[SplitterBalancerTweaks] ScanAndApplyTweaks err: " .. tostring(errTick))
+        end
         ExecuteInGameThreadWithDelay(math.floor(SCAN_PERIOD_IDLE * 1000), Tick)
     end
     ExecuteInGameThreadWithDelay(200, Tick)
