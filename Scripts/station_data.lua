@@ -210,7 +210,6 @@ local CachedFootprintsByClass = {} -- clsAddr -> { cellsX = n, cellsY = n }
 local StationDiagLoggedKey = nil
 local StationPropsDiagLoggedKey = nil
 local StationDeepDiagLoggedKey = nil
-local BlockMeshDiagSeenCls = {}
 local CachedStationPortEntries = nil -- { stationKey = str, inputs = {}, outputs = {} }
 
 local function ReadBoundsStruct(boundsObj)
@@ -401,7 +400,7 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
                             local cn = so:GetClass():GetFName():ToString()
                             local cl = cn:lower()
                             if cn == "CharacterCollisionEnvironment" or cn == "Inventory" or cn == "PowerGrid"
-                                or cl:find("turret", 1, true) or cl:find("solar", 1, true)
+                                or cl:find("turret", 1, true) or cl:find("solar", 1, true) or cl:find("connector", 1, true)
                             then
                                 skip = true
                             end
@@ -609,7 +608,7 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
                 if maxLy > 150.0 then ey = maxLy end
             end
 
-            -- Measure local bounds across visible StaticMeshComponents anchored near this module actor
+            -- Measure local bounds across non-hidden StaticMeshComponents anchored near this module actor
             if not ex or not ey then
                 pcall(function()
                     local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
@@ -619,28 +618,11 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
                         local minLy, maxLy = math.huge, -math.huge
                         local maxEz = 0.0
                         local anyMesh = false
-                        local fwX, fwY, fwZ = fwdX or 1.0, fwdY or 0.0, fwdZ or 0.0
-                        local rtV = actor.GetActorRightVector and actor:GetActorRightVector() or nil
-                        local rtX = rtV and (tonumber(rtV.X) or 0.0) or -fwY
-                        local rtY = rtV and (tonumber(rtV.Y) or 1.0) or fwX
-                        local rtZ = rtV and (tonumber(rtV.Z) or 0.0) or 0.0
-
-                        local platClsName = Core.IsValidObj(platform) and (pcall(function() return platform:GetClass():GetFName():ToString() end) and platform:GetClass():GetFName():ToString() or "?") or "?"
-                        local wantDiag = (not BlockMeshDiagSeenCls[platClsName])
-                            and (platClsName:find("Station_02A", 1, true) or platClsName:find("LargeConnector", 1, true)
-                                or platClsName:find("Dock", 1, true) or platClsName:find("CommandModule", 1, true)
-                                or platClsName:find("MiningDroneBayBlock", 1, true))
-                        local diagItems = {}
-
                         StationData.ForEachArray(compsRaw, function(_, elem)
                             local c = Core.UnwrapArrayElem(elem)
-                            if Core.IsValidObj(c) and c.StaticMesh and c.StaticMesh.ExtendedBounds then
+                            if Core.IsValidObj(c) and c.bHiddenInGame ~= true and c.StaticMesh and c.StaticMesh.ExtendedBounds then
                                 local eb = c.StaticMesh.ExtendedBounds
                                 if eb.BoxExtent and eb.Origin then
-                                    local hidden = (c.bHiddenInGame == true)
-                                    local okVis, vis = pcall(function() return c:IsVisible() end)
-                                    local smName = ""
-                                    pcall(function() smName = c.StaticMesh:GetFName():ToString() end)
                                     local rs = c.RelativeScale3D
                                     local rl = c.RelativeLocation
                                     local sx = math.abs(rs and (tonumber(rs.X) or 1.0) or 1.0)
@@ -648,33 +630,14 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
                                     local sz = math.abs(rs and (tonumber(rs.Z) or 1.0) or 1.0)
                                     local rx = rl and (tonumber(rl.X) or 0.0) or 0.0
                                     local ry = rl and (tonumber(rl.Y) or 0.0) or 0.0
-
-                                    -- Use true component world offset projected onto actor axes (resists unparented RelativeLocation artifacts)
-                                    local compOx, compOy = rx, ry
-                                    local okCL, cl = pcall(function() return c:K2_GetComponentLocation() end)
-                                    if okCL and cl and type(cl.X) == "number" then
-                                        local ddx = (cl.X or 0) - cx
-                                        local ddy = (cl.Y or 0) - cy
-                                        local ddz = (cl.Z or 0) - cz
-                                        compOx = ddx * fwX + ddy * fwY + ddz * fwZ
-                                        compOy = ddx * rtX + ddy * rtY + ddz * rtZ
-                                    end
-
-                                    local ox = (tonumber(eb.Origin.X) or 0.0) * sx + compOx
-                                    local oy = (tonumber(eb.Origin.Y) or 0.0) * sy + compOy
+                                    local ox = (tonumber(eb.Origin.X) or 0.0) * sx + rx
+                                    local oy = (tonumber(eb.Origin.Y) or 0.0) * sy + ry
                                     local bx = math.abs((tonumber(eb.BoxExtent.X) or 0.0) * sx)
                                     local by = math.abs((tonumber(eb.BoxExtent.Y) or 0.0) * sy)
                                     local bz = math.abs((tonumber(eb.BoxExtent.Z) or 0.0) * sz)
-
-                                    if wantDiag and #diagItems < 8 then
-                                        table.insert(diagItems, string.format("%s(vis=%s,off=(%.0f,%.0f),o=(%.0f,%.0f),e=(%.0f,%.0f))",
-                                            smName, tostring((not hidden) and (not okVis or vis ~= false)), compOx, compOy, ox, oy, bx, by))
-                                    end
-
-                                    if (not hidden) and (not okVis or vis ~= false) and not smName:find("Collision", 1, true)
-                                        and bx >= 50.0 and by >= 50.0
-                                        and math.abs(compOx) <= 2000.0 and math.abs(compOy) <= 2000.0
-                                        and math.abs(ox) <= 2200.0 and math.abs(oy) <= 2200.0
+                                    if bx >= 50.0 and by >= 50.0
+                                        and math.abs(rx) <= 1800.0 and math.abs(ry) <= 1800.0
+                                        and math.abs(ox) <= 2000.0 and math.abs(oy) <= 2000.0
                                     then
                                         anyMesh = true
                                         if ox - bx < minLx then minLx = ox - bx end
@@ -686,11 +649,6 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
                                 end
                             end
                         end)
-                        if wantDiag then
-                            BlockMeshDiagSeenCls[platClsName] = true
-                            Core.Log(string.format("[StationData] BlockMeshDiag cls=%s act=%s items=[%s]",
-                                platClsName, actor:GetClass():GetFName():ToString(), table.concat(diagItems, "; ")))
-                        end
                         if anyMesh then
                             local halfW = math.max(100.0, (maxLx - minLx) * 0.5)
                             local halfH = math.max(100.0, (maxLy - minLy) * 0.5)
@@ -2373,34 +2331,17 @@ function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY
     end
 
     local rawInputs, rawOutputs = {}, {}
-    local connectedInIdx, connectedOutIdx = {}, {}
     pcall(function()
-        if machine.InputMachines then
-            StationData.ForEachArray(machine.InputMachines, function(idx, el)
-                if Core.IsValidObj(Core.UnwrapArrayElem(el)) then connectedInIdx[idx] = true end
-            end)
-        end
-        if machine.OutputMachines then
-            StationData.ForEachArray(machine.OutputMachines, function(idx, el)
-                if Core.IsValidObj(Core.UnwrapArrayElem(el)) then connectedOutIdx[idx] = true end
-            end)
-        end
         if machine.Inputs then
-            StationData.ForEachArray(machine.Inputs, function(idx, elem)
+            StationData.ForEachArray(machine.Inputs, function(_, elem)
                 local v = tryExtractVec(elem)
-                if v then
-                    v.connected = (connectedInIdx[idx] == true)
-                    table.insert(rawInputs, v)
-                end
+                if v then table.insert(rawInputs, v) end
             end)
         end
         if machine.Outputs then
-            StationData.ForEachArray(machine.Outputs, function(idx, elem)
+            StationData.ForEachArray(machine.Outputs, function(_, elem)
                 local v = tryExtractVec(elem)
-                if v then
-                    v.connected = (connectedOutIdx[idx] == true)
-                    table.insert(rawOutputs, v)
-                end
+                if v then table.insert(rawOutputs, v) end
             end)
         end
     end)
@@ -3021,7 +2962,6 @@ function StationData.InvalidateCaches()
     StationDiagLoggedKey = nil
     StationPropsDiagLoggedKey = nil
     StationDeepDiagLoggedKey = nil
-    BlockMeshDiagSeenCls = {}
     CachedStationPortEntries = nil
 end
 
