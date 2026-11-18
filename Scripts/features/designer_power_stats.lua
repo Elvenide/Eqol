@@ -422,17 +422,17 @@ local function GetActorPowerInfo(actor)
 
     local cachedCls = (clsAddr ~= 0) and ActorClassPowerCache[clsAddr] or nil
     if cachedCls then
-        ActorBlockInfoCache[aAddr] = { info = cachedCls.info, clsAddr = clsAddr, clsName = cachedCls.clsName }
+        ActorBlockInfoCache[aAddr] = { actor = actor, info = cachedCls.info, clsAddr = clsAddr, clsName = cachedCls.clsName }
         return cachedCls.info, cachedCls.clsName
     end
 
     local blockCDO, resolveVia = ResolveBlockObjectCDOFromActor(actor)
     local info, machSrc, machName = ComputePowerFromBlockCDO(blockCDO)
 
-    if clsAddr ~= 0 and (Core.IsValidObj(blockCDO) or info.nonSolarGen > 0 or info.solarBaseGen > 0 or info.cons > 0) then
+    if clsAddr ~= 0 then
         ActorClassPowerCache[clsAddr] = { info = info, clsName = clsName }
     end
-    ActorBlockInfoCache[aAddr] = { info = info, clsAddr = clsAddr, clsName = clsName }
+    ActorBlockInfoCache[aAddr] = { actor = actor, info = info, clsAddr = clsAddr, clsName = clsName }
 
     if clsAddr == 0 or not LoggedActorClasses[clsAddr] then
         if clsAddr ~= 0 then LoggedActorClasses[clsAddr] = true end
@@ -478,6 +478,48 @@ local function ResolveDesignerObject(designerHud)
     return designer
 end
 
+local function IsHudVisible(hud)
+    if not Core.IsValidObj(hud) then return false end
+    local inVp, vis = false, false
+    pcall(function()
+        inVp = hud:IsInViewport() == true
+        vis = hud:IsVisible() == true
+    end)
+    return inVp and vis
+end
+
+local function IsActorDesignerPending(actor)
+    local okPend, pendRes = pcall(function()
+        if actor.IsDesignerPending then
+            return actor:IsDesignerPending()
+        end
+        return actor.bPending == true
+    end)
+    return okPend and pendRes == true
+end
+
+local function CountPreviewBlocksPending(previewBlocks)
+    if not previewBlocks then return 0, 0 end
+    local okN, len = pcall(function()
+        return previewBlocks.GetArrayNum and previewBlocks:GetArrayNum() or #previewBlocks
+    end)
+    if not okN or type(len) ~= "number" or len <= 0 then
+        return 0, 0
+    end
+    local previewCount, pendingCount = 0, 0
+    for i = 1, len do
+        local elem = previewBlocks[i]
+        local actor = (elem ~= nil) and Core.UnwrapArrayElem(elem) or nil
+        if Core.IsValidObj(actor) then
+            previewCount = previewCount + 1
+            if IsActorDesignerPending(actor) then
+                pendingCount = pendingCount + 1
+            end
+        end
+    end
+    return previewCount, pendingCount
+end
+
 local DesignerWatcherActive = false
 
 local function EnsureDesignerWatcher()
@@ -489,44 +531,35 @@ local function EnsureDesignerWatcher()
         for addr, st in pairs(InjectedDesigners) do
             if not Core.IsValidObj(st.Hud) then
                 InjectedDesigners[addr] = nil
-            else
-                local inVp, vis = false, false
-                pcall(function()
-                    inVp = st.Hud:IsInViewport() == true
-                    vis = st.Hud:IsVisible() == true
-                end)
-                if inVp and vis then
-                    anyVisible = true
-                    local designer = ResolveDesignerObject(st.Hud)
-                    local previewCount, pendingCount = 0, 0
-                    if Core.IsValidObj(designer) then
-                        local okP, previewBlocks = pcall(function()
-                            return Core.IsValidObj(designer.Visualizer) and designer.Visualizer.PreviewBlocks or nil
+            elseif IsHudVisible(st.Hud) then
+                anyVisible = true
+                local designer = ResolveDesignerObject(st.Hud)
+                local previewCount, pendingCount = 0, 0
+                if Core.IsValidObj(designer) then
+                    local okP, previewBlocks = pcall(function()
+                        return Core.IsValidObj(designer.Visualizer) and designer.Visualizer.PreviewBlocks or nil
+                    end)
+                    if okP and previewBlocks then
+                        local okN, rawLen = pcall(function()
+                            return previewBlocks.GetArrayNum and previewBlocks:GetArrayNum() or #previewBlocks
                         end)
-                        if okP and previewBlocks then
-                            StationData.ForEachArray(previewBlocks, function(_, elem)
-                                local actor = Core.UnwrapArrayElem(elem)
-                                if Core.IsValidObj(actor) then
-                                    previewCount = previewCount + 1
-                                    local okPend, pendRes = pcall(function()
-                                        if actor.IsDesignerPending then
-                                            return actor:IsDesignerPending()
-                                        end
-                                        return actor.bPending == true
-                                    end)
-                                    if okPend and pendRes == true then
-                                        pendingCount = pendingCount + 1
-                                    end
-                                end
-                            end)
+                        if okN and type(rawLen) == "number" and st.WatchedRawLen ~= nil and rawLen ~= st.WatchedRawLen then
+                            st.WatchedRawLen = rawLen
+                            LastTriggerSource = "WatcherPoll"
+                            RefreshDesignerPowerStats(st.Hud)
+                            previewCount = st.WatchedPreviewCount or rawLen
+                            pendingCount = st.WatchedPendingCount or 0
+                        else
+                            st.WatchedRawLen = rawLen
+                            previewCount, pendingCount = CountPreviewBlocksPending(previewBlocks)
                         end
                     end
-                    if previewCount ~= st.WatchedPreviewCount or pendingCount ~= st.WatchedPendingCount then
-                        st.WatchedPreviewCount = previewCount
-                        st.WatchedPendingCount = pendingCount
-                        LastTriggerSource = "WatcherPoll"
-                        RefreshDesignerPowerStats(st.Hud)
-                    end
+                end
+                if previewCount ~= st.WatchedPreviewCount or pendingCount ~= st.WatchedPendingCount then
+                    st.WatchedPreviewCount = previewCount
+                    st.WatchedPendingCount = pendingCount
+                    LastTriggerSource = "WatcherPoll"
+                    RefreshDesignerPowerStats(st.Hud)
                 end
             end
         end
@@ -535,28 +568,36 @@ local function EnsureDesignerWatcher()
             DesignerWatcherActive = false
             return
         end
-        ExecuteInGameThreadWithDelay(150, WatcherTick)
+        ExecuteInGameThreadWithDelay(400, WatcherTick)
     end
 
-    ExecuteInGameThreadWithDelay(150, WatcherTick)
+    ExecuteInGameThreadWithDelay(400, WatcherTick)
 end
 
-local function ScanAndRefreshAllDesigners(triggerSource)
+local function ScanAndRefreshAllDesigners(triggerSource, allowFindAll)
     if triggerSource then
         LastTriggerSource = triggerSource
     end
     local seen = {}
-    for _, st in pairs(InjectedDesigners) do
-        if Core.IsValidObj(st.Hud) then
-            seen[st.Hud:GetAddress()] = true
-            RefreshDesignerPowerStats(st.Hud)
+    local anyTracked = false
+    for addr, st in pairs(InjectedDesigners) do
+        if not Core.IsValidObj(st.Hud) then
+            InjectedDesigners[addr] = nil
+        else
+            anyTracked = true
+            seen[addr] = true
+            if IsHudVisible(st.Hud) then
+                RefreshDesignerPowerStats(st.Hud)
+            end
         end
     end
-    local okHuds, huds = pcall(FindAllOf, "WBP_DesignerHUD_C")
-    if okHuds and huds then
-        for _, hud in ipairs(huds) do
-            if Core.IsValidObj(hud) and not seen[hud:GetAddress()] then
-                RefreshDesignerPowerStats(hud)
+    if allowFindAll or not anyTracked then
+        local okHuds, huds = pcall(FindAllOf, "WBP_DesignerHUD_C")
+        if okHuds and huds then
+            for _, hud in ipairs(huds) do
+                if Core.IsValidObj(hud) and not seen[hud:GetAddress()] and IsHudVisible(hud) then
+                    RefreshDesignerPowerStats(hud)
+                end
             end
         end
     end
@@ -570,10 +611,22 @@ local function ScheduleAllDesignersRefresh(triggerSource, targetHud)
     RefreshScheduled = true
     ExecuteInGameThreadWithDelay(40, function()
         RefreshScheduled = false
-        if Core.IsValidObj(targetHud) and not InjectedDesigners[targetHud:GetAddress()] then
-            RefreshDesignerPowerStats(targetHud)
+        if Core.IsValidObj(targetHud) then
+            local tAddr = targetHud:GetAddress()
+            if IsHudVisible(targetHud) then
+                RefreshDesignerPowerStats(targetHud)
+            elseif not InjectedDesigners[tAddr] then
+                -- Skip closed/unshown HUDs
+                return
+            end
+            for addr, st in pairs(InjectedDesigners) do
+                if addr ~= tAddr and Core.IsValidObj(st.Hud) and IsHudVisible(st.Hud) then
+                    RefreshDesignerPowerStats(st.Hud)
+                end
+            end
+            return
         end
-        ScanAndRefreshAllDesigners(nil)
+        ScanAndRefreshAllDesigners(nil, false)
     end)
 end
 
@@ -702,43 +755,44 @@ local function ComputeDesignerPower(designerHud, st)
         return nil
     end)
     if okPreview and previewBlocks then
-        StationData.ForEachArray(previewBlocks, function(_, elem)
-            local actor = Core.UnwrapArrayElem(elem)
-            if not Core.IsValidObj(actor) then return end
-
-            previewCount = previewCount + 1
-            local info, clsName = GetActorPowerInfo(actor)
-
-            local isPending = false
-            local okPend, pendRes = pcall(function()
-                if actor.IsDesignerPending then
-                    return actor:IsDesignerPending()
-                end
-                return actor.bPending == true
-            end)
-            if okPend then
-                isPending = (pendRes == true)
-            end
-
-            local g, c = EvalPowerInfo(info, solarEfficiency)
-            if isPending then
-                pendingCount = pendingCount + 1
-                previewPendingGen = previewPendingGen + g
-                previewPendingCons = previewPendingCons + c
-                local pb = pendingByClass[clsName]
-                if not pb then
-                    pb = { count = 0, gen = 0.0, cons = 0.0 }
-                    pendingByClass[clsName] = pb
-                end
-                pb.count = pb.count + 1
-                pb.gen = pb.gen + g
-                pb.cons = pb.cons + c
-            else
-                loadedCount = loadedCount + 1
-                previewLoadedGen = previewLoadedGen + g
-                previewLoadedCons = previewLoadedCons + c
-            end
+        local okN, len = pcall(function()
+            return previewBlocks.GetArrayNum and previewBlocks:GetArrayNum() or #previewBlocks
         end)
+        if st then st.WatchedRawLen = (okN and type(len) == "number") and len or nil end
+        if okN and type(len) == "number" and len > 0 then
+            for i = 1, len do
+                local elem = previewBlocks[i]
+                local actor = (elem ~= nil) and Core.UnwrapArrayElem(elem) or nil
+                if Core.IsValidObj(actor) then
+                    previewCount = previewCount + 1
+                    local info, clsName = GetActorPowerInfo(actor)
+                    local isPending = IsActorDesignerPending(actor)
+
+                    local g, c = EvalPowerInfo(info, solarEfficiency)
+                    if isPending then
+                        pendingCount = pendingCount + 1
+                        previewPendingGen = previewPendingGen + g
+                        previewPendingCons = previewPendingCons + c
+                        local pb = pendingByClass[clsName]
+                        if not pb then
+                            pb = { count = 0, gen = 0.0, cons = 0.0 }
+                            pendingByClass[clsName] = pb
+                        end
+                        pb.count = pb.count + 1
+                        pb.gen = pb.gen + g
+                        pb.cons = pb.cons + c
+                    else
+                        loadedCount = loadedCount + 1
+                        previewLoadedGen = previewLoadedGen + g
+                        previewLoadedCons = previewLoadedCons + c
+                    end
+                end
+            end
+        end
+    end
+    if st then
+        st.WatchedPreviewCount = previewCount
+        st.WatchedPendingCount = pendingCount
     end
 
     if st then
@@ -778,13 +832,19 @@ local function ComputeDesignerPower(designerHud, st)
     table.sort(pendSummaryParts)
     local pendSummary = (#pendSummaryParts > 0) and table.concat(pendSummaryParts, ", ") or "none"
 
+    local diagKey = string.format(
+        "frame=%s(station=%s) solarEff=%.3f | preview=%d(loaded=%d,pend=%d) | pg=%.1f/%.1f loadedDelta=%.1f/%.1f pend=%.1f/%.1f [%s] => display=%.1f/%.1f",
+        frameClsName, tostring(isStationFrame), solarEfficiency,
+        previewCount, loadedCount, pendingCount, pgGen, pgCons, deltaLoadedGen, deltaLoadedCons,
+        previewPendingGen, previewPendingCons, pendSummary, totalGen, totalCons
+    )
     local diag = string.format(
         "[DesignerStats Step1-4 trigger=%s] frame=%s(station=%s) solarEff=%.3f[%s] | preview=%d(loaded=%d,pend=%d) | pg=%.1f/%.1f loadedDelta=%.1f/%.1f pend=%.1f/%.1f [%s] => display=%.1f/%.1f",
         tostring(LastTriggerSource), frameClsName, tostring(isStationFrame), solarEfficiency, solarEffSource,
         previewCount, loadedCount, pendingCount, pgGen, pgCons, deltaLoadedGen, deltaLoadedCons,
         previewPendingGen, previewPendingCons, pendSummary, totalGen, totalCons
     )
-    return totalGen, totalCons, diag
+    return totalGen, totalCons, diag, diagKey
 end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
@@ -934,6 +994,10 @@ RefreshDesignerPowerStats = function(hud)
     local addr = hud:GetAddress()
     local st = InjectedDesigners[addr]
 
+    if st and not IsHudVisible(hud) then
+        return
+    end
+
     if not st or not Core.IsValidObj(st.PowerText) then
         local statsPanel, refCol, hullText, hullColVBox = FindStatsContainerPanel(hud)
         if not Core.IsValidObj(statsPanel) then
@@ -1007,11 +1071,11 @@ RefreshDesignerPowerStats = function(hud)
         EnsureDesignerWatcher()
     end
 
-    local gen, cons, diag = ComputeDesignerPower(hud, st)
-    if st.LastGen ~= gen or st.LastCons ~= cons or st.LastStepDiag ~= diag then
+    local gen, cons, diag, diagKey = ComputeDesignerPower(hud, st)
+    if st.LastGen ~= gen or st.LastCons ~= cons or st.LastStepDiag ~= diagKey then
         st.LastGen = gen
         st.LastCons = cons
-        st.LastStepDiag = diag
+        st.LastStepDiag = diagKey
         if diag then
             Core.Log(diag)
         end
@@ -1038,7 +1102,7 @@ Feature.WatchWidgets = {
         Core.Log("[DesignerStats WatchWidget] WBP_DesignerHUD_C constructed")
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(150, function()
-            if Core.IsValidObj(hud) then
+            if Core.IsValidObj(hud) and not InjectedDesigners[hud:GetAddress()] and IsHudVisible(hud) then
                 LastTriggerSource = "WatchWidget_WBP_DesignerHUD_C"
                 RefreshDesignerPowerStats(hud)
             end
@@ -1103,20 +1167,26 @@ end
 
 function Feature.OnClientRestart()
     Feature.RegisterHooks()
-    ExecuteInGameThreadWithDelay(200, function()
-        ScanAndRefreshAllDesigners("OnClientRestart")
-    end)
+    if next(InjectedDesigners) ~= nil then
+        ExecuteInGameThreadWithDelay(200, function()
+            ScanAndRefreshAllDesigners("OnClientRestart", false)
+        end)
+    end
 end
 
 function Feature.OnMapLoad()
     Feature.RegisterHooks()
     ExecuteInGameThreadWithDelay(200, function()
-        ScanAndRefreshAllDesigners("OnMapLoad")
+        ScanAndRefreshAllDesigners("OnMapLoad", true)
     end)
 end
 
 function Feature.PruneCaches()
-    ActorBlockInfoCache = {}
+    for aAddr, entry in pairs(ActorBlockInfoCache) do
+        if not entry or not Core.IsValidObj(entry.actor) then
+            ActorBlockInfoCache[aAddr] = nil
+        end
+    end
     for addr, st in pairs(InjectedDesigners) do
         if not Core.IsValidObj(st.PowerText) then
             InjectedDesigners[addr] = nil

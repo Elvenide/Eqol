@@ -305,7 +305,10 @@ local function SafeCompWorldAndLocal(comp, pos, fw, rt, up)
     return FormatLocalPos(lp) .. rotStr
 end
 
+local ENABLE_SHAFT_GEO_DIAG = false
+
 local function LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCount)
+    if not ENABLE_SHAFT_GEO_DIAG then return end
     if LoggedShafts[bAddr .. ":fullGeo"] then return end
     LoggedShafts[bAddr .. ":fullGeo"] = true
 
