@@ -339,23 +339,28 @@ local function ResetSpriteCache()
     CaptureDiagLogged = false
 end
 
-local function CreateSpriteRenderTarget(pc, clearCol)
+local function IsFiniteNum(v)
+    return type(v) == "number" and v == v and v > -1e9 and v < 1e9
+end
+
+local function CreateSpriteRenderTarget(pc, rtW, rtH, clearCol)
     local krl = Core.GetCDO(PATHS.KismetRenderLibCDO)
     if not (Core.IsValidObj(pc) and Core.IsValidObj(krl) and krl.CreateRenderTarget2D) then
         return nil, "missing KRL/CreateRenderTarget2D"
     end
-    local col = clearCol or { R = 0.04, G = 0.055, B = 0.08, A = 1.0 }
+    local w = Core.Clamp(math.floor(rtW or 128), 32, 256)
+    local h = Core.Clamp(math.floor(rtH or 128), 32, 256)
+    local col = clearCol or COLORS.ModuleFill
     local lastErr = "unknown"
-    -- Try UE5 7-arg signature (WorldContext, W, H, Format, ClearColor, bAutoGenerateMipMaps, bSupportUAVs)
     for _, fmt in ipairs({ 3, 2 }) do
         local ok7, rt7 = pcall(function()
-            return krl:CreateRenderTarget2D(pc, 128, 128, fmt, col, false, false)
+            return krl:CreateRenderTarget2D(pc, w, h, fmt, col, false, false)
         end)
         if ok7 and Core.IsValidObj(rt7) then return rt7, nil end
         if not ok7 then lastErr = tostring(rt7) end
 
         local ok6, rt6 = pcall(function()
-            return krl:CreateRenderTarget2D(pc, 128, 128, fmt, col, false)
+            return krl:CreateRenderTarget2D(pc, w, h, fmt, col, false)
         end)
         if ok6 and Core.IsValidObj(rt6) then return rt6, nil end
         if not ok6 then lastErr = tostring(rt6) end
@@ -501,7 +506,8 @@ local function EnsureCaptureStudio(pc)
         capComp.bCaptureEveryFrame = false
         capComp.bCaptureOnMovement = false
         capComp.bAlwaysPersistRenderingState = true
-        capComp:K2_SetRelativeLocationAndRotation({ X = 0.0, Y = 0.0, Z = 1400.0 }, { Pitch = -90.0, Yaw = 0.0, Roll = 0.0 }, false, {}, false)
+        -- Pitch=-90 looks down -Z; Yaw=-90 maps camera Right=+X (screen U) and -Up=+Y (screen V)
+        capComp:K2_SetRelativeLocationAndRotation({ X = 0.0, Y = 0.0, Z = 1400.0 }, { Pitch = -90.0, Yaw = -90.0, Roll = 0.0 }, false, {}, false)
         ApplyShowOnlyActor(capComp, studioActor)
     end)
 
@@ -527,10 +533,35 @@ local function EnsureCaptureStudio(pc)
         end
     end
 
+    -- Tinted dark-slate floor backdrop matching COLORS.ModuleFill if BasicShapeMaterial is available
+    local backdropComp = nil
+    local planeMesh = Core.FindOrLoadClass(PATHS.PlaneMeshPath)
+    local baseMat = Core.FindOrLoadClass("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial")
+    if Core.IsValidObj(planeMesh) and Core.IsValidObj(baseMat) then
+        local okB, bc = pcall(function() return studioActor:AddComponentByClass(smCls, false, idXform, false) end)
+        if okB and Core.IsValidObj(bc) then
+            pcall(function()
+                bc:SetStaticMesh(planeMesh)
+                local dmi = bc.CreateDynamicMaterialInstance and bc:CreateDynamicMaterialInstance(0, baseMat) or nil
+                if Core.IsValidObj(dmi) then
+                    if dmi.SetVectorParameterValue then
+                        dmi:SetVectorParameterValue(FName("Color"), COLORS.ModuleFill)
+                    end
+                    bc:K2_SetRelativeLocation({ X = 0.0, Y = 0.0, Z = -25.0 }, false, {}, false)
+                    bc:SetRelativeScale3D({ X = 60.0, Y = 60.0, Z = 1.0 })
+                    bc:SetCollisionEnabled(0)
+                    backdropComp = bc
+                else
+                    bc:DestroyComponent(bc)
+                end
+            end)
+        end
+    end
+
     CaptureStudio.Actor = studioActor
     CaptureStudio.CaptureComp = capComp
     CaptureStudio.LightComp = lightComp
-    CaptureStudio.BackdropComp = nil
+    CaptureStudio.BackdropComp = backdropComp
     CaptureStudio.MeshComps = {}
     return true
 end
@@ -584,6 +615,9 @@ local function ProcessNextCapture()
                 end
             end
 
+            capComp:K2_SetRelativeLocationAndRotation(
+                { X = item.entry.camCx or 0.0, Y = item.entry.camCy or 0.0, Z = 1400.0 },
+                { Pitch = -90.0, Yaw = -90.0, Roll = 0.0 }, false, {}, false)
             capComp.OrthoWidth = item.entry.orthoCm
             capComp.TextureTarget = item.entry.rt
             ApplyShowOnlyActor(capComp, studioActor)
@@ -612,8 +646,10 @@ local function ProcessNextCapture()
 
     if not CaptureDiagLogged then
         CaptureDiagLogged = true
-        Core.Log(string.format("[StationMap] FirstCapture specs=%d ready=%s err=%s remaining=%d",
+        Core.Log(string.format("[StationMap] FirstCapture specs=%d ortho=%.0f backdrop=%s ready=%s err=%s remaining=%d",
             item and item.specs and #item.specs or -1,
+            item and item.entry and item.entry.orthoCm or 0,
+            tostring(Core.IsValidObj(CaptureStudio.BackdropComp)),
             tostring(item and item.entry and item.entry.ready),
             tostring(capErr),
             #CaptureQueue))
@@ -624,6 +660,32 @@ local function ProcessNextCapture()
     else
         CaptureRunning = false
     end
+end
+
+local function ComputeSpecsBounds2D(specs)
+    local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
+    local any = false
+    for _, sp in ipairs(specs) do
+        if Core.IsValidObj(sp.sm) and sp.sm.ExtendedBounds and sp.sm.ExtendedBounds.BoxExtent and sp.sm.ExtendedBounds.Origin then
+            local eb = sp.sm.ExtendedBounds
+            local ox = (tonumber(eb.Origin.X) or 0.0) * sp.scale.X + sp.loc.X
+            local oy = (tonumber(eb.Origin.Y) or 0.0) * sp.scale.Y + sp.loc.Y
+            local ex = math.abs((tonumber(eb.BoxExtent.X) or 0.0) * sp.scale.X)
+            local ey = math.abs((tonumber(eb.BoxExtent.Y) or 0.0) * sp.scale.Y)
+            -- Rotate component extent by local Yaw if component is rotated inside actor
+            local yawRad = math.rad(sp.rot.Yaw or 0.0)
+            local ca, sa = math.abs(math.cos(yawRad)), math.abs(math.sin(yawRad))
+            local rex = ex * ca + ey * sa
+            local rey = ex * sa + ey * ca
+            any = true
+            if ox - rex < minX then minX = ox - rex end
+            if ox + rex > maxX then maxX = ox + rex end
+            if oy - rey < minY then minY = oy - rey end
+            if oy + rey > maxY then maxY = oy + rey end
+        end
+    end
+    if not any then return 0.0, 0.0, 100.0, 100.0 end
+    return (minX + maxX) * 0.5, (minY + maxY) * 0.5, math.max(50.0, maxX - minX), math.max(50.0, maxY - minY)
 end
 
 local function RequestMachineSprite(clsKey, actor, cellsX, cellsY, buildableOpt)
@@ -660,8 +722,18 @@ local function RequestMachineSprite(clsKey, actor, cellsX, cellsY, buildableOpt)
         return MachineSpriteCache[clsKey]
     end
 
+    local cx = math.max(1, cellsX or 1)
+    local cy = math.max(1, cellsY or 1)
+    local meshCx, meshCy, meshW, meshH = ComputeSpecsBounds2D(specs)
+    local orthoCm = math.max(cx * CELL_CM, meshW)
+    if orthoCm < (cy * CELL_CM * (cx / cy)) then
+        orthoCm = cy * CELL_CM * (cx / cy)
+    end
+    local rtW = Core.Clamp(cx * 80, 64, 256)
+    local rtH = Core.Clamp(cy * 80, 64, 256)
+
     local pc = Core.GetLocalPlayerController()
-    local rt, rtErr = CreateSpriteRenderTarget(pc, COLORS.ModuleFill)
+    local rt, rtErr = CreateSpriteRenderTarget(pc, rtW, rtH, COLORS.ModuleFill)
     if not Core.IsValidObj(rt) then
         if not CaptureDiagLogged then
             CaptureDiagLogged = true
@@ -671,10 +743,13 @@ local function RequestMachineSprite(clsKey, actor, cellsX, cellsY, buildableOpt)
         return MachineSpriteCache[clsKey]
     end
 
-    local spanCells = math.max(cellsX or 1, cellsY or 1)
     local entry = {
         rt = rt,
-        orthoCm = spanCells * CELL_CM,
+        orthoCm = orthoCm,
+        camCx = (math.abs(meshCx) > 25.0) and meshCx or 0.0,
+        camCy = (math.abs(meshCy) > 25.0) and meshCy or 0.0,
+        cellsX = cx,
+        cellsY = cy,
         ready = false,
         queued = true,
         imgRefs = {},
@@ -982,11 +1057,14 @@ end
 
 local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, mx, my, pxW, pxH, yawDeg, cat, spriteEntry, isGhost, validGhost, zBase)
     local isSquare = (math.abs(pxW - pxH) < 2.0)
-    local spriteSize = math.max(pxW, pxH)
 
     if spriteEntry and not spriteEntry.unavailable and Core.IsValidObj(spriteEntry.rt) then
         local img = Core.CreateRawWidget(PATHS.ImageClass, outer)
         if Core.IsValidObj(img) then
+            local baseW, baseH = pxW, pxH
+            if not isSquare and math.abs(((yawDeg or 0.0) % 180.0) - 90.0) < 45.0 then
+                baseW, baseH = pxH, pxW
+            end
             pcall(function()
                 img:SetVisibility(3) -- HitTestInvisible so drag/click reaches canvas polling
                 img:SetBrushFromTexture(spriteEntry.rt, false)
@@ -1000,7 +1078,7 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
                 end
             end)
             local slot = targetCanvas:AddChildToCanvas(img)
-            SetCanvasSlot(slot, mx, my, spriteSize, spriteSize, 0.5, 0.5, zBase)
+            SetCanvasSlot(slot, mx, my, math.max(6.0, baseW), math.max(6.0, baseH), 0.5, 0.5, zBase)
             if not spriteEntry.ready and spriteEntry.imgRefs then
                 table.insert(spriteEntry.imgRefs, { img = img })
             end
@@ -1118,15 +1196,33 @@ end
 local function MeasureMapCanvasSize()
     if not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then return false end
     local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
-    if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and MapUI.MapCanvas.GetCachedGeometry then
-        local ok, sz = pcall(function() return slateLib:GetLocalSize(MapUI.MapCanvas:GetCachedGeometry()) end)
-        if ok and sz then
-            local w, h = tonumber(sz.X) or 0.0, tonumber(sz.Y) or 0.0
-            if w > 120.0 and h > 120.0 then
-                local changed = (math.abs(w - ViewTransform.canvasW) > 4.0 or math.abs(h - ViewTransform.canvasH) > 4.0)
-                ViewTransform.canvasW = w
-                ViewTransform.canvasH = h
-                return changed
+    if Core.IsValidObj(slateLib) and slateLib.GetLocalSize then
+        for _, wgt in ipairs({ MapUI.MapCanvas, MapUI.MapBg }) do
+            if Core.IsValidObj(wgt) and wgt.GetCachedGeometry then
+                local ok, sz = pcall(function() return slateLib:GetLocalSize(wgt:GetCachedGeometry()) end)
+                if ok and sz then
+                    local w, h = tonumber(sz.X), tonumber(sz.Y)
+                    if IsFiniteNum(w) and IsFiniteNum(h) and w > 120.0 and h > 120.0 then
+                        local changed = (math.abs(w - ViewTransform.canvasW) > 4.0 or math.abs(h - ViewTransform.canvasH) > 4.0)
+                        ViewTransform.canvasW = w
+                        ViewTransform.canvasH = h
+                        return changed
+                    end
+                end
+            end
+        end
+        if Core.IsValidObj(MapUI.Window) and MapUI.Window.GetCachedGeometry then
+            local okW, wsz = pcall(function() return slateLib:GetLocalSize(MapUI.Window:GetCachedGeometry()) end)
+            if okW and wsz then
+                local ww, wh = tonumber(wsz.X), tonumber(wsz.Y)
+                if IsFiniteNum(ww) and IsFiniteNum(wh) and ww > 320.0 and wh > 240.0 then
+                    local w = ww - 168.0
+                    local h = wh - 74.0
+                    local changed = (math.abs(w - ViewTransform.canvasW) > 4.0 or math.abs(h - ViewTransform.canvasH) > 4.0)
+                    ViewTransform.canvasW = w
+                    ViewTransform.canvasH = h
+                    return changed
+                end
             end
         end
     end
@@ -1844,8 +1940,11 @@ local function GetMapCanvasCursorPos(pc)
             absPos = ap
             local okL, localPos = pcall(function() return slateLib:AbsoluteToLocal(geom, ap) end)
             if okL and localPos then
-                lx = tonumber(localPos.X)
-                ly = tonumber(localPos.Y)
+                local tx = tonumber(localPos.X)
+                local ty = tonumber(localPos.Y)
+                if IsFiniteNum(tx) and IsFiniteNum(ty) then
+                    lx, ly = tx, ty
+                end
             end
         end
     end
@@ -1855,17 +1954,17 @@ local function GetMapCanvasCursorPos(pc)
         if okVP and vp then
             vpPos = vp
             local vx, vy = tonumber(vp.X), tonumber(vp.Y)
-            if vx and vy then
+            if IsFiniteNum(vx) and IsFiniteNum(vy) then
                 local okWG, wGeom = pcall(function() return MapUI.Window:GetCachedGeometry() end)
                 if okWG and wGeom and slateLib.GetLocalSize then
                     local okWS, wSz = pcall(function() return slateLib:GetLocalSize(wGeom) end)
-                    if okWS and wSz and tonumber(wSz.X) and tonumber(wSz.Y) and wSz.X > 100 and wSz.Y > 100 then
+                    if okWS and wSz and IsFiniteNum(tonumber(wSz.X)) and IsFiniteNum(tonumber(wSz.Y)) and wSz.X > 100 and wSz.Y > 100 then
                         local fullW = wSz.X / 0.88
                         local fullH = wSz.Y / 0.90
                         local winLeft = fullW * 0.06
                         local winTop = fullH * 0.05
-                        -- Subtract approximate window header + top toolbar + padding (~64px top, ~12px left)
-                        lx = vx - (winLeft + 12.0)
+                        -- Offset inside WBP_WindowBase_C content + top toolbar
+                        lx = vx - (winLeft + 10.0)
                         ly = vy - (winTop + 64.0)
                     end
                 end
@@ -1873,7 +1972,7 @@ local function GetMapCanvasCursorPos(pc)
         end
     end
 
-    if not CursorDiagLogged and (lx ~= nil or absPos ~= nil or vpPos ~= nil) then
+    if not CursorDiagLogged and (lx ~= nil or vpPos ~= nil) then
         CursorDiagLogged = true
         local ax = absPos and tonumber(absPos.X) or -999
         local ay = absPos and tonumber(absPos.Y) or -999

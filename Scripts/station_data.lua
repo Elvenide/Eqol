@@ -656,11 +656,14 @@ end
 --         currentFloorIndex (matching walkFrame or playerZ),
 --         unitSize (estimated 1x1 module width in Unreal cm),
 --         gridOriginX, gridOriginY (100cm grid alignment from first module edge).
-local function CollectExtraStationZLevels(station, allMachines)
+local function CollectExtraStationZLevels(station, allMachines, stationRefZ)
     local zPts = {}
     local seen = {}
     local function pushZ(z)
         if type(z) ~= "number" then return end
+        if stationRefZ and math.abs(z) < 1.0 and math.abs(stationRefZ) > 500.0 then
+            return -- Ignore unspawned/default Z=0 machines when station itself is deep in space
+        end
         for _, ez in ipairs(seen) do
             if math.abs(z - ez) <= 220.0 then return end
         end
@@ -668,15 +671,15 @@ local function CollectExtraStationZLevels(station, allMachines)
         table.insert(zPts, z)
     end
 
-    -- 1. Elevator stack stops give authoritative floor Z heights (every ~511cm or ~800cm)
-    local okEl, elevs = pcall(FindAllOf, "ElevatorObject")
-    if okEl and elevs then
-        for _, el in ipairs(elevs) do
-            if Core.IsValidObj(el) then
-                pcall(function()
-                    local stack = el.ElevatorStack
-                    if stack then
-                        StationData.ForEachArray(stack, function(_, elem)
+    -- 1. Elevators belonging ONLY to THIS station (via station.Elevators -> ElevatorStack)
+    if Core.IsValidObj(station) then
+        pcall(function()
+            local elevs = station.Elevators
+            if elevs then
+                StationData.ForEachArray(elevs, function(_, eElem)
+                    local el = Core.UnwrapArrayElem(eElem)
+                    if Core.IsValidObj(el) and el.ElevatorStack then
+                        StationData.ForEachArray(el.ElevatorStack, function(_, elem)
                             local stopObj = Core.UnwrapArrayElem(elem)
                             if Core.IsValidObj(stopObj) and stopObj.bIsElevatorStop == true then
                                 local _, _, sz = StationData.GetMachineWorldPosAndYaw(stopObj)
@@ -686,10 +689,10 @@ local function CollectExtraStationZLevels(station, allMachines)
                     end
                 end)
             end
-        end
+        end)
     end
 
-    -- 2. Machine Z coordinates cover any floor that has machines
+    -- 2. Machine Z coordinates cover any floor that has machines on this station
     for _, m in ipairs(allMachines) do
         local _, _, mz = StationData.GetMachineWorldPosAndYaw(m)
         pushZ(mz)
@@ -770,8 +773,16 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
     -- Collect all station machines (owned by station / walkFrame / platforms)
     local allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
 
-    -- Discover any missing Z floors from Elevators & machine Z coordinates
-    local extraZs = CollectExtraStationZLevels(station, allMachines)
+    -- Discover any missing Z floors from THIS station's Elevators & machine Z coordinates
+    local stRefZ = nil
+    local stAct = Core.IsValidObj(station) and StationData.GetObjectActor(station) or nil
+    if Core.IsValidObj(stAct) then
+        pcall(function()
+            local l = stAct:K2_GetActorLocation()
+            if l and type(l.Z) == "number" then stRefZ = l.Z end
+        end)
+    end
+    local extraZs = CollectExtraStationZLevels(station, allMachines, stRefZ)
     -- If existing single fallback floor was only at default cz=0 with no real actor bounds, replace/augment cleanly
     if #floors == 1 and not (entries[1] and entries[1].bounds and entries[1].bounds.hasActor) and #extraZs > 0 then
         local onlyDefault = (math.abs(floors[1].z) < 1.0)
@@ -912,37 +923,62 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
         end
     end
 
-    -- One-shot runtime diagnostic per station so we can verify platform/floor structures in UE4SS.log
+    -- One-shot runtime diagnostic per station so we can inspect exact BuildingBlocks/Elevators/Station structure
     local diagKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or "none"
     if StationDiagLoggedKey ~= diagKey then
         StationDiagLoggedKey = diagKey
         local wfCls = Core.IsValidObj(walkFrame) and (walkFrame:GetClass():GetFName():ToString()) or "nil"
         local stCls = Core.IsValidObj(station) and (station:GetClass():GetFName():ToString()) or "nil"
-        local platFields, pbFields = "?", "?"
-        local platArrLen = 0
-        if Core.IsValidObj(station) then
+        local stLocStr = "noActor"
+        if Core.IsValidObj(stAct) then
             pcall(function()
-                if station.Platforms then
-                    StationData.ForEachArray(station.Platforms, function(idx, el)
-                        platArrLen = platArrLen + 1
-                        if idx == 1 then platFields = InspectStructFieldNames(el, 14) end
-                    end)
-                end
-                if station.PlatformBounds then
-                    StationData.ForEachArray(station.PlatformBounds, function(idx, el)
-                        if idx == 1 then pbFields = InspectStructFieldNames(el, 14) end
+                local l = stAct:K2_GetActorLocation()
+                local r = stAct:K2_GetActorRotation()
+                stLocStr = string.format("%s@(%.0f,%.0f,%.0f rot=%.1f,%.1f,%.1f)",
+                    stAct:GetClass():GetFName():ToString(), l.X or 0, l.Y or 0, l.Z or 0, r.Pitch or 0, r.Yaw or 0, r.Roll or 0)
+            end)
+        end
+        local function ArrCountAndFirst(obj, prop)
+            local n, first = 0, "nil"
+            pcall(function()
+                local arr = obj[prop]
+                if arr then
+                    StationData.ForEachArray(arr, function(idx, el)
+                        n = n + 1
+                        if idx == 1 then
+                            local u = Core.UnwrapArrayElem(el)
+                            if Core.IsValidObj(u) then
+                                local c = u:GetClass():GetFName():ToString()
+                                local ux, uy, uz = StationData.GetMachineWorldPosAndYaw(u)
+                                first = string.format("%s@(%.0f,%.0f,%.0f)", c, ux, uy, uz)
+                            else
+                                first = "struct[" .. InspectStructFieldNames(el, 8) .. "]"
+                            end
+                        end
                     end)
                 end
             end)
+            return n, first
         end
+        local bbN, bb1 = ArrCountAndFirst(station, "BuildingBlocks")
+        local elN, el1 = ArrCountAndFirst(station, "Elevators")
+        local piN, pi1 = ArrCountAndFirst(station, "PlatformIDs")
+        local coN, co1 = ArrCountAndFirst(station, "ConstructionObjects")
+        local scN, sc1 = ArrCountAndFirst(station, "StationConnections")
+        local vcN, vc1 = ArrCountAndFirst(station, "VerticalConnections")
+        local mN, m1 = ArrCountAndFirst(station, "Machines")
+        local e1b = entries[1] and entries[1].bounds
+        local bStr = e1b and string.format("cx=%.0f,cy=%.0f,cz=%.0f,ex=%.0f,ey=%.0f,hasA=%s", e1b.cx, e1b.cy, e1b.cz, e1b.ex, e1b.ey, tostring(e1b.hasActor)) or "nil"
         local flParts = {}
         for _, fl in ipairs(floors) do
-            table.insert(flParts, string.format("#%d(z=%.0f,p=%d,m=%d)", fl.index, fl.z, #fl.platforms, #fl.machines))
+            local sample = fl.machines[1] and Core.IsValidObj(fl.machines[1].machine) and fl.machines[1].machine:GetClass():GetFName():ToString() or "-"
+            table.insert(flParts, string.format("#%d(z=%.0f,m=%d,%s)", fl.index, fl.z, #fl.machines, sample))
         end
         Core.Log(string.format(
-            "[StationData] Diag wf=%s st=%s st.Platforms=%d[%s] st.PlatformBounds=%d[%s] resolvedPlats=%d extraZs=%d totalMachs=%d floors=%d {%s}",
-            wfCls, stCls, platArrLen, platFields, pbCount, pbFields, #plats, #extraZs, #allMachines, #floors, table.concat(flParts, ", ")
+            "[StationData] Diag wf=%s st=%s stActor=%s pz=%s curFl=%d e1=[%s] BB=%d(%s) Elev=%d(%s) PID=%d(%s) CO=%d(%s) SC=%d VC=%d Mach=%d(%s)",
+            wfCls, stCls, stLocStr, tostring(playerZ), currentFloorIndex, bStr, bbN, bb1, elN, el1, piN, pi1, coN, co1, scN, vcN, mN, m1
         ))
+        Core.Log(string.format("[StationData] Floors(%d): %s", #floors, table.concat(flParts, ", ")))
     end
 
     return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY
@@ -1251,9 +1287,10 @@ function StationData.GetMachineFootprintCells(machine, buildableOpt)
                     local c = Core.UnwrapArrayElem(elem)
                     if Core.IsValidObj(c) and c.StaticMesh and c.StaticMesh.ExtendedBounds then
                         local hidden = (c.bHiddenInGame == true)
+                        local okVis, vis = pcall(function() return c:IsVisible() end)
                         local smName = ""
                         pcall(function() smName = c.StaticMesh:GetFName():ToString() end)
-                        if not (hidden and smName == "Cube") then
+                        if not hidden and (not okVis or vis ~= false) and not smName:find("Collision", 1, true) then
                             local eb = c.StaticMesh.ExtendedBounds
                             if eb.BoxExtent and eb.Origin then
                                 local rs = c.RelativeScale3D
