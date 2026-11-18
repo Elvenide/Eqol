@@ -109,7 +109,6 @@ local TrackedButtons = {}    -- list of static WBP_Button_C instances for hover 
 local IconDiagLogged = false
 local MissingIconsLogged = {}
 local CursorDiagLogged = false
-local PawnLockDiagLogged = false
 local LastHoveredConvAddr = nil
 local LastHoveredPortIdx = nil
 local LastHadDynamicOverlay = false
@@ -125,10 +124,7 @@ local WaitingForBuildMenuSelection = false
 local WaitingBuildMenuSince = 0
 local KeyHandlersBound = false
 local LastWorldAddr = nil
-local LockedPawn = nil
-local SavedPawnSpeeds = nil
-local LockedPawnLocalPos = nil
-local LockedMoveComps = {}
+local SavedCharInputEnabled = nil
 
 -- Input Polling State
 local InputPollActive = false
@@ -2319,50 +2315,16 @@ local function EnsureInputPoll()
             return
         end
 
-        -- Keep player pawn body immobilized while map is open (disable movement components + anchor station-local pos)
+        -- Keep character movement disabled while Station Map is open without touching BP_CameraPawn_C / movement components
         pcall(function()
+            if pc.CharacterInputEnabled == true and pc.AllowCharacterInput then
+                pc:AllowCharacterInput(false)
+            end
             if pc.IsMoveInputIgnored and not pc:IsMoveInputIgnored() and pc.SetIgnoreMoveInput then
                 pc:SetIgnoreMoveInput(true)
             end
             if pc.IsLookInputIgnored and not pc:IsLookInputIgnored() and pc.SetIgnoreLookInput then
                 pc:SetIgnoreLookInput(true)
-            end
-            local pawn = pc.Pawn
-            if Core.IsValidObj(pawn) then
-                if not LockedPawnLocalPos and CurrentStation then
-                    local liveXf = StationData.GetStationFrameTransform(CurrentStation)
-                    local loc = pawn:K2_GetActorLocation()
-                    if loc and type(loc.X) == "number" then
-                        local lx, ly, lz = StationData.WorldToStationLocal(liveXf, loc.X, loc.Y or 0, loc.Z or 0, nil, nil, nil)
-                        LockedPawnLocalPos = { x = lx, y = ly, z = lz }
-                    end
-                elseif LockedPawnLocalPos and CurrentStation then
-                    local liveXf = StationData.GetStationFrameTransform(CurrentStation)
-                    local curLoc = pawn:K2_GetActorLocation()
-                    if curLoc and type(curLoc.X) == "number" then
-                        local tx, ty, tz = StationData.StationLocalToWorld(liveXf, LockedPawnLocalPos.x, LockedPawnLocalPos.y, LockedPawnLocalPos.z)
-                        local dx = (curLoc.X or 0) - tx
-                        local dy = (curLoc.Y or 0) - ty
-                        if (dx * dx + dy * dy) > 2.25 then
-                            pawn:K2_SetActorLocation({ X = tx, Y = ty, Z = curLoc.Z or tz }, false, {}, true)
-                        end
-                    end
-                end
-                for _, entry in ipairs(LockedMoveComps) do
-                    local mc = entry.comp
-                    if Core.IsValidObj(mc) then
-                        if mc.StopMovementImmediately then mc:StopMovementImmediately() end
-                        if mc.SetComponentTickEnabled then mc:SetComponentTickEnabled(false) end
-                    end
-                end
-                local cm = pawn.CharacterMovement
-                if Core.IsValidObj(cm) and (tonumber(cm.MaxWalkSpeed) or 0) > 0.1 then
-                    cm.MaxWalkSpeed = 0.0
-                    cm.MaxFlySpeed = 0.0
-                    cm.MaxCustomMovementSpeed = 0.0
-                    if cm.MaxAcceleration then cm.MaxAcceleration = 0.0 end
-                    if cm.StopMovementImmediately then cm:StopMovementImmediately() end
-                end
             end
         end)
 
@@ -2611,89 +2573,21 @@ local function SetStationMapCursorMode(pc, win, active)
     pcall(function()
         pc.bShowMouseCursor = active
         if active then
+            if SavedCharInputEnabled == nil then
+                SavedCharInputEnabled = (pc.CharacterInputEnabled == true)
+            end
+            if pc.AllowCharacterInput then pc:AllowCharacterInput(false) end
             if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(true) end
             if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(true) end
-            local pawn = pc.Pawn
-            if Core.IsValidObj(pawn) then
-                LockedPawn = pawn
-                LockedMoveComps = {}
-                if pawn.DisableInput then pawn:DisableInput(pc) end
-                local mcCls = Core.FindOrLoadClass("/Script/Engine.MovementComponent")
-                local mcNames = {}
-                if Core.IsValidObj(mcCls) and pawn.K2_GetComponentsByClass then
-                    local comps = pawn:K2_GetComponentsByClass(mcCls)
-                    StationData.ForEachArray(comps, function(_, elem)
-                        local mc = Core.UnwrapArrayElem(elem)
-                        if Core.IsValidObj(mc) then
-                            table.insert(mcNames, mc:GetClass():GetFName():ToString())
-                            local wasTick = true
-                            if mc.IsComponentTickEnabled then
-                                local okT, t = pcall(function() return mc:IsComponentTickEnabled() end)
-                                if okT and type(t) == "boolean" then wasTick = t end
-                            end
-                            table.insert(LockedMoveComps, {
-                                comp = mc,
-                                wasTick = wasTick,
-                                maxSpeed = tonumber(mc.MaxSpeed),
-                            })
-                            if mc.StopMovementImmediately then mc:StopMovementImmediately() end
-                            if mc.Deactivate then mc:Deactivate() end
-                            if mc.SetComponentTickEnabled then mc:SetComponentTickEnabled(false) end
-                            if mc.MaxSpeed ~= nil then mc.MaxSpeed = 0.0 end
-                        end
-                    end)
-                end
-                local cm = pawn.CharacterMovement
-                if Core.IsValidObj(cm) then
-                    if not SavedPawnSpeeds then
-                        SavedPawnSpeeds = {
-                            walk = tonumber(cm.MaxWalkSpeed) or 600.0,
-                            fly = tonumber(cm.MaxFlySpeed) or 600.0,
-                            custom = tonumber(cm.MaxCustomMovementSpeed) or 600.0,
-                            accel = tonumber(cm.MaxAcceleration) or 2048.0,
-                        }
-                    end
-                    cm.MaxWalkSpeed = 0.0
-                    cm.MaxFlySpeed = 0.0
-                    cm.MaxCustomMovementSpeed = 0.0
-                    if cm.MaxAcceleration then cm.MaxAcceleration = 0.0 end
-                    if cm.StopMovementImmediately then cm:StopMovementImmediately() end
-                end
-                if not PawnLockDiagLogged then
-                    PawnLockDiagLogged = true
-                    local ign = (pc.IsMoveInputIgnored and pcall(function() return pc:IsMoveInputIgnored() end)) and pc:IsMoveInputIgnored() or "?"
-                    Core.Log(string.format("[StationMap] PawnLockDiag pawn=%s moveComps=[%s] moveIgnored=%s",
-                        pawn:GetClass():GetFName():ToString(), table.concat(mcNames, ","), tostring(ign)))
-                end
-            end
         else
+            if pc.AllowCharacterInput then
+                pc:AllowCharacterInput(SavedCharInputEnabled ~= false)
+            end
+            SavedCharInputEnabled = nil
             if pc.ResetIgnoreMoveInput then pc:ResetIgnoreMoveInput() end
             if pc.ResetIgnoreLookInput then pc:ResetIgnoreLookInput() end
             if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(false) end
             if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(false) end
-            for _, entry in ipairs(LockedMoveComps) do
-                local mc = entry.comp
-                if Core.IsValidObj(mc) then
-                    if entry.maxSpeed and mc.MaxSpeed ~= nil then mc.MaxSpeed = entry.maxSpeed end
-                    if mc.SetComponentTickEnabled then mc:SetComponentTickEnabled(entry.wasTick ~= false) end
-                    if mc.Activate then mc:Activate(false) end
-                end
-            end
-            LockedMoveComps = {}
-            local pawn = Core.IsValidObj(LockedPawn) and LockedPawn or pc.Pawn
-            if Core.IsValidObj(pawn) then
-                if pawn.EnableInput then pawn:EnableInput(pc) end
-                local cm = pawn.CharacterMovement
-                if Core.IsValidObj(cm) and SavedPawnSpeeds then
-                    cm.MaxWalkSpeed = SavedPawnSpeeds.walk
-                    cm.MaxFlySpeed = SavedPawnSpeeds.fly
-                    cm.MaxCustomMovementSpeed = SavedPawnSpeeds.custom
-                    if cm.MaxAcceleration and SavedPawnSpeeds.accel then cm.MaxAcceleration = SavedPawnSpeeds.accel end
-                end
-            end
-            LockedPawn = nil
-            SavedPawnSpeeds = nil
-            LockedPawnLocalPos = nil
         end
     end)
     local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)

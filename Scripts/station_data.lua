@@ -209,6 +209,8 @@ local CachedFootprintsByClass = {} -- clsAddr -> { cellsX = n, cellsY = n }
 
 local StationDiagLoggedKey = nil
 local StationPropsDiagLoggedKey = nil
+local StationDeepDiagLoggedKey = nil
+local CachedStationPortEntries = nil -- { stationKey = str, inputs = {}, outputs = {} }
 
 local function ReadBoundsStruct(boundsObj)
     if not boundsObj then return nil end
@@ -921,6 +923,263 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 ensureFloorForZ(sz)
             end
         end
+    end
+
+    -- Log deep structural layout (Subobjects, Blueprint, CollisionEnv, MachineInputs/Outputs, machine super props)
+    local deepKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or "none"
+    if Core.IsValidObj(station) and StationDeepDiagLoggedKey ~= deepKey then
+        StationDeepDiagLoggedKey = deepKey
+
+        -- 1. Non-machine Subobjects breakdown
+        local subClsCounts = {}
+        local subSamples = {}
+        local machSet = {}
+        for _, m in ipairs(allMachines) do
+            if Core.IsValidObj(m) then machSet[m:GetAddress()] = true end
+        end
+        pcall(function()
+            if station.Subobjects then
+                StationData.ForEachArray(station.Subobjects, function(_, elem)
+                    local so = Core.UnwrapArrayElem(elem)
+                    if Core.IsValidObj(so) and not machSet[so:GetAddress()] then
+                        local cn = so:GetClass():GetFName():ToString()
+                        subClsCounts[cn] = (subClsCounts[cn] or 0) + 1
+                        if not subSamples[cn] then
+                            local sLoc = "?"
+                            local sDim = "?"
+                            pcall(function()
+                                if so.Location then
+                                    local lx, ly, lz = Core.GetFPVector(so.Location)
+                                    sLoc = string.format("(%.0f,%.0f,%.0f)", lx, ly, lz)
+                                end
+                            end)
+                            pcall(function()
+                                local d = so.Dimensions or so.Bounds or so.Size or so.MachineDimensions
+                                if d and d.X then sDim = string.format("(%.0f,%.0f,%.0f)", tonumber(d.X) or 0, tonumber(d.Y) or 0, tonumber(d.Z) or 0) end
+                            end)
+                            subSamples[cn] = string.format("%s@loc=%s,dim=%s", cn, sLoc, sDim)
+                        end
+                    end
+                end)
+            end
+        end)
+        local subParts = {}
+        for k, cnt in pairs(subClsCounts) do
+            table.insert(subParts, string.format("%s=%d[%s]", k, cnt, subSamples[k] or ""))
+        end
+        Core.Log("[StationData] DeepSubobjs: " .. table.concat(subParts, "; "))
+
+        -- 2. Blueprint inspection
+        local bpParts = {}
+        pcall(function()
+            local bp = station.Blueprint
+            if Core.IsValidObj(bp) then
+                table.insert(bpParts, "cls=" .. bp:GetClass():GetFName():ToString())
+                local c = bp:GetClass()
+                local d = 0
+                while Core.IsValidObj(c) and d < 5 do
+                    d = d + 1
+                    if c.ForEachProperty then
+                        c:ForEachProperty(function(p)
+                            local pn = p:GetFName():ToString()
+                            local okV, val = pcall(function() return bp[pn] end)
+                            if okV and val ~= nil and type(val) == "userdata" then
+                                local okN, n = pcall(function() return val.GetArrayNum and val:GetArrayNum() or nil end)
+                                if okN and type(n) == "number" then
+                                    local fStr = ""
+                                    if n > 0 then
+                                        pcall(function() fStr = InspectStructFieldNames(val[1], 10) end)
+                                    end
+                                    table.insert(bpParts, string.format("%s=%d(%s)", pn, n, fStr))
+                                else
+                                    table.insert(bpParts, pn)
+                                end
+                            else
+                                table.insert(bpParts, pn)
+                            end
+                        end)
+                    end
+                    c = c.GetSuperStruct and c:GetSuperStruct() or nil
+                end
+            else
+                table.insert(bpParts, "nil")
+            end
+        end)
+        Core.Log("[StationData] DeepBlueprint: " .. table.concat(bpParts, ", "))
+
+        -- 3. CollisionEnv inspection
+        local colParts = {}
+        pcall(function()
+            local ce = station.CollisionEnv
+            if Core.IsValidObj(ce) then
+                table.insert(colParts, "cls=" .. ce:GetClass():GetFName():ToString())
+                if ce.Colliders and ce.Colliders.GetArrayNum then
+                    local n = tonumber(ce.Colliders:GetArrayNum()) or 0
+                    table.insert(colParts, "Colliders=" .. n)
+                    if n > 0 then
+                        pcall(function()
+                            local first = ce.Colliders[1]
+                            table.insert(colParts, "fields=" .. InspectStructFieldNames(first, 15))
+                            local st = Core.UnwrapStruct(first) or first
+                            if st then
+                                for _, fn in ipairs({ "Center", "Location", "Position", "Extent", "HalfExtent", "BoxExtent", "Size", "Bounds", "Min", "Max" }) do
+                                    local okF, fv = pcall(function() return st[fn] end)
+                                    if okF and fv ~= nil then
+                                        local vx, vy, vz = Core.GetFPVector(fv)
+                                        table.insert(colParts, string.format("%s=(%.0f,%.0f,%.0f)", fn, vx, vy, vz))
+                                    end
+                                end
+                            end
+                        end)
+                    end
+                end
+            else
+                table.insert(colParts, "nil")
+            end
+        end)
+        Core.Log("[StationData] DeepCollisionEnv: " .. table.concat(colParts, ", "))
+
+        -- 4. Station MachineInputs / MachineOutputs / MachineBounds element format
+        local spParts = {}
+        pcall(function()
+            for _, arrName in ipairs({ "MachineInputs", "MachineOutputs", "MachineBounds" }) do
+                local arr = station[arrName]
+                if arr then
+                    local okN, n = pcall(function() return arr.GetArrayNum and arr:GetArrayNum() or #arr end)
+                    local first = nil
+                    pcall(function() first = arr[1] end)
+                    local flds = InspectStructFieldNames(first, 14)
+                    local vals = ""
+                    if first ~= nil then
+                        local st = Core.UnwrapStruct(first) or first
+                        local vp = {}
+                        pcall(function()
+                            if st.X ~= nil then table.insert(vp, string.format("X=%.1f,Y=%.1f,Z=%.1f", tonumber(st.X) or 0, tonumber(st.Y) or 0, tonumber(st.Z) or 0)) end
+                            if st.Key ~= nil then table.insert(vp, "Key=" .. tostring(st.Key)) end
+                            if st.Value ~= nil then table.insert(vp, "Val=" .. tostring(st.Value)) end
+                            if st.Min ~= nil and st.Min.X then table.insert(vp, string.format("Min=(%.0f,%.0f,%.0f)", tonumber(st.Min.X) or 0, tonumber(st.Min.Y) or 0, tonumber(st.Min.Z) or 0)) end
+                            if st.Max ~= nil and st.Max.X then table.insert(vp, string.format("Max=(%.0f,%.0f,%.0f)", tonumber(st.Max.X) or 0, tonumber(st.Max.Y) or 0, tonumber(st.Max.Z) or 0)) end
+                            if st.MachineID ~= nil then table.insert(vp, "MID=" .. tostring(st.MachineID)) end
+                            if st.ID ~= nil then table.insert(vp, "ID=" .. tostring(st.ID)) end
+                        end)
+                        vals = table.concat(vp, " ")
+                    end
+                    table.insert(spParts, string.format("%s(%s):[%s]{%s}", arrName, tostring(n), flds, vals))
+                end
+            end
+        end)
+        Core.Log("[StationData] DeepStationPorts: " .. table.concat(spParts, " | "))
+
+        -- 5. Superclass property scan for sample machine types (Refinery, Assembler, Container, MiningDroneBay, Elevator, Dock)
+        local seenDiagCats = {}
+        local mDiagParts = {}
+        for _, m in ipairs(allMachines) do
+            if Core.IsValidObj(m) then
+                local cn = m:GetClass():GetFName():ToString()
+                local low = cn:lower()
+                local tag = nil
+                if low:find("refinery", 1, true) then tag = "Refinery"
+                elseif low:find("assembler", 1, true) then tag = "Assembler"
+                elseif low:find("container", 1, true) then tag = "Container"
+                elseif low:find("mining", 1, true) or low:find("drone", 1, true) then tag = "Mining"
+                elseif low:find("elevator", 1, true) then tag = "Elevator"
+                elseif low:find("dock", 1, true) then tag = "Dock" end
+                if tag and not seenDiagCats[tag] then
+                    seenDiagCats[tag] = true
+                    local matchedProps = {}
+                    pcall(function()
+                        local c = m:GetClass()
+                        local d = 0
+                        while Core.IsValidObj(c) and d < 6 do
+                            d = d + 1
+                            if c.ForEachProperty then
+                                c:ForEachProperty(function(p)
+                                    local pn = p:GetFName():ToString()
+                                    local pl = pn:lower()
+                                    if pl:find("input", 1, true) or pl:find("output", 1, true) or pl:find("port", 1, true)
+                                        or pl:find("dim", 1, true) or pl:find("bound", 1, true) or pl:find("connect", 1, true)
+                                        or pl:find("grid", 1, true) or pl:find("slot", 1, true)
+                                    then
+                                        local extra = ""
+                                        local okV, val = pcall(function() return m[pn] end)
+                                        if okV and val ~= nil and type(val) == "userdata" then
+                                            local okN, n = pcall(function() return val.GetArrayNum and val:GetArrayNum() or nil end)
+                                            if okN and type(n) == "number" then extra = "=" .. n end
+                                        end
+                                        table.insert(matchedProps, pn .. extra)
+                                    end
+                                end)
+                            end
+                            c = c.GetSuperStruct and c:GetSuperStruct() or nil
+                        end
+                    end)
+                    local compNames = {}
+                    local act = StationData.GetObjectActor(m)
+                    if Core.IsValidObj(act) then
+                        pcall(function()
+                            local scCls = Core.FindOrLoadClass("/Script/Engine.SceneComponent")
+                            if Core.IsValidObj(scCls) and act.K2_GetComponentsByClass then
+                                local cs = act:K2_GetComponentsByClass(scCls)
+                                StationData.ForEachArray(cs, function(_, el)
+                                    local cmp = Core.UnwrapArrayElem(el)
+                                    if Core.IsValidObj(cmp) then
+                                        local fn = cmp:GetFName():ToString()
+                                        local fl = fn:lower()
+                                        if fl:find("in", 1, true) or fl:find("out", 1, true) or fl:find("port", 1, true)
+                                            or fl:find("belt", 1, true) or fl:find("convey", 1, true) or fl:find("arrow", 1, true)
+                                        then
+                                            table.insert(compNames, fn)
+                                        end
+                                    end
+                                end)
+                            end
+                        end)
+                    end
+                    table.insert(mDiagParts, string.format("%s(%s):props=[%s],comps=[%s]", tag, cn, table.concat(matchedProps, ","), table.concat(compNames, ",")))
+                end
+            end
+        end
+        Core.Log("[StationData] DeepMachineProps: " .. table.concat(mDiagParts, " | "))
+    end
+
+    -- Build port coordinate cache from station.MachineInputs / station.MachineOutputs if available
+    if Core.IsValidObj(station) then
+        local portListIn, portListOut = {}, {}
+        local function readStationPortArray(arr, dst)
+            if not arr then return end
+            StationData.ForEachArray(arr, function(_, elem)
+                local st = Core.UnwrapStruct(elem) or elem
+                if not st then return end
+                local vx, vy, vz = nil, nil, nil
+                local ownerId = nil
+                pcall(function()
+                    if st.X ~= nil and st.Y ~= nil then
+                        vx, vy, vz = tonumber(st.X), tonumber(st.Y), tonumber(st.Z) or 0
+                    elseif st.Key ~= nil and type(st.Key) == "userdata" and st.Key.X ~= nil then
+                        vx, vy, vz = tonumber(st.Key.X), tonumber(st.Key.Y), tonumber(st.Key.Z) or 0
+                        ownerId = st.Value
+                    elseif st.Location ~= nil then
+                        vx, vy, vz = Core.GetFPVector(st.Location)
+                    elseif st.Position ~= nil then
+                        vx, vy, vz = Core.GetFPVector(st.Position)
+                    elseif st.Cell ~= nil and st.Cell.X ~= nil then
+                        vx, vy, vz = tonumber(st.Cell.X), tonumber(st.Cell.Y), tonumber(st.Cell.Z) or 0
+                    end
+                end)
+                if vx and vy then
+                    table.insert(dst, { x = vx, y = vy, z = vz or 0, ownerId = ownerId })
+                end
+            end)
+        end
+        pcall(function()
+            readStationPortArray(station.MachineInputs, portListIn)
+            readStationPortArray(station.MachineOutputs, portListOut)
+        end)
+        CachedStationPortEntries = {
+            stationKey = deepKey,
+            inputs = portListIn,
+            outputs = portListOut,
+        }
     end
 
     -- Ingest station platforms in station-local coordinates
@@ -1984,6 +2243,90 @@ function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY
     end)
 
     if #rawInputs == 0 and #rawOutputs == 0 then
+        -- Fallback 1: check alternate property names on machine
+        for _, pIn in ipairs({ "InputPorts", "InputLocations", "InputPositions", "InputOffsets", "ConveyorInputs", "ItemInputs" }) do
+            local ok, arr = pcall(function() return machine[pIn] end)
+            if ok and arr then
+                StationData.ForEachArray(arr, function(_, elem)
+                    local st = Core.UnwrapStruct(elem) or elem
+                    if st and st.X ~= nil and st.Y ~= nil then
+                        table.insert(rawInputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
+                    end
+                end)
+            end
+            if #rawInputs > 0 then break end
+        end
+        for _, pOut in ipairs({ "OutputPorts", "OutputLocations", "OutputPositions", "OutputOffsets", "ConveyorOutputs", "ItemOutputs" }) do
+            local ok, arr = pcall(function() return machine[pOut] end)
+            if ok and arr then
+                StationData.ForEachArray(arr, function(_, elem)
+                    local st = Core.UnwrapStruct(elem) or elem
+                    if st and st.X ~= nil and st.Y ~= nil then
+                        table.insert(rawOutputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
+                    end
+                end)
+            end
+            if #rawOutputs > 0 then break end
+        end
+    end
+
+    -- Fallback 2: check station-wide MachineInputs / MachineOutputs spatially against this machine's footprint
+    if #rawInputs == 0 and #rawOutputs == 0 and CachedStationPortEntries then
+        local halfCmX = math.max(1, tonumber(cellsX) or 1) * 50.0
+        local halfCmY = math.max(1, tonumber(cellsY) or 1) * 50.0
+        local rad0 = math.rad(myaw or 0.0)
+        local c0, s0 = math.cos(rad0), math.sin(rad0)
+        local rHalfX = math.abs(halfCmX * c0) + math.abs(halfCmY * s0)
+        local rHalfY = math.abs(halfCmX * s0) + math.abs(halfCmY * c0)
+        local mergedSt = {}
+        local function checkStPorts(list, isIn)
+            for _, sp in ipairs(list) do
+                -- Test both raw cm coordinates and 100cm/50cm grid coordinates
+                for _, scale in ipairs({ 1.0, 100.0, 50.0 }) do
+                    local px, py = sp.x * scale, sp.y * scale
+                    if math.abs(px - (mwx or 0)) <= (rHalfX + 60.0) and math.abs(py - (mwy or 0)) <= (rHalfY + 60.0) then
+                        local k = string.format("%.0f,%.0f", px, py)
+                        if not mergedSt[k] then
+                            mergedSt[k] = { px = px, py = py, isInput = false, isOutput = false }
+                        end
+                        if isIn then mergedSt[k].isInput = true else mergedSt[k].isOutput = true end
+                        break
+                    end
+                end
+            end
+        end
+        checkStPorts(CachedStationPortEntries.inputs, true)
+        checkStPorts(CachedStationPortEntries.outputs, false)
+        for _, mp in pairs(mergedSt) do
+            local dlx = mp.px - (mwx or 0)
+            local dly = mp.py - (mwy or 0)
+            local nx, ny = 0.0, 0.0
+            if math.abs(dlx) / math.max(1.0, rHalfX) >= math.abs(dly) / math.max(1.0, rHalfY) then
+                nx = (dlx >= 0) and 1.0 or -1.0
+            else
+                ny = (dly >= 0) and 1.0 or -1.0
+            end
+            table.insert(ports, {
+                px = (mwx or 0) + ((nx ~= 0) and (nx * math.max(12.0, rHalfX - 24.0)) or dlx),
+                py = (mwy or 0) + ((ny ~= 0) and (ny * math.max(12.0, rHalfY - 24.0)) or dly),
+                adjX = (mwx or 0) + ((nx ~= 0) and (nx * (rHalfX + 50.0)) or dlx),
+                adjY = (mwy or 0) + ((ny ~= 0) and (ny * (rHalfY + 50.0)) or dly),
+                isInput = mp.isInput,
+                isOutput = mp.isOutput,
+            })
+        end
+        if #ports > 0 then
+            return ports
+        end
+    end
+
+    if #rawInputs == 0 and #rawOutputs == 0 then
+        local clsKey = ""
+        pcall(function() clsKey = machine:GetClass():GetFName():ToString() end)
+        if clsKey ~= "" and not PortDiagLoggedByCls[clsKey] then
+            PortDiagLoggedByCls[clsKey] = true
+            Core.Log(string.format("[StationData] PortSampleDiag cls=%s in=0 out=0 (no Inputs/Outputs matched)", clsKey))
+        end
         return ports
     end
 
@@ -2375,6 +2718,8 @@ function StationData.InvalidateCaches()
     UndergroundDiagLogged = false
     StationDiagLoggedKey = nil
     StationPropsDiagLoggedKey = nil
+    StationDeepDiagLoggedKey = nil
+    CachedStationPortEntries = nil
 end
 
 --------------------------------------------------------------------------------
