@@ -1,7 +1,8 @@
--- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 2/3 Height
--- 1. Allows players to walk through splitters and belt balancers (ignores Pawn/movement channels +
---    MoveIgnoreActors) while keeping WorldStatic/WorldDynamic/Trace channels blocking for building placement.
--- 2. Scales splitter and belt balancer housing meshes to 2/3 height (~0.67x Z), anchored at floor Z.
+-- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 2/3 Height (+ Underground Belts)
+-- 1. Allows players to walk through splitters and belt balancers by removing their colliders from
+--    Main Sequence's CharacterCollisionEnvironment / CollisionNode system (plus Pawn channel ignore),
+--    leaving building placement bounds/traces intact.
+-- 2. Scales splitter, belt balancer, and underground belt meshes to 2/3 height (~0.67x Z), anchored at floor Z.
 
 local Core = require("core")
 
@@ -15,7 +16,7 @@ local ECR_IGNORE       = 0   -- ECollisionResponse::ECR_Ignore
 local ECR_BLOCK        = 2   -- ECollisionResponse::ECR_Block
 local SCAN_PERIOD_IDLE = 0.45
 
-local TARGET_ACTOR_CLASSES = {
+local WALKTHROUGH_ACTOR_CLASSES = {
     "BP_Splitter_C",
     "BP_Splitter_2_C",
     "BP_Splitter_3_C",
@@ -23,6 +24,22 @@ local TARGET_ACTOR_CLASSES = {
     "BP_BeltBalancer_01_C",
     "BP_BeltBalancer_02_C",
     "BP_BeltBalancer_03_C",
+}
+
+local UNDERGROUND_ACTOR_CLASSES = {
+    "BP_UndergroundBeltActor_C",
+    "BP_UndergroundBeltActor_2_C",
+    "BP_UndergroundBeltActor_3_C",
+}
+
+local WALKTHROUGH_SIM_CLASSES = {
+    "SplitterObject",
+    "BP_SplitterObject_C",
+    "BP_SplitterObject_2_C",
+    "BP_SplitterObject_3_C",
+    "BPO_BeltBalancer_01_C",
+    "BPO_BeltBalancer_02_C",
+    "BPO_BeltBalancer_03_C",
 }
 
 local REF_ACTOR_CLASSES = {
@@ -418,6 +435,244 @@ local function EnsureTargetHeight(actor)
     return changed
 end
 
+local function ForEachCollection(col, fn)
+    if not col then return end
+    local okLen, len = pcall(function()
+        return col.GetArrayNum and col:GetArrayNum() or #col
+    end)
+    if okLen and type(len) == "number" then
+        for i = 1, len do
+            local okE, elem = pcall(function() return col[i] end)
+            if okE and elem ~= nil then
+                fn(i, elem)
+            end
+        end
+        return
+    end
+    pcall(function()
+        col:ForEach(function(k, v)
+            fn(k, v)
+        end)
+    end)
+end
+
+local function LogObjectPropsOnce(obj, keyTag)
+    if not Core.IsValidObj(obj) then return end
+    local clsName = SafeClassName(obj)
+    local key = keyTag .. ":" .. clsName
+    if LoggedClasses[key] then return end
+    LoggedClasses[key] = true
+
+    local parts = {}
+    pcall(function()
+        local cls = obj:GetClass()
+        if Core.IsValidObj(cls) and cls.ForEachProperty then
+            cls:ForEachProperty(function(prop)
+                local pName = prop:GetFName():ToString()
+                local okV, val = pcall(function() return obj[pName] end)
+                local desc = okV and tostring(val) or "?"
+                if Core.IsValidObj(val) then
+                    desc = SafeClassName(val)
+                end
+                parts[#parts + 1] = pName .. "=" .. desc
+            end)
+        end
+    end)
+    if #parts > 0 then
+        Core.Log(string.format("[SplitterBalancerTweaks] Props[%s %s]: %s",
+            keyTag, clsName, table.concat(parts, ", ")))
+    end
+end
+
+local function RecordTargetSimObject(simObj, simIds, directColliderObjs, colliderIds)
+    if not Core.IsValidObj(simObj) then return end
+    LogObjectPropsOnce(simObj, "sim")
+
+    pcall(function()
+        if simObj.ID ~= nil then
+            simIds[tostring(simObj.ID)] = true
+        end
+    end)
+
+    for _, fieldName in ipairs({ "Colliders", "ExtraColliders" }) do
+        local okArr, arr = pcall(function() return simObj[fieldName] end)
+        if okArr and arr then
+            ForEachCollection(arr, function(_, rawElem)
+                local obj = Core.UnwrapArrayElem(rawElem)
+                if Core.IsValidObj(obj) then
+                    LogObjectPropsOnce(obj, "simcol")
+                    directColliderObjs[obj:GetAddress()] = obj
+                    pcall(function()
+                        if obj.ObjectID ~= nil then simIds[tostring(obj.ObjectID)] = true end
+                        if obj.ColliderID ~= nil then colliderIds[tostring(obj.ColliderID)] = true end
+                    end)
+                else
+                    local st = Core.UnwrapStruct and Core.UnwrapStruct(rawElem) or rawElem
+                    if type(st) == "userdata" or type(st) == "table" then
+                        pcall(function()
+                            if st.ObjectID ~= nil then simIds[tostring(st.ObjectID)] = true end
+                            if st.ColliderID ~= nil then colliderIds[tostring(st.ColliderID)] = true end
+                            if Core.IsValidObj(st.Collider) then
+                                directColliderObjs[st.Collider:GetAddress()] = st.Collider
+                            end
+                        end)
+                    end
+                end
+            end)
+        end
+    end
+end
+
+local function CollectTargetSimColliders(actorsList)
+    local simIds = {}
+    local directColliderObjs = {}
+    local colliderIds = {}
+    local seenSims = {}
+
+    local function AddSim(s)
+        if not Core.IsValidObj(s) then return end
+        local addr = s:GetAddress()
+        if seenSims[addr] then return end
+        seenSims[addr] = true
+        RecordTargetSimObject(s, simIds, directColliderObjs, colliderIds)
+    end
+
+    local primCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
+    for _, actor in ipairs(actorsList) do
+        if Core.IsValidObj(actor) then
+            pcall(function()
+                if actor.GetSimulationObject then AddSim(actor:GetSimulationObject()) end
+                if actor.SimulationObject then AddSim(actor.SimulationObject) end
+            end)
+            if Core.IsValidObj(primCls) and actor.K2_GetComponentsByClass then
+                local comps, n = ExtractArray(actor:K2_GetComponentsByClass(primCls))
+                for i = 1, n do
+                    local c = comps[i]
+                    if Core.IsValidObj(c) then
+                        pcall(function()
+                            if c.GetSimulationObject then AddSim(c:GetSimulationObject()) end
+                            if c.SimulationObject then AddSim(c.SimulationObject) end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+
+    for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
+        local ok, list = pcall(FindAllOf, simCls)
+        if ok and list then
+            for _, s in ipairs(list) do
+                AddSim(s)
+            end
+        end
+    end
+
+    return simIds, directColliderObjs, colliderIds, seenSims
+end
+
+local function CollectAllCollisionNodes()
+    local nodes = {}
+    local seen = {}
+    local function AddNode(n)
+        if not Core.IsValidObj(n) then return end
+        local a = n:GetAddress()
+        if seen[a] then return end
+        seen[a] = true
+        nodes[#nodes + 1] = n
+    end
+
+    local okN, listN = pcall(FindAllOf, "CollisionNode")
+    if okN and listN then
+        for _, n in ipairs(listN) do
+            AddNode(n)
+        end
+    end
+
+    local okE, envs = pcall(FindAllOf, "CharacterCollisionEnvironment")
+    if okE and envs then
+        for _, env in ipairs(envs) do
+            if Core.IsValidObj(env) then
+                LogObjectPropsOnce(env, "colenv")
+                for _, fieldName in ipairs({ "Floors", "Ramps" }) do
+                    local okF, fCol = pcall(function() return env[fieldName] end)
+                    if okF and fCol then
+                        ForEachCollection(fCol, function(_, v)
+                            local obj = Core.UnwrapArrayElem(v)
+                            if Core.IsValidObj(obj) then
+                                AddNode(obj)
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+
+    return nodes
+end
+
+local function StripTargetsFromCollisionNodes(simIds, directColliderObjs, colliderIds)
+    local nodes = CollectAllCollisionNodes()
+    if not LoggedClasses["node_scan"] then
+        LoggedClasses["node_scan"] = true
+        local simCount = 0
+        for _ in pairs(simIds) do simCount = simCount + 1 end
+        Core.Log(string.format("[SplitterBalancerTweaks] CollisionEnv scan: nodes=%d targetSimIDs=%d", #nodes, simCount))
+    end
+
+    local removedCount = 0
+    local sampleCount = 0
+    for _, node in ipairs(nodes) do
+        LogObjectPropsOnce(node, "colnode")
+        local okCO, coCol = pcall(function() return node.ColliderObjects end)
+        if okCO and coCol then
+            local toRemove = {}
+            ForEachCollection(coCol, function(_, rawVal)
+                local colObj = Core.UnwrapArrayElem(rawVal)
+                if Core.IsValidObj(colObj) then
+                    if sampleCount < 2 then
+                        sampleCount = sampleCount + 1
+                        LogObjectPropsOnce(colObj, "nodecolobj")
+                    end
+                    local matched = false
+                    if directColliderObjs[colObj:GetAddress()] then
+                        matched = true
+                    else
+                        pcall(function()
+                            if colObj.ObjectID ~= nil and simIds[tostring(colObj.ObjectID)] then
+                                matched = true
+                            elseif colObj.ColliderID ~= nil and colliderIds[tostring(colObj.ColliderID)] then
+                                matched = true
+                            end
+                        end)
+                    end
+                    if matched then
+                        toRemove[#toRemove + 1] = colObj
+                    end
+                end
+            end)
+
+            for _, colObj in ipairs(toRemove) do
+                if node.RemoveCollider then
+                    local okRem, errRem = pcall(function() node:RemoveCollider(colObj) end)
+                    if okRem then
+                        removedCount = removedCount + 1
+                    elseif not LoggedClasses["rem_err"] then
+                        LoggedClasses["rem_err"] = true
+                        Core.Log("[SplitterBalancerTweaks] RemoveCollider error: " .. tostring(errRem))
+                    end
+                end
+            end
+        end
+    end
+
+    if removedCount > 0 then
+        Core.Log(string.format("[SplitterBalancerTweaks] Removed %d CharacterCollisionEnvironment colliders across %d nodes",
+            removedCount, #nodes))
+    end
+end
+
 local function ProcessRefDiagnostics()
     for _, clsShort in ipairs(REF_ACTOR_CLASSES) do
         if not LoggedClasses["ref:" .. clsShort] then
@@ -432,12 +687,14 @@ end
 local function ScanAndApplyTweaks()
     ProcessRefDiagnostics()
     local pawn, pawnComps, ignoreChannels = GetPawnCollisionContext()
+    local walkthroughActors = {}
 
-    for _, clsShort in ipairs(TARGET_ACTOR_CLASSES) do
+    for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
         local ok, list = pcall(FindAllOf, clsShort)
         if ok and list then
             for _, actor in ipairs(list) do
                 if Core.IsValidObj(actor) then
+                    walkthroughActors[#walkthroughActors + 1] = actor
                     LogActorCollisionDiag(actor, "before")
                     local colChanged = EnsureWalkThroughCollision(actor, pawn, pawnComps, ignoreChannels)
                     local scaleChanged = EnsureTargetHeight(actor)
@@ -445,6 +702,22 @@ local function ScanAndApplyTweaks()
                         local afterTag = (SafeClassName(pawn) ~= "BP_MainMenuPawn_C" and Core.IsValidObj(pawn)) and ("after_" .. SafeClassName(pawn)) or "after"
                         LogActorCollisionDiag(actor, afterTag)
                     end
+                end
+            end
+        end
+    end
+
+    if #walkthroughActors > 0 then
+        local simIds, directColliderObjs, colliderIds = CollectTargetSimColliders(walkthroughActors)
+        StripTargetsFromCollisionNodes(simIds, directColliderObjs, colliderIds)
+    end
+
+    for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
+        local ok, list = pcall(FindAllOf, clsShort)
+        if ok and list then
+            for _, actor in ipairs(list) do
+                if Core.IsValidObj(actor) then
+                    EnsureTargetHeight(actor)
                 end
             end
         end
@@ -463,7 +736,7 @@ end
 
 function Feature.Init()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (Pawn walk-through + 2/3 (0.67x) Z housing height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized (CollisionEnv walk-through + 2/3 (0.67x) Z height for splitters/balancers/underground belts).")
 end
 
 function Feature.OnClientRestart()
