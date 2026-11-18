@@ -437,11 +437,17 @@ end
 
 local function ForEachCollection(col, fn)
     if not col then return end
-    local okLen, len = pcall(function()
-        return col.GetArrayNum and col:GetArrayNum() or #col
+    if type(col) == "table" then
+        for k, v in pairs(col) do
+            fn(k, v)
+        end
+        return
+    end
+    local okNum, num = pcall(function()
+        return col.GetArrayNum and col:GetArrayNum() or nil
     end)
-    if okLen and type(len) == "number" then
-        for i = 1, len do
+    if okNum and type(num) == "number" then
+        for i = 1, num do
             local okE, elem = pcall(function() return col[i] end)
             if okE and elem ~= nil then
                 fn(i, elem)
@@ -449,11 +455,39 @@ local function ForEachCollection(col, fn)
         end
         return
     end
-    pcall(function()
+    local okFE = pcall(function()
         col:ForEach(function(k, v)
             fn(k, v)
         end)
     end)
+    if okFE then return end
+    local okLen, len = pcall(function() return #col end)
+    if okLen and type(len) == "number" then
+        for i = 1, len do
+            local okE, elem = pcall(function() return col[i] end)
+            if okE and elem ~= nil then
+                fn(i, elem)
+            end
+        end
+    end
+end
+
+local function DescribeStructFields(st)
+    if not st then return "nil" end
+    local parts = {}
+    pcall(function()
+        if st.GetStruct then
+            local sc = st:GetStruct()
+            if Core.IsValidObj(sc) and sc.ForEachProperty then
+                sc:ForEachProperty(function(prop)
+                    local pName = prop:GetFName():ToString()
+                    local okV, v = pcall(function() return st[pName] end)
+                    parts[#parts + 1] = pName .. "=" .. (okV and tostring(v) or "?")
+                end)
+            end
+        end
+    end)
+    return (#parts > 0) and table.concat(parts, ";") or tostring(st)
 end
 
 local function LogObjectPropsOnce(obj, keyTag)
@@ -464,28 +498,43 @@ local function LogObjectPropsOnce(obj, keyTag)
     LoggedClasses[key] = true
 
     local parts = {}
+    local fnNames = {}
     pcall(function()
-        local cls = obj:GetClass()
-        if Core.IsValidObj(cls) and cls.ForEachProperty then
-            cls:ForEachProperty(function(prop)
-                local pName = prop:GetFName():ToString()
-                local okV, val = pcall(function() return obj[pName] end)
-                local desc = okV and tostring(val) or "?"
-                if Core.IsValidObj(val) then
-                    desc = SafeClassName(val)
-                end
-                parts[#parts + 1] = pName .. "=" .. desc
-            end)
+        local cur = obj:GetClass()
+        local depth = 0
+        while Core.IsValidObj(cur) and depth < 12 do
+            depth = depth + 1
+            local curName = SafeName(cur)
+            if curName == "Object" then break end
+            if cur.ForEachProperty then
+                cur:ForEachProperty(function(prop)
+                    local pName = prop:GetFName():ToString()
+                    local pType = SafeClassName(prop)
+                    local okV, val = pcall(function() return obj[pName] end)
+                    local desc = okV and tostring(val) or ("ERR")
+                    if okV and Core.IsValidObj(val) then
+                        desc = SafeClassName(val)
+                    end
+                    parts[#parts + 1] = string.format("%s(%s)=%s", pName, pType, desc)
+                end)
+            end
+            if cur.ForEachFunction then
+                cur:ForEachFunction(function(fn)
+                    fnNames[#fnNames + 1] = SafeName(fn)
+                end)
+            end
+            cur = cur.GetSuperStruct and cur:GetSuperStruct() or nil
         end
     end)
-    if #parts > 0 then
-        Core.Log(string.format("[SplitterBalancerTweaks] Props[%s %s]: %s",
-            keyTag, clsName, table.concat(parts, ", ")))
+    if #parts > 0 or #fnNames > 0 then
+        Core.Log(string.format("[SplitterBalancerTweaks] Props[%s %s]: %s | Fns=[%s]",
+            keyTag, clsName, table.concat(parts, ", "), table.concat(fnNames, ", ")))
     end
 end
 
 local function RecordTargetSimObject(simObj, simIds, directColliderObjs, colliderIds)
     if not Core.IsValidObj(simObj) then return end
+    local simCls = SafeClassName(simObj)
     LogObjectPropsOnce(simObj, "sim")
 
     pcall(function()
@@ -497,7 +546,10 @@ local function RecordTargetSimObject(simObj, simIds, directColliderObjs, collide
     for _, fieldName in ipairs({ "Colliders", "ExtraColliders" }) do
         local okArr, arr = pcall(function() return simObj[fieldName] end)
         if okArr and arr then
-            ForEachCollection(arr, function(_, rawElem)
+            local count = 0
+            local sampleDesc = nil
+            ForEachCollection(arr, function(k, rawElem)
+                count = count + 1
                 local obj = Core.UnwrapArrayElem(rawElem)
                 if Core.IsValidObj(obj) then
                     LogObjectPropsOnce(obj, "simcol")
@@ -506,8 +558,10 @@ local function RecordTargetSimObject(simObj, simIds, directColliderObjs, collide
                         if obj.ObjectID ~= nil then simIds[tostring(obj.ObjectID)] = true end
                         if obj.ColliderID ~= nil then colliderIds[tostring(obj.ColliderID)] = true end
                     end)
+                    if not sampleDesc then sampleDesc = "UObj:" .. SafeClassName(obj) end
                 else
                     local st = Core.UnwrapStruct and Core.UnwrapStruct(rawElem) or rawElem
+                    if not sampleDesc then sampleDesc = "k=" .. tostring(k) .. " v=" .. DescribeStructFields(st) end
                     if type(st) == "userdata" or type(st) == "table" then
                         pcall(function()
                             if st.ObjectID ~= nil then simIds[tostring(st.ObjectID)] = true end
@@ -519,6 +573,12 @@ local function RecordTargetSimObject(simObj, simIds, directColliderObjs, collide
                     end
                 end
             end)
+            local logK = "simarr:" .. simCls .. ":" .. fieldName
+            if not LoggedClasses[logK] then
+                LoggedClasses[logK] = true
+                Core.Log(string.format("[SplitterBalancerTweaks] SimArr[%s.%s] count=%d sample=(%s)",
+                    simCls, fieldName, count, tostring(sampleDesc or "none")))
+            end
         end
     end
 end
@@ -591,19 +651,38 @@ local function CollectAllCollisionNodes()
 
     local okE, envs = pcall(FindAllOf, "CharacterCollisionEnvironment")
     if okE and envs then
-        for _, env in ipairs(envs) do
+        for idx, env in ipairs(envs) do
             if Core.IsValidObj(env) then
                 LogObjectPropsOnce(env, "colenv")
-                for _, fieldName in ipairs({ "Floors", "Ramps" }) do
+                local summaryParts = {}
+                for _, fieldName in ipairs({ "Colliders", "Floors", "Ramps", "ChildEnvironments" }) do
                     local okF, fCol = pcall(function() return env[fieldName] end)
                     if okF and fCol then
-                        ForEachCollection(fCol, function(_, v)
+                        local cnt = 0
+                        local sample = nil
+                        ForEachCollection(fCol, function(k, v)
+                            cnt = cnt + 1
                             local obj = Core.UnwrapArrayElem(v)
                             if Core.IsValidObj(obj) then
-                                AddNode(obj)
+                                if not sample then sample = "UObj:" .. SafeClassName(obj) end
+                                if obj.ColliderObjects or obj.RemoveCollider then
+                                    AddNode(obj)
+                                end
+                            elseif not sample then
+                                local st = Core.UnwrapStruct and Core.UnwrapStruct(v) or v
+                                sample = "k=" .. tostring(k) .. " v=" .. DescribeStructFields(st)
                             end
                         end)
+                        summaryParts[#summaryParts + 1] = string.format("%s=%d(%s)", fieldName, cnt, tostring(sample or "empty"))
+                    else
+                        summaryParts[#summaryParts + 1] = fieldName .. "=nil"
                     end
+                end
+                local envKey = "env_sum:" .. tostring(idx)
+                if not LoggedClasses[envKey] then
+                    LoggedClasses[envKey] = true
+                    Core.Log(string.format("[SplitterBalancerTweaks] Env#%d (NextID=%s Parent=%s): %s",
+                        idx, tostring(env.NextID), SafeClassName(env.ParentEnvironment), table.concat(summaryParts, " | ")))
                 end
             end
         end
