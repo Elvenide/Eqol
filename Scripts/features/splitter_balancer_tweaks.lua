@@ -98,6 +98,74 @@ local function ExtractArray(tarr)
     return out, count
 end
 
+local COLLIDER_DISABLE_MIN = 1000000000
+local COLLIDER_DISABLE_MAX = -1000000000
+
+local WalkthroughSimIDs = {}
+local TrackedSimFrames = {}
+local TrackedEnvs = {}
+local ProcessedEnvNums = {}
+local NeedsEnvClean = false
+local CustomColliderPropsReady = false
+local CustomColliderPropsAttemptedInWorld = false
+
+local function RegisterColliderCustomProperties()
+    if CustomColliderPropsReady then return true end
+    if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" then
+        if not LoggedKeys["custom_prop_api_missing"] then
+            LoggedKeys["custom_prop_api_missing"] = true
+            Core.Log("[SplitterBalancerTweaks] RegisterCustomProperty/PropertyTypes unavailable.")
+        end
+        return false
+    end
+
+    local okMin, errMin = pcall(RegisterCustomProperty, {
+        Name = "EqolMinX",
+        Type = PropertyTypes.IntProperty,
+        BelongsToClass = "/Script/MainSequence.Collider",
+        OffsetInternal = 0x00,
+    })
+    local okMax, errMax = pcall(RegisterCustomProperty, {
+        Name = "EqolMaxX",
+        Type = PropertyTypes.IntProperty,
+        BelongsToClass = "/Script/MainSequence.Collider",
+        OffsetInternal = 0x0C,
+    })
+
+    if okMin and okMax then
+        CustomColliderPropsReady = true
+        Core.Log("[SplitterBalancerTweaks] Registered Collider custom properties EqolMinX/EqolMaxX.")
+        return true
+    end
+
+    if not LoggedKeys["custom_prop_err"] then
+        LoggedKeys["custom_prop_err"] = true
+        Core.Log(string.format("[SplitterBalancerTweaks] RegisterCustomProperty failed: min=(%s,%s) max=(%s,%s)",
+            tostring(okMin), tostring(errMin), tostring(okMax), tostring(errMax)))
+    end
+    return false
+end
+
+local function GetCDOFromUClass(uclass)
+    if not Core.IsValidObj(uclass) then return nil end
+    if uclass.GetDefaultObject then
+        local okDef, defObj = pcall(function() return uclass:GetDefaultObject() end)
+        if okDef and Core.IsValidObj(defObj) then
+            return defObj
+        end
+    end
+
+    local ok, full = pcall(function() return uclass:GetFullName() end)
+    if not ok or type(full) ~= "string" then return nil end
+    local objPath = full:match("^%S+ (.+)$") or full
+    local pkg, clsName = objPath:match("^(.-)%.([^.]+)$")
+    if not pkg or not clsName then return nil end
+    if string.sub(clsName, 1, 9) == "Default__" then
+        return Core.GetCDO(objPath)
+    end
+    return Core.GetCDO(pkg .. ".Default__" .. clsName)
+end
+
 local function LogFrameAndEnvOnce(simObj)
     if LoggedKeys["frame_diag"] or not Core.IsValidObj(simObj) then return end
     if not simObj.GetFrame then return end
@@ -106,36 +174,14 @@ local function LogFrameAndEnvOnce(simObj)
     LoggedKeys["frame_diag"] = true
 
     pcall(function()
-        local parts, fns = {}, {}
-        local cur = frame:GetClass()
-        local depth = 0
-        while Core.IsValidObj(cur) and depth < 12 do
-            depth = depth + 1
-            if SafeName(cur) == "Object" then break end
-            if cur.ForEachProperty then
-                cur:ForEachProperty(function(prop)
-                    local pName = prop:GetFName():ToString()
-                    local okV, val = pcall(function() return frame[pName] end)
-                    local desc = okV and (Core.IsValidObj(val) and SafeClassName(val) or tostring(val)) or "?"
-                    parts[#parts + 1] = pName .. "=" .. desc
-                end)
-            end
-            if cur.ForEachFunction then
-                cur:ForEachFunction(function(fn) fns[#fns + 1] = SafeName(fn) end)
-            end
-            cur = cur.GetSuperStruct and cur:GetSuperStruct() or nil
-        end
-        Core.Log(string.format("[SplitterBalancerTweaks] Frame[%s]: %s | Fns=[%s]",
-            SafeClassName(frame), table.concat(parts, ", "), table.concat(fns, ", ")))
-
         if frame.GetCollisionEnv then
             local env = frame:GetCollisionEnv()
             if Core.IsValidObj(env) and env.Colliders then
                 local num = env.Colliders.GetArrayNum and env.Colliders:GetArrayNum() or -1
                 local c1 = (num > 0) and env.Colliders[1] or nil
                 local cid = c1 and pcall(function() return c1.ColliderID end) and tostring(c1.ColliderID) or "?"
-                Core.Log(string.format("[SplitterBalancerTweaks] FrameEnv[%s] Colliders.Num=%s first.ColliderID=%s",
-                    SafeClassName(env), tostring(num), cid))
+                Core.Log(string.format("[SplitterBalancerTweaks] Frame[%s] Env[%s] Colliders.Num=%s first.ColliderID=%s",
+                    SafeClassName(frame), SafeClassName(env), tostring(num), cid))
             end
         end
     end)
@@ -145,23 +191,143 @@ local function EnsureSimCDODisabled(simObj)
     if not Core.IsValidObj(simObj) then return end
     local clsName = SafeClassName(simObj)
     if PatchedSimCDOs[clsName] then return end
-    PatchedSimCDOs[clsName] = true
     pcall(function()
         local cls = simObj:GetClass()
-        if Core.IsValidObj(cls) and cls.GetDefaultObject then
-            local cdo = cls:GetDefaultObject()
-            if Core.IsValidObj(cdo) and cdo.bColliderEnabled == true then
+        local cdo = GetCDOFromUClass(cls)
+        if Core.IsValidObj(cdo) then
+            PatchedSimCDOs[clsName] = true
+            local okVal, prev = pcall(function() return cdo.bColliderEnabled end)
+            if okVal and prev == true then
                 cdo.bColliderEnabled = false
-                Core.Log(string.format("[SplitterBalancerTweaks] Set CDO %s.bColliderEnabled = false", clsName))
+                Core.Log(string.format("[SplitterBalancerTweaks] Set CDO Default__%s.bColliderEnabled = false (was true)", clsName))
+            else
+                Core.Log(string.format("[SplitterBalancerTweaks] CDO Default__%s.bColliderEnabled=%s", clsName, tostring(prev)))
+            end
+        elseif not LoggedKeys["cdo_miss_" .. clsName] then
+            LoggedKeys["cdo_miss_" .. clsName] = true
+            Core.Log(string.format("[SplitterBalancerTweaks] Could not resolve CDO for %s", clsName))
+        end
+    end)
+end
+
+local function TrackSimEnv(simObj)
+    local sAddr = simObj:GetAddress()
+    if TrackedSimFrames[sAddr] then return end
+    TrackedSimFrames[sAddr] = true
+
+    pcall(function()
+        local id = simObj.ID
+        if type(id) == "number" and id > 0 and not WalkthroughSimIDs[id] then
+            WalkthroughSimIDs[id] = true
+            NeedsEnvClean = true
+        end
+    end)
+
+    pcall(function()
+        if not simObj.GetFrame then return end
+        local frame = simObj:GetFrame()
+        if not Core.IsValidObj(frame) or not frame.GetCollisionEnv then return end
+        local env = frame:GetCollisionEnv()
+        if Core.IsValidObj(env) then
+            local envAddr = env:GetAddress()
+            if not TrackedEnvs[envAddr] then
+                TrackedEnvs[envAddr] = env
+                NeedsEnvClean = true
             end
         end
     end)
+end
+
+local function CleanTrackedEnvs()
+    local anyID = next(WalkthroughSimIDs) ~= nil
+    if not anyID then return end
+
+    if not CustomColliderPropsReady and not CustomColliderPropsAttemptedInWorld then
+        CustomColliderPropsAttemptedInWorld = true
+        RegisterColliderCustomProperties()
+    end
+
+    local dirty = NeedsEnvClean
+    if not dirty then
+        for envAddr, env in pairs(TrackedEnvs) do
+            if Core.IsValidObj(env) and env.Colliders and env.Colliders.GetArrayNum then
+                local curNum = tonumber(env.Colliders:GetArrayNum()) or -1
+                if ProcessedEnvNums[envAddr] ~= curNum then
+                    dirty = true
+                    break
+                end
+            end
+        end
+    end
+    if not dirty then return end
+
+    NeedsEnvClean = false
+    for envAddr, env in pairs(TrackedEnvs) do
+        if not Core.IsValidObj(env) then
+            TrackedEnvs[envAddr] = nil
+            ProcessedEnvNums[envAddr] = nil
+        else
+            pcall(function()
+                local cols = env.Colliders
+                if not cols or not cols.GetArrayNum then return end
+                local num = tonumber(cols:GetArrayNum()) or 0
+                local matched = 0
+                local modified = 0
+                local alreadyOff = 0
+                local readErr = 0
+                local sampleMsg = nil
+
+                for i = 1, num do
+                    local c = cols[i]
+                    if c then
+                        local okId, cid = pcall(function() return c.ColliderID end)
+                        if okId and type(cid) == "number" and WalkthroughSimIDs[cid] then
+                            matched = matched + 1
+                            if CustomColliderPropsReady then
+                                local okR, oldMin, oldMax = pcall(function() return c.EqolMinX, c.EqolMaxX end)
+                                if okR and type(oldMin) == "number" and type(oldMax) == "number" then
+                                    if oldMin == COLLIDER_DISABLE_MIN and oldMax == COLLIDER_DISABLE_MAX then
+                                        alreadyOff = alreadyOff + 1
+                                    else
+                                        local okW = pcall(function()
+                                            c.EqolMinX = COLLIDER_DISABLE_MIN
+                                            c.EqolMaxX = COLLIDER_DISABLE_MAX
+                                        end)
+                                        if okW then
+                                            local okV, newMin, newMax = pcall(function() return c.EqolMinX, c.EqolMaxX end)
+                                            if okV and newMin == COLLIDER_DISABLE_MIN and newMax == COLLIDER_DISABLE_MAX then
+                                                modified = modified + 1
+                                                if not sampleMsg then
+                                                    sampleMsg = string.format("id=%d X:[%d..%d]->[%d..%d]", cid, oldMin, oldMax, newMin, newMax)
+                                                end
+                                            else
+                                                readErr = readErr + 1
+                                            end
+                                        else
+                                            readErr = readErr + 1
+                                        end
+                                    end
+                                else
+                                    readErr = readErr + 1
+                                end
+                            end
+                        end
+                    end
+                end
+
+                ProcessedEnvNums[envAddr] = num
+                Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] num=%d matched=%d disabled=%d alreadyOff=%d err=%d %s",
+                    tostring(envAddr), num, matched, modified, alreadyOff, readErr, sampleMsg or ""))
+            end)
+        end
+    end
 end
 
 local function DisableSimCollider(simObj, countsByClass)
     if not Core.IsValidObj(simObj) then return end
     EnsureSimCDODisabled(simObj)
     LogFrameAndEnvOnce(simObj)
+    TrackSimEnv(simObj)
     local okVal, enabled = pcall(function() return simObj.bColliderEnabled end)
     if okVal and enabled == true then
         local okSet = pcall(function() simObj.bColliderEnabled = false end)
@@ -371,6 +537,8 @@ local function ScanAndApplyTweaks()
     for clsName, cnt in pairs(disabledCounts) do
         Core.Log(string.format("[SplitterBalancerTweaks] Disabled bColliderEnabled on %s (count=%d)", clsName, cnt))
     end
+
+    CleanTrackedEnvs()
 end
 
 local function StartPoll()
@@ -390,7 +558,7 @@ end
 local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
     NewObjHookRegistered = true
-    pcall(NotifyOnNewObject, "/Script/MainSequence.MachineObject", function(obj)
+    pcall(NotifyOnNewObject, "/Script/MainSequence.DMSObject", function(obj)
         if not Core.IsValidObj(obj) then return end
         local clsName = SafeClassName(obj)
         if WALKTHROUGH_SIM_SET[clsName] then
@@ -400,20 +568,27 @@ local function RegisterMachineObjectHook()
                     obj.bColliderEnabled = false
                 end
             end)
+            NeedsEnvClean = true
         end
     end)
 end
 
 function Feature.Init()
+    RegisterColliderCustomProperties()
     RegisterMachineObjectHook()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (CDO+instance bColliderEnabled=false + 2/3 (0.67x) Z height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized (CDO+instance bColliderEnabled=false, Env.Colliders override, 2/3 height).")
 end
 
 function Feature.OnClientRestart()
     OrigMeshState = {}
     ProcessedHeightActors = {}
     ProcessedCollisionActors = {}
+    WalkthroughSimIDs = {}
+    TrackedSimFrames = {}
+    TrackedEnvs = {}
+    ProcessedEnvNums = {}
+    NeedsEnvClean = false
 end
 
 function Feature.PruneCaches()
