@@ -100,50 +100,137 @@ end
 
 local COLLIDER_DISABLE_MIN = 1000000000
 local COLLIDER_DISABLE_MAX = -1000000000
+local COLLIDER_STRIDE = 28
 
 local WalkthroughSimIDs = {}
 local TrackedSimFrames = {}
 local TrackedEnvs = {}
 local ProcessedEnvNums = {}
 local NeedsEnvClean = false
-local CustomColliderPropsReady = false
-local CustomColliderPropsAttemptedInWorld = false
+local CachedAnchors = {}
+local RegisteredSlotProps = {}
 
-local function RegisterColliderCustomProperties()
-    if CustomColliderPropsReady then return true end
-    if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" then
-        if not LoggedKeys["custom_prop_api_missing"] then
-            LoggedKeys["custom_prop_api_missing"] = true
-            Core.Log("[SplitterBalancerTweaks] RegisterCustomProperty/PropertyTypes unavailable.")
+local function GetObjectClassPath(obj)
+    if not Core.IsValidObj(obj) then return nil end
+    local ok, cls = pcall(function() return obj:GetClass() end)
+    if not ok or not Core.IsValidObj(cls) then return nil end
+    local okF, full = pcall(function() return cls:GetFullName() end)
+    if not okF or type(full) ~= "string" then return nil end
+    return full:match("^%S+ (.+)$") or full
+end
+
+local function RecordAnchorCandidate(obj)
+    if not Core.IsValidObj(obj) then return end
+    local addr = obj:GetAddress()
+    if type(addr) ~= "number" then return end
+    if CachedAnchors[addr] then return end
+    local clsPath = GetObjectClassPath(obj)
+    if clsPath then
+        CachedAnchors[addr] = { obj = obj, addr = addr, clsPath = clsPath }
+    end
+end
+
+local function FindAnchorForRange(minAddr, maxAddr, preferredEnv)
+    local function Fits(entry)
+        if not entry or not Core.IsValidObj(entry.obj) then return false end
+        local dMin = minAddr - entry.addr
+        local dMax = maxAddr - entry.addr
+        return dMin >= 0 and dMax >= 0 and dMax <= 0x7FFFFFFF
+    end
+
+    if Core.IsValidObj(preferredEnv) then
+        RecordAnchorCandidate(preferredEnv)
+        local pAddr = preferredEnv:GetAddress()
+        if type(pAddr) == "number" and Fits(CachedAnchors[pAddr]) then
+            return CachedAnchors[pAddr]
         end
-        return false
     end
 
-    local okMin, errMin = pcall(RegisterCustomProperty, {
-        Name = "EqolMinX",
+    for _, entry in pairs(CachedAnchors) do
+        if Fits(entry) then return entry end
+    end
+
+    for _, searchCls in ipairs({ "DMSObject", "Actor", "ActorComponent", "Object" }) do
+        local ok, list = pcall(FindAllOf, searchCls)
+        if ok and list then
+            for i = 1, #list do
+                local obj = list[i]
+                if Core.IsValidObj(obj) then
+                    local addr = obj:GetAddress()
+                    if type(addr) == "number" then
+                        local dMin = minAddr - addr
+                        local dMax = maxAddr - addr
+                        if dMin >= 0 and dMax >= 0 and dMax <= 0x7FFFFFFF then
+                            RecordAnchorCandidate(obj)
+                            if CachedAnchors[addr] then
+                                return CachedAnchors[addr]
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function EnsureSlotProps(elemAddr, preferredEnv)
+    local existing = RegisteredSlotProps[elemAddr]
+    if existing and Core.IsValidObj(existing.anchor.obj) then
+        local d = elemAddr - existing.anchor.addr
+        if d == existing.baseOffset then
+            return existing
+        end
+    end
+
+    if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" then
+        return nil, "RegisterCustomProperty unavailable"
+    end
+
+    local anchor = FindAnchorForRange(elemAddr, elemAddr + 0x18, preferredEnv)
+    if not anchor then
+        return nil, string.format("no UObject anchor within +2GB below 0x%X", elemAddr)
+    end
+
+    local baseOffset = elemAddr - anchor.addr
+    local tag = string.format("%X_%X", anchor.addr, baseOffset)
+    local pMin = "EqolMinX_" .. tag
+    local pMax = "EqolMaxX_" .. tag
+    local pCid = "EqolCid_" .. tag
+
+    local ok1, e1 = pcall(RegisterCustomProperty, {
+        Name = pMin,
         Type = PropertyTypes.IntProperty,
-        BelongsToClass = "/Script/MainSequence.Collider",
-        OffsetInternal = 0x00,
+        BelongsToClass = anchor.clsPath,
+        OffsetInternal = baseOffset + 0x00,
     })
-    local okMax, errMax = pcall(RegisterCustomProperty, {
-        Name = "EqolMaxX",
+    local ok2, e2 = pcall(RegisterCustomProperty, {
+        Name = pMax,
         Type = PropertyTypes.IntProperty,
-        BelongsToClass = "/Script/MainSequence.Collider",
-        OffsetInternal = 0x0C,
+        BelongsToClass = anchor.clsPath,
+        OffsetInternal = baseOffset + 0x0C,
+    })
+    local ok3, e3 = pcall(RegisterCustomProperty, {
+        Name = pCid,
+        Type = PropertyTypes.IntProperty,
+        BelongsToClass = anchor.clsPath,
+        OffsetInternal = baseOffset + 0x18,
     })
 
-    if okMin and okMax then
-        CustomColliderPropsReady = true
-        Core.Log("[SplitterBalancerTweaks] Registered Collider custom properties EqolMinX/EqolMaxX.")
-        return true
+    if not (ok1 and ok2 and ok3) then
+        return nil, string.format("reg err min=(%s,%s) max=(%s,%s) cid=(%s,%s)",
+            tostring(ok1), tostring(e1), tostring(ok2), tostring(e2), tostring(ok3), tostring(e3))
     end
 
-    if not LoggedKeys["custom_prop_err"] then
-        LoggedKeys["custom_prop_err"] = true
-        Core.Log(string.format("[SplitterBalancerTweaks] RegisterCustomProperty failed: min=(%s,%s) max=(%s,%s)",
-            tostring(okMin), tostring(errMin), tostring(okMax), tostring(errMax)))
-    end
-    return false
+    local slot = {
+        anchor = anchor,
+        baseOffset = baseOffset,
+        pMin = pMin,
+        pMax = pMax,
+        pCid = pCid,
+    }
+    RegisteredSlotProps[elemAddr] = slot
+    return slot
 end
 
 local function GetCDOFromUClass(uclass)
@@ -242,11 +329,6 @@ local function CleanTrackedEnvs()
     local anyID = next(WalkthroughSimIDs) ~= nil
     if not anyID then return end
 
-    if not CustomColliderPropsReady and not CustomColliderPropsAttemptedInWorld then
-        CustomColliderPropsAttemptedInWorld = true
-        RegisterColliderCustomProperties()
-    end
-
     local dirty = NeedsEnvClean
     if not dirty then
         for envAddr, env in pairs(TrackedEnvs) do
@@ -271,11 +353,22 @@ local function CleanTrackedEnvs()
                 local cols = env.Colliders
                 if not cols or not cols.GetArrayNum then return end
                 local num = tonumber(cols:GetArrayNum()) or 0
+                local dataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
+                if type(dataAddr) ~= "number" or dataAddr == 0 then
+                    if not LoggedKeys["no_data_addr"] then
+                        LoggedKeys["no_data_addr"] = true
+                        Core.Log(string.format("[SplitterBalancerTweaks] Colliders:GetArrayDataAddress unavailable: type=%s val=%s",
+                            type(dataAddr), tostring(dataAddr)))
+                    end
+                    return
+                end
+
                 local matched = 0
                 local modified = 0
                 local alreadyOff = 0
                 local readErr = 0
                 local sampleMsg = nil
+                local firstErr = nil
 
                 for i = 1, num do
                     local c = cols[i]
@@ -283,32 +376,50 @@ local function CleanTrackedEnvs()
                         local okId, cid = pcall(function() return c.ColliderID end)
                         if okId and type(cid) == "number" and WalkthroughSimIDs[cid] then
                             matched = matched + 1
-                            if CustomColliderPropsReady then
-                                local okR, oldMin, oldMax = pcall(function() return c.EqolMinX, c.EqolMaxX end)
-                                if okR and type(oldMin) == "number" and type(oldMax) == "number" then
-                                    if oldMin == COLLIDER_DISABLE_MIN and oldMax == COLLIDER_DISABLE_MAX then
-                                        alreadyOff = alreadyOff + 1
-                                    else
-                                        local okW = pcall(function()
-                                            c.EqolMinX = COLLIDER_DISABLE_MIN
-                                            c.EqolMaxX = COLLIDER_DISABLE_MAX
+                            local elemAddr = dataAddr + (i - 1) * COLLIDER_STRIDE
+                            local slot, slotErr = EnsureSlotProps(elemAddr, env)
+                            if not slot then
+                                readErr = readErr + 1
+                                if not firstErr then firstErr = slotErr end
+                            else
+                                local anchorObj = slot.anchor.obj
+                                local okRead, gotCid, oldMin, oldMax = pcall(function()
+                                    return anchorObj[slot.pCid], anchorObj[slot.pMin], anchorObj[slot.pMax]
+                                end)
+                                if not okRead then
+                                    readErr = readErr + 1
+                                    if not firstErr then firstErr = tostring(gotCid) end
+                                elseif gotCid ~= cid then
+                                    readErr = readErr + 1
+                                    if not firstErr then
+                                        firstErr = string.format("cid mismatch got=%s expected=%s at 0x%X",
+                                            tostring(gotCid), tostring(cid), elemAddr)
+                                    end
+                                elseif oldMin == COLLIDER_DISABLE_MIN and oldMax == COLLIDER_DISABLE_MAX then
+                                    alreadyOff = alreadyOff + 1
+                                else
+                                    local okWrite, errW = pcall(function()
+                                        anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
+                                        anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
+                                    end)
+                                    if okWrite then
+                                        local okV, newMin, newMax = pcall(function()
+                                            return anchorObj[slot.pMin], anchorObj[slot.pMax]
                                         end)
-                                        if okW then
-                                            local okV, newMin, newMax = pcall(function() return c.EqolMinX, c.EqolMaxX end)
-                                            if okV and newMin == COLLIDER_DISABLE_MIN and newMax == COLLIDER_DISABLE_MAX then
-                                                modified = modified + 1
-                                                if not sampleMsg then
-                                                    sampleMsg = string.format("id=%d X:[%d..%d]->[%d..%d]", cid, oldMin, oldMax, newMin, newMax)
-                                                end
-                                            else
-                                                readErr = readErr + 1
+                                        if okV and newMin == COLLIDER_DISABLE_MIN and newMax == COLLIDER_DISABLE_MAX then
+                                            modified = modified + 1
+                                            if not sampleMsg then
+                                                sampleMsg = string.format("id=%d X:[%d..%d]->[%d..%d]",
+                                                    cid, oldMin, oldMax, newMin, newMax)
                                             end
                                         else
                                             readErr = readErr + 1
+                                            if not firstErr then firstErr = "verify failed" end
                                         end
+                                    else
+                                        readErr = readErr + 1
+                                        if not firstErr then firstErr = tostring(errW) end
                                     end
-                                else
-                                    readErr = readErr + 1
                                 end
                             end
                         end
@@ -316,8 +427,8 @@ local function CleanTrackedEnvs()
                 end
 
                 ProcessedEnvNums[envAddr] = num
-                Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] num=%d matched=%d disabled=%d alreadyOff=%d err=%d %s",
-                    tostring(envAddr), num, matched, modified, alreadyOff, readErr, sampleMsg or ""))
+                Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] data=0x%X num=%d matched=%d disabled=%d alreadyOff=%d err=%d %s %s",
+                    tostring(envAddr), dataAddr, num, matched, modified, alreadyOff, readErr, sampleMsg or "", firstErr or ""))
             end)
         end
     end
@@ -574,10 +685,9 @@ local function RegisterMachineObjectHook()
 end
 
 function Feature.Init()
-    RegisterColliderCustomProperties()
     RegisterMachineObjectHook()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (CDO+instance bColliderEnabled=false, Env.Colliders override, 2/3 height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized (CDO+instance bColliderEnabled=false, Env.Colliders UObject slot override, 2/3 height).")
 end
 
 function Feature.OnClientRestart()
@@ -588,6 +698,8 @@ function Feature.OnClientRestart()
     TrackedSimFrames = {}
     TrackedEnvs = {}
     ProcessedEnvNums = {}
+    CachedAnchors = {}
+    RegisteredSlotProps = {}
     NeedsEnvClean = false
 end
 
