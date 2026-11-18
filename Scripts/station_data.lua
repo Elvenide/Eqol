@@ -837,10 +837,13 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         return nf
     end
 
-    -- Seed floors from station elevator stops first (exact floor levels!)
-    if bestElevStops then
-        for _, sz in ipairs(bestElevStops) do
-            ensureFloorForZ(sz)
+    -- Seed floors from the union of ALL station elevator column stops (authoritative floor count!)
+    local hasElevators = (#elevStopLists > 0)
+    if hasElevators then
+        for _, sl in ipairs(elevStopLists) do
+            for _, sz in ipairs(sl) do
+                ensureFloorForZ(sz)
+            end
         end
     end
 
@@ -860,20 +863,22 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         table.insert(entries, { platform = p, bounds = localB })
         local smaller = math.min(b.ex, b.ey)
         if not minHalf or smaller < minHalf then minHalf = smaller end
-        if #floors == 0 or b.hasActor then
+        if not hasElevators and (#floors == 0 or b.hasActor) then
             local fl = ensureFloorForZ(lcz)
             if fl then table.insert(fl.platforms, { platform = p, bounds = localB }) end
         end
     end
 
-    -- Compute local positions of all machines & add any additional floors not covered by elevator stops
+    -- Compute local positions of all machines (only create Z floors from machines when station has NO elevators)
     local localMachines = {}
     for _, m in ipairs(allMachines) do
         local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, xform)
         local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
         if not skipZero then
             table.insert(localMachines, { machine = m, x = lx, y = ly, z = lz, yaw = lyaw })
-            ensureFloorForZ(lz)
+            if not hasElevators and #floors == 0 then
+                ensureFloorForZ(lz)
+            end
         end
     end
 
@@ -968,55 +973,22 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
             local sample = fl.machines[1] and Core.IsValidObj(fl.machines[1].machine) and fl.machines[1].machine:GetClass():GetFName():ToString() or "-"
             table.insert(flParts, string.format("#%d(lz=%.0f,m=%d,%s)", fl.index, fl.z, #fl.machines, sample))
         end
-        Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevStops=[%s] floors(%d): %s",
-            playerLx, playerLy, playerLz, currentFloorIndex, elevStr, #floors, table.concat(flParts, ", ")))
+        Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevCols=%d elevStops=[%s] floors(%d): %s",
+            playerLx, playerLy, playerLz, currentFloorIndex, #elevStopLists, elevStr, #floors, table.concat(flParts, ", ")))
 
-        -- Inspect any non-empty array properties on station and its actor to locate modular station blocks/rooms
-        local function LogNonEmptyArrays(tag, obj)
-            if not Core.IsValidObj(obj) then return end
-            local found = {}
-            pcall(function()
-                local cls = obj:GetClass()
-                if Core.IsValidObj(cls) and cls.ForEachProperty then
-                    cls:ForEachProperty(function(prop)
-                        local pn = nil
-                        pcall(function() pn = prop:GetFName():ToString() end)
-                        if pn then
-                            local okV, v = pcall(function() return obj[pn] end)
-                            if okV and v ~= nil then
-                                local okLen, len = pcall(function() return v.GetArrayNum and v:GetArrayNum() or #v end)
-                                if okLen and type(len) == "number" and len > 0 then
-                                    table.insert(found, string.format("%s=%d", pn, len))
-                                end
-                            end
-                        end
-                    end)
-                end
-            end)
-            Core.Log(string.format("[StationData] Arrays(%s): %s", tag, table.concat(found, ", ")))
+        local clsCounts = {}
+        for _, m in ipairs(allMachines) do
+            local cn = Core.IsValidObj(m) and m:GetClass():GetFName():ToString() or "?"
+            clsCounts[cn] = (clsCounts[cn] or 0) + 1
         end
-        LogNonEmptyArrays("station", station)
-        LogNonEmptyArrays("stActor", xform.actor)
-
-        if Core.IsValidObj(xform.actor) and xform.actor.K2_GetComponentsByClass then
-            local compCounts = {}
-            pcall(function()
-                local compCls = Core.FindOrLoadClass("/Script/Engine.SceneComponent")
-                if Core.IsValidObj(compCls) then
-                    local comps = xform.actor:K2_GetComponentsByClass(compCls)
-                    StationData.ForEachArray(comps, function(_, elem)
-                        local c = Core.UnwrapArrayElem(elem)
-                        if Core.IsValidObj(c) then
-                            local cn = c:GetClass():GetFName():ToString()
-                            compCounts[cn] = (compCounts[cn] or 0) + 1
-                        end
-                    end)
-                end
-            end)
-            local ccParts = {}
-            for k, v in pairs(compCounts) do table.insert(ccParts, k .. "=" .. v) end
-            Core.Log("[StationData] stActor SceneComponents: " .. table.concat(ccParts, ", "))
+        local ccList = {}
+        for k, v in pairs(clsCounts) do table.insert(ccList, { k = k, v = v }) end
+        table.sort(ccList, function(a, b) return a.v > b.v end)
+        local topParts = {}
+        for i = 1, math.min(10, #ccList) do
+            table.insert(topParts, ccList[i].k .. "=" .. ccList[i].v)
         end
+        Core.Log("[StationData] TopClasses: " .. table.concat(topParts, ", "))
     end
 
     return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY, xform
@@ -1151,6 +1123,198 @@ function StationData.GetItemIconTexture(item)
         end
     end
     return nil
+end
+
+local function ResolveTextureValue(val)
+    if val == nil then return nil end
+    if Core.IsValidObj(val) then return val end
+    local res = nil
+    pcall(function()
+        if type(val.Get) == "function" then
+            local g = val:Get()
+            if Core.IsValidObj(g) then res = g return end
+        end
+        if type(val.ToString) == "function" then
+            local p = val:ToString()
+            if type(p) == "string" and p ~= "" and p ~= "None" then
+                local loaded = Core.FindOrLoadClass(p)
+                if Core.IsValidObj(loaded) then res = loaded return end
+            end
+        end
+    end)
+    return res
+end
+
+function StationData.GetBuildableIconTexture(machine, buildableOpt)
+    local bld = Core.IsValidObj(buildableOpt) and buildableOpt or nil
+    if not bld and Core.IsValidObj(machine) then
+        pcall(function() bld = machine.Buildable end)
+    end
+    if Core.IsValidObj(bld) then
+        for _, prop in ipairs({ "Icon", "Texture", "IconTexture", "Image", "Thumbnail" }) do
+            local ok, v = pcall(function() return bld[prop] end)
+            if ok and v ~= nil then
+                local tex = ResolveTextureValue(v)
+                if Core.IsValidObj(tex) then return tex end
+            end
+        end
+        local okD, det = pcall(function() return bld.ItemDetails end)
+        if okD and det then
+            for _, prop in ipairs({ "Icon", "Texture", "Image" }) do
+                local ok, v = pcall(function() return det[prop] end)
+                if ok and v ~= nil then
+                    local tex = ResolveTextureValue(v)
+                    if Core.IsValidObj(tex) then return tex end
+                end
+            end
+        end
+    end
+    if Core.IsValidObj(machine) then
+        for _, prop in ipairs({ "Icon", "Texture", "IconTexture" }) do
+            local ok, v = pcall(function() return machine[prop] end)
+            if ok and v ~= nil then
+                local tex = ResolveTextureValue(v)
+                if Core.IsValidObj(tex) then return tex end
+            end
+        end
+    end
+    return nil
+end
+
+function StationData.GetMachineTypeAndTier(machine, buildableOpt)
+    local bld = Core.IsValidObj(buildableOpt) and buildableOpt or nil
+    if not bld and Core.IsValidObj(machine) then
+        pcall(function() bld = machine.Buildable end)
+    end
+
+    local dispName = ""
+    if Core.IsValidObj(bld) then
+        pcall(function()
+            if bld.DisplayName then dispName = bld.DisplayName:ToString() end
+        end)
+    end
+    if dispName == "" and Core.IsValidObj(machine) then
+        dispName = StationData.GetMachineDisplayName(machine)
+    end
+
+    local clsName = ""
+    if Core.IsValidObj(machine) then
+        pcall(function() clsName = machine:GetClass():GetFName():ToString() end)
+    elseif Core.IsValidObj(bld) then
+        pcall(function() clsName = bld:GetFName():ToString() end)
+    end
+
+    -- Detect tier from Buildable.Tier, DisplayName (Mk. 2 / Mk 3 / II / III), or class suffix (_02 / _2)
+    local tier = nil
+    if Core.IsValidObj(bld) then
+        pcall(function()
+            local bt = tonumber(bld.Tier)
+            if bt and bt >= 1 then tier = math.floor(bt) end
+        end)
+    end
+    if not tier then
+        local dn = dispName
+        local mk = dn:match("[Mm][Kk]%.?%s*(%d+)") or dn:match("[Tt]ier%s*(%d+)") or dn:match("%s+(%d+)$")
+        if mk then
+            tier = tonumber(mk)
+        elseif dn:match("%s+IV$") then tier = 4
+        elseif dn:match("%s+III$") then tier = 3
+        elseif dn:match("%s+II$") then tier = 2
+        elseif dn:match("%s+I$") then tier = 1
+        end
+    end
+    if not tier then
+        local cnMk = clsName:match("_[Mm][Kk](%d+)") or clsName:match("_0?(%d+)[A-Za-z]?_C$")
+        if cnMk then
+            tier = tonumber(cnMk)
+        end
+    end
+    tier = Core.Clamp(tier or 1, 1, 6)
+
+    -- Normalize type key by stripping tier suffix and prefixes
+    local base = (dispName ~= "" and dispName or clsName):lower()
+    base = base:gsub("^bpo_", ""):gsub("^bp_", ""):gsub("object_c$", ""):gsub("_c$", "")
+    base = base:gsub("%s*[Tt]ier%s*%d+", ""):gsub("%s*[Mm][Kk]%.?%s*%d+", "")
+    base = base:gsub("%s+iv$", ""):gsub("%s+iii$", ""):gsub("%s+ii$", ""):gsub("%s+i$", "")
+    base = base:gsub("_[%d]+[a-z]?$", ""):gsub("%s+%d+$", "")
+    base = base:gsub("[^a-z0-9]+", " "):match("^%s*(.-)%s*$") or "machine"
+    if base == "" then base = "machine" end
+
+    return base, tier, (dispName ~= "" and dispName or "Machine")
+end
+
+function StationData.GetContainerTopItems(container, maxCount)
+    local items = {}
+    local inv = StationData.GetContainerInventory(container)
+    if not Core.IsValidObj(inv) then return items end
+
+    local byKey = {}
+    local okSlots, slots = pcall(function() return inv:GetItemSlots() end)
+    if okSlots and slots then
+        StationData.ForEachArray(slots, function(_, elem)
+            local st = Core.UnwrapStruct(elem)
+            if st and Core.IsValidObj(st.Item) then
+                local amt = tonumber(st.Amount) or 0
+                if amt > 0 then
+                    local k = StationData.GetObjectKey(st.Item)
+                    if not byKey[k] then
+                        byKey[k] = { Item = st.Item, Amount = 0 }
+                    end
+                    byKey[k].Amount = byKey[k].Amount + amt
+                end
+            end
+        end)
+    end
+    for _, e in pairs(byKey) do
+        table.insert(items, e)
+    end
+    table.sort(items, function(a, b) return a.Amount > b.Amount end)
+    if maxCount and #items > maxCount then
+        while #items > maxCount do table.remove(items) end
+    end
+    return items
+end
+
+function StationData.GetProducerOutputsAndRates(machine)
+    local outputs = {}
+    if not Core.IsValidObj(machine) then return outputs end
+
+    local rec = nil
+    pcall(function() rec = machine.Recipe end)
+    if not Core.IsValidObj(rec) then return outputs end
+
+    local bonusMult = 1.0
+    pcall(function()
+        local bm = Core.GetFPFloat(machine.BonusMultiplier)
+        if bm > 0.0001 then bonusMult = bm end
+    end)
+
+    local craftSec = 1.0
+    local okSec, sec = pcall(function() return rec:GetCraftingSeconds() end)
+    if okSec and type(sec) == "number" and sec > 0.0001 then
+        craftSec = sec
+    end
+
+    local okOut, outStack = pcall(function() return rec.Output end)
+    if okOut and outStack and Core.IsValidObj(outStack.Item) then
+        local amt = tonumber(outStack.Amount) or 1
+        local rate = (amt * 60.0 / craftSec) * bonusMult
+        table.insert(outputs, { Item = outStack.Item, Rate = rate })
+        return outputs
+    end
+
+    local okOuts, outs = pcall(function() return rec:GetOutputs() end)
+    if okOuts and outs then
+        StationData.ForEachArray(outs, function(_, elem)
+            local st = Core.UnwrapStruct(elem)
+            if st and Core.IsValidObj(st.Item) then
+                local amt = tonumber(st.Amount) or 1
+                local rate = (amt * 60.0 / craftSec) * bonusMult
+                table.insert(outputs, { Item = st.Item, Rate = rate })
+            end
+        end)
+    end
+    return outputs
 end
 
 function StationData.GetMachineCategory(machine)

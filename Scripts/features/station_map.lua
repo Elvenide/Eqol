@@ -2,9 +2,9 @@
 -- Accessible via configurable keybind (default N).
 -- Features:
 --   - Gridded 2D top-down view (1 cell = 1x1 machine / 100cm conveyor belt)
---   - Station modules with clear module borders and vertical paginated floor selector (^ / 5..1 / v)
---   - Top-down 3D machine artwork captured once per machine class via SceneCapture2D + RenderTarget2D
---   - Clickable item icon overlays on major non-conveyor machines (shared toggle with minimap/3D labels)
+--   - Station floors matching total elevator stack height, with tall vertical paginated floor selector (^ / 5..1 / v)
+--   - Tier-shaded type-colored machine rectangles with 2D build-menu asset icons
+--   - Containers display contained items; Producers display output items & rates/min (clickable toggles)
 --   - Hover tooltip showing conveyor belt carried items on mouse hover
 --   - Hold-click box select, Shift+Click multi-select, Ctrl+C / Copy -> repeatable multi-ghost Paste (right-click cancels)
 --   - Press B to pick a machine and place cursor ghost(s) directly on the map, with bottom-right Apply Changes button
@@ -33,12 +33,6 @@ local PATHS = {
     HorizontalBoxClass= "/Script/UMG.HorizontalBox",
     WidgetLayoutLibCDO= "/Script/UMG.Default__WidgetLayoutLibrary",
     SlateLibCDO       = "/Script/UMG.Default__SlateBlueprintLibrary",
-    KismetRenderLibCDO= "/Script/Engine.Default__KismetRenderingLibrary",
-    ActorClass        = "/Script/Engine.Actor",
-    SceneCaptureComp  = "/Script/Engine.SceneCaptureComponent2D",
-    StaticMeshComp    = "/Script/Engine.StaticMeshComponent",
-    PointLightComp    = "/Script/Engine.PointLightComponent",
-    PlaneMeshPath     = "/Engine/BasicShapes/Plane.Plane",
 }
 
 local CELL_CM = 100.0
@@ -106,7 +100,7 @@ local RenderedConveyors = {} -- subset of RenderedMachines where cat == "Conveyo
 local FloorIconButtons = {}  -- mAddr -> { btn, widget }
 local FloorRailButtons = {}  -- list of WBP_Button_C instances in floor selector
 local TrackedButtons = {}    -- list of static WBP_Button_C instances for hover check
-local CaptureDiagLogged = false
+local IconDiagLogged = false
 local CursorDiagLogged = false
 local LastPanRedrawClock = 0.0
 
@@ -137,18 +131,8 @@ local MouseState = {
     lastCursorMx = nil, lastCursorMy = nil,
 }
 
--- Top-Down 3D Sprite Capture State (cached per machine class across opens in the same world)
-local MachineSpriteCache = {} -- clsKey -> { rt = UTextureRenderTarget2D, orthoCm = number, ready = bool, queued = bool, specs = table }
-local CaptureQueue = {}
-local CaptureRunning = false
-local CaptureStudio = {
-    Actor = nil,
-    CaptureComp = nil,
-    LightComp = nil,
-    BackdropComp = nil,
-    MeshComps = {},
-    BasePos = { X = 0, Y = 0, Z = -50000 },
-}
+-- Cached 2D Visual Styles per machine class (cached across opens in same world)
+local MachineSpriteCache = {} -- clsKey -> { tex, bgCol, borderCol, typeKey, tier, directional }
 
 -- Forward declarations
 local RefreshStationMapCanvas
@@ -320,475 +304,130 @@ local function IsMajorNonConveyorMachine(machine, cat)
 end
 
 --------------------------------------------------------------------------------
--- Top-Down 3D Machine Sprite Capture Studio
+-- 2D Machine Visuals, Type Colors & Tier Shading
 --------------------------------------------------------------------------------
 
-local function DestroyCaptureStudio()
-    if Core.IsValidObj(CaptureStudio.Actor) then
-        pcall(function() CaptureStudio.Actor:K2_DestroyActor() end)
+local TYPE_BASE_COLORS = {
+    { pat = "assembler",   col = { R = 0.24, G = 0.62, B = 0.92 } }, -- Light Blue -> Dark Blue by tier
+    { pat = "smelter",     col = { R = 0.90, G = 0.45, B = 0.16 } }, -- Orange
+    { pat = "furnace",     col = { R = 0.90, G = 0.45, B = 0.16 } },
+    { pat = "refinery",    col = { R = 0.88, G = 0.68, B = 0.16 } }, -- Gold-Amber
+    { pat = "chemical",    col = { R = 0.84, G = 0.72, B = 0.18 } },
+    { pat = "fabricator",  col = { R = 0.16, G = 0.76, B = 0.68 } }, -- Teal
+    { pat = "constructor", col = { R = 0.16, G = 0.76, B = 0.68 } },
+    { pat = "foundry",     col = { R = 0.86, G = 0.36, B = 0.22 } },
+    { pat = "container",   col = { R = 0.46, G = 0.32, B = 0.80 } }, -- Violet-Purple
+    { pat = "chest",       col = { R = 0.46, G = 0.32, B = 0.80 } },
+    { pat = "storage",     col = { R = 0.46, G = 0.32, B = 0.80 } },
+    { pat = "warehouse",   col = { R = 0.46, G = 0.32, B = 0.80 } },
+    { pat = "splitter",    col = { R = 0.78, G = 0.30, B = 0.62 } }, -- Magenta
+    { pat = "balancer",    col = { R = 0.78, G = 0.30, B = 0.62 } },
+    { pat = "merger",      col = { R = 0.78, G = 0.30, B = 0.62 } },
+    { pat = "underground", col = { R = 0.34, G = 0.40, B = 0.82 } }, -- Indigo
+    { pat = "conveyor",    col = { R = 0.36, G = 0.46, B = 0.58 } }, -- Cool Steel-Slate
+    { pat = "belt",        col = { R = 0.36, G = 0.46, B = 0.58 } },
+    { pat = "elevator",    col = { R = 0.20, G = 0.72, B = 0.42 } }, -- Emerald Green
+    { pat = "miner",       col = { R = 0.24, G = 0.50, B = 0.84 } }, -- Cobalt
+    { pat = "drone",       col = { R = 0.24, G = 0.50, B = 0.84 } },
+    { pat = "extractor",   col = { R = 0.24, G = 0.50, B = 0.84 } },
+    { pat = "turret",      col = { R = 0.82, G = 0.24, B = 0.26 } }, -- Crimson
+    { pat = "reactor",     col = { R = 0.54, G = 0.80, B = 0.20 } }, -- Lime Green
+    { pat = "generator",   col = { R = 0.54, G = 0.80, B = 0.20 } },
+    { pat = "solar",       col = { R = 0.74, G = 0.78, B = 0.18 } },
+    { pat = "battery",     col = { R = 0.42, G = 0.76, B = 0.28 } },
+    { pat = "dock",        col = { R = 0.62, G = 0.36, B = 0.52 } }, -- Plum
+    { pat = "shipyard",    col = { R = 0.62, G = 0.36, B = 0.52 } },
+}
+
+local function HsvToRgb(h, s, v)
+    local c = v * s
+    local hh = (h % 360.0) / 60.0
+    local x = c * (1.0 - math.abs((hh % 2.0) - 1.0))
+    local m = v - c
+    local r, g, b = 0, 0, 0
+    if hh < 1.0 then r, g, b = c, x, 0
+    elseif hh < 2.0 then r, g, b = x, c, 0
+    elseif hh < 3.0 then r, g, b = 0, c, x
+    elseif hh < 4.0 then r, g, b = 0, x, c
+    elseif hh < 5.0 then r, g, b = x, 0, c
+    else r, g, b = c, 0, x end
+    return { R = r + m, G = g + m, B = b + m }
+end
+
+local function ComputeBaseColorForType(typeKey)
+    for _, rule in ipairs(TYPE_BASE_COLORS) do
+        if typeKey:find(rule.pat, 1, true) then
+            return rule.col
+        end
     end
-    CaptureStudio.Actor = nil
-    CaptureStudio.CaptureComp = nil
-    CaptureStudio.LightComp = nil
-    CaptureStudio.BackdropComp = nil
-    CaptureStudio.MeshComps = {}
+    local hash = 0
+    for i = 1, #typeKey do
+        hash = (hash * 37 + string.byte(typeKey, i)) % 360
+    end
+    return HsvToRgb(hash, 0.62, 0.80)
+end
+
+local function GetShadedColorForTypeAndTier(typeKey, tier)
+    local base = ComputeBaseColorForType(typeKey or "machine")
+    local mult = 1.0
+    if tier == 2 then mult = 0.68
+    elseif tier == 3 then mult = 0.46
+    elseif tier >= 4 then mult = math.max(0.28, 0.46 * (0.72 ^ (tier - 3))) end
+    return {
+        R = base.R * mult,
+        G = base.G * mult,
+        B = base.B * mult,
+        A = 0.94,
+    }, {
+        R = math.max(0.05, base.R * mult * 0.52),
+        G = math.max(0.05, base.G * mult * 0.52),
+        B = math.max(0.05, base.B * mult * 0.52),
+        A = 1.0,
+    }
 end
 
 local function ResetSpriteCache()
-    DestroyCaptureStudio()
     MachineSpriteCache = {}
-    CaptureQueue = {}
-    CaptureRunning = false
-    CaptureDiagLogged = false
+    IconDiagLogged = false
 end
 
 local function IsFiniteNum(v)
     return type(v) == "number" and v == v and v > -1e9 and v < 1e9
 end
 
-local function CreateSpriteRenderTarget(pc, rtW, rtH, clearCol)
-    local krl = Core.GetCDO(PATHS.KismetRenderLibCDO)
-    if not (Core.IsValidObj(pc) and Core.IsValidObj(krl) and krl.CreateRenderTarget2D) then
-        return nil, "missing KRL/CreateRenderTarget2D"
-    end
-    local w = Core.Clamp(math.floor(rtW or 128), 32, 256)
-    local h = Core.Clamp(math.floor(rtH or 128), 32, 256)
-    local col = clearCol or COLORS.ModuleFill
-    local lastErr = "unknown"
-    for _, fmt in ipairs({ 3, 2 }) do
-        local ok7, rt7 = pcall(function()
-            return krl:CreateRenderTarget2D(pc, w, h, fmt, col, false, false)
-        end)
-        if ok7 and Core.IsValidObj(rt7) then return rt7, nil end
-        if not ok7 then lastErr = tostring(rt7) end
-
-        local ok6, rt6 = pcall(function()
-            return krl:CreateRenderTarget2D(pc, w, h, fmt, col, false)
-        end)
-        if ok6 and Core.IsValidObj(rt6) then return rt6, nil end
-        if not ok6 then lastErr = tostring(rt6) end
-    end
-    return nil, lastErr
-end
-
-local function CollectMeshSpecsFromActor(actor)
-    local specs = {}
-    if not Core.IsValidObj(actor) then return specs end
-    local smCls = Core.FindOrLoadClass(PATHS.StaticMeshComp)
-    if not Core.IsValidObj(smCls) or not actor.K2_GetComponentsByClass then return specs end
-
-    pcall(function()
-        local rawComps = actor:K2_GetComponentsByClass(smCls)
-        StationData.ForEachArray(rawComps, function(_, elem)
-            local c = Core.UnwrapArrayElem(elem)
-            if not Core.IsValidObj(c) then return end
-            local sm = c.StaticMesh
-            if not Core.IsValidObj(sm) then return end
-            local smName = SafeFNameStr(sm) or ""
-            if (c.bHiddenInGame == true) and (smName == "Cube" or smName:find("Collision", 1, true)) then
-                return
-            end
-            local okVis, vis = pcall(function() return c:IsVisible() end)
-            if okVis and vis == false then
-                return
-            end
-
-            local rl = c.RelativeLocation
-            local rr = c.RelativeRotation
-            local rs = c.RelativeScale3D
-            local mats = {}
-            pcall(function()
-                if c.GetNumMaterials and c.GetMaterial then
-                    local nm = math.min(tonumber(c:GetNumMaterials()) or 0, 8)
-                    for mi = 0, nm - 1 do
-                        local mat = c:GetMaterial(mi)
-                        if Core.IsValidObj(mat) then
-                            mats[mi + 1] = { idx = mi, mat = mat }
-                        end
-                    end
-                end
-            end)
-
-            table.insert(specs, {
-                sm = sm,
-                loc = {
-                    X = rl and (tonumber(rl.X) or 0.0) or 0.0,
-                    Y = rl and (tonumber(rl.Y) or 0.0) or 0.0,
-                    Z = rl and (tonumber(rl.Z) or 0.0) or 0.0,
-                },
-                rot = {
-                    Pitch = rr and (tonumber(rr.Pitch) or 0.0) or 0.0,
-                    Yaw   = rr and (tonumber(rr.Yaw) or 0.0) or 0.0,
-                    Roll  = rr and (tonumber(rr.Roll) or 0.0) or 0.0,
-                },
-                scale = {
-                    X = rs and (tonumber(rs.X) or 1.0) or 1.0,
-                    Y = rs and (tonumber(rs.Y) or 1.0) or 1.0,
-                    Z = rs and (tonumber(rs.Z) or 1.0) or 1.0,
-                },
-                mats = mats,
-            })
-        end)
-    end)
-    return specs
-end
-
-local function ApplyShowOnlyActor(capComp, studioActor)
-    if not (Core.IsValidObj(capComp) and Core.IsValidObj(studioActor)) then return end
-    if capComp.ClearShowOnlyComponents then
-        pcall(function() capComp:ClearShowOnlyComponents() end)
-    end
-    local ok2 = pcall(function() capComp:ShowOnlyActorComponents(studioActor, false) end)
-    if not ok2 then
-        local ok1 = pcall(function() capComp:ShowOnlyActorComponents(studioActor) end)
-        if not ok1 then
-            pcall(function() capComp:ShowOnlyActorComponents(studioActor, false, false) end)
-        end
-    end
-end
-
-local function EnsureCaptureStudio(pc)
-    if Core.IsValidObj(CaptureStudio.Actor) and Core.IsValidObj(CaptureStudio.CaptureComp) then
-        return true
-    end
-    if not Core.IsValidObj(pc) then return false end
-
-    local basePos = { X = 0.0, Y = 0.0, Z = -55000.0 }
-    if Core.IsValidObj(CurrentStation) then
-        local b = StationData.GetPlatformWorldBounds(CurrentStation)
-        basePos = { X = b.cx, Y = b.cy, Z = (b.cz or 0.0) - 55000.0 }
-    elseif Core.IsValidObj(pc.Pawn) then
-        pcall(function()
-            local l = pc.Pawn:K2_GetActorLocation()
-            if l then basePos = { X = l.X or 0, Y = l.Y or 0, Z = (l.Z or 0) - 55000.0 } end
-        end)
-    end
-    CaptureStudio.BasePos = basePos
-
-    local studioActor = Core.SpawnActor(pc, PATHS.ActorClass, basePos, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
-    if not Core.IsValidObj(studioActor) then
-        if not CaptureDiagLogged then
-            CaptureDiagLogged = true
-            Core.Log("[StationMap] CaptureStudio FAILED SpawnActor(" .. PATHS.ActorClass .. ")")
-        end
-        return false
-    end
-
-    local capCls = Core.FindOrLoadClass(PATHS.SceneCaptureComp)
-    local lightCls = Core.FindOrLoadClass(PATHS.PointLightComp)
-    local smCls = Core.FindOrLoadClass(PATHS.StaticMeshComp)
-    if not Core.IsValidObj(capCls) or not Core.IsValidObj(smCls) then
-        if not CaptureDiagLogged then
-            CaptureDiagLogged = true
-            Core.Log("[StationMap] CaptureStudio FAILED FindOrLoadClass SceneCaptureComp/StaticMeshComp")
-        end
-        pcall(function() studioActor:K2_DestroyActor() end)
-        return false
-    end
-
-    local idXform = {
-        Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
-        Translation = { X = 0.0, Y = 0.0, Z = 0.0 },
-        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
-    }
-
-    local okCap, capComp = pcall(function() return studioActor:AddComponentByClass(capCls, false, idXform, false) end)
-    if not okCap or not Core.IsValidObj(capComp) then
-        if not CaptureDiagLogged then
-            CaptureDiagLogged = true
-            Core.Log("[StationMap] CaptureStudio FAILED AddComponentByClass(SceneCaptureComp): " .. tostring(capComp))
-        end
-        pcall(function() studioActor:K2_DestroyActor() end)
-        return false
-    end
-
-    pcall(function()
-        capComp.ProjectionType = 1 -- ECameraProjectionMode::Orthographic
-        capComp.PrimitiveRenderMode = 2 -- PRM_UseShowOnlyList
-        capComp.CaptureSource = 2 -- SCS_FinalColorLDR
-        capComp.bCaptureEveryFrame = false
-        capComp.bCaptureOnMovement = false
-        capComp.bAlwaysPersistRenderingState = true
-        -- Pitch=-90 looks down -Z; Yaw=-90 maps camera Right=+X (screen U) and -Up=+Y (screen V)
-        capComp:K2_SetRelativeLocationAndRotation({ X = 0.0, Y = 0.0, Z = 1400.0 }, { Pitch = -90.0, Yaw = -90.0, Roll = 0.0 }, false, {}, false)
-        ApplyShowOnlyActor(capComp, studioActor)
-    end)
-
-    -- Add dual non-shadow-casting studio lights so top-down 3D meshes are evenly and brightly lit
-    local lightComp = nil
-    if Core.IsValidObj(lightCls) then
-        local lightPositions = {
-            { X = 400.0, Y = -400.0, Z = 1600.0, intensity = 16.0 },
-            { X = -400.0, Y = 400.0, Z = 1200.0, intensity = 10.0 },
-        }
-        for _, lp in ipairs(lightPositions) do
-            local okL, lc = pcall(function() return studioActor:AddComponentByClass(lightCls, false, idXform, false) end)
-            if okL and Core.IsValidObj(lc) then
-                if not lightComp then lightComp = lc end
-                pcall(function()
-                    lc:K2_SetRelativeLocation({ X = lp.X, Y = lp.Y, Z = lp.Z }, false, {}, false)
-                    if lc.SetIntensity then lc:SetIntensity(lp.intensity) end
-                    if lc.SetAttenuationRadius then lc:SetAttenuationRadius(25000.0) end
-                    lc.bUseInverseSquaredFalloff = false
-                    lc.CastShadows = false
-                end)
-            end
-        end
-    end
-
-    -- Tinted dark-slate floor backdrop matching COLORS.ModuleFill if a flat/unlit Material is available
-    local backdropComp = nil
-    local planeMesh = Core.FindOrLoadClass(PATHS.PlaneMeshPath)
-    local baseMat = nil
-    for _, mp in ipairs({
-        "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",
-        "/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial",
-        "/Engine/EngineMaterials/DefaultLitSpriteMaterial.DefaultLitSpriteMaterial",
-        "/Engine/EngineMaterials/DefaultDiffuse.DefaultDiffuse",
-    }) do
-        local m = Core.FindOrLoadClass(mp)
-        if Core.IsValidObj(m) then baseMat = m break end
-    end
-    if Core.IsValidObj(planeMesh) and Core.IsValidObj(baseMat) then
-        local okB, bc = pcall(function() return studioActor:AddComponentByClass(smCls, false, idXform, false) end)
-        if okB and Core.IsValidObj(bc) then
-            pcall(function()
-                bc:SetStaticMesh(planeMesh)
-                local dmi = bc.CreateDynamicMaterialInstance and bc:CreateDynamicMaterialInstance(0, baseMat) or nil
-                if Core.IsValidObj(dmi) then
-                    if dmi.SetVectorParameterValue then
-                        dmi:SetVectorParameterValue(FName("Color"), COLORS.ModuleFill)
-                        dmi:SetVectorParameterValue(FName("BaseColor"), COLORS.ModuleFill)
-                    end
-                    bc:K2_SetRelativeLocation({ X = 0.0, Y = 0.0, Z = -25.0 }, false, {}, false)
-                    bc:SetRelativeScale3D({ X = 60.0, Y = 60.0, Z = 1.0 })
-                    bc:SetCollisionEnabled(0)
-                    backdropComp = bc
-                else
-                    bc:DestroyComponent(bc)
-                end
-            end)
-        end
-    elseif not CaptureDiagLogged then
-        local matList = {}
-        pcall(function()
-            local allMats = FindAllOf("Material")
-            if allMats then
-                for _, mat in ipairs(allMats) do
-                    if Core.IsValidObj(mat) and #matList < 12 then
-                        local fn = SafeFullPath(mat) or "?"
-                        if fn:find("Color", 1, true) or fn:find("Unlit", 1, true) or fn:find("Flat", 1, true) or fn:find("Basic", 1, true) or fn:find("UI", 1, true) then
-                            table.insert(matList, fn)
-                        end
-                    end
-                end
-            end
-        end)
-        Core.Log(string.format("[StationMap] Backdrop diag plane=%s baseMat=%s flatCandidates=[%s]",
-            tostring(Core.IsValidObj(planeMesh)), tostring(Core.IsValidObj(baseMat)), table.concat(matList, "; ")))
-    end
-
-    CaptureStudio.Actor = studioActor
-    CaptureStudio.CaptureComp = capComp
-    CaptureStudio.LightComp = lightComp
-    CaptureStudio.BackdropComp = backdropComp
-    CaptureStudio.MeshComps = {}
-    return true
-end
-
-local function ProcessNextCapture()
-    if #CaptureQueue == 0 or not Core.IsValidObj(ActiveMapWin) then
-        CaptureRunning = false
-        return
-    end
-    CaptureRunning = true
-
-    local item = table.remove(CaptureQueue, 1)
-    local pc = Core.GetLocalPlayerController()
-    local capErr = nil
-    if item and item.entry and Core.IsValidObj(pc) and EnsureCaptureStudio(pc) then
-        local okCapRun, errRun = pcall(function()
-            local smCls = Core.FindOrLoadClass(PATHS.StaticMeshComp)
-            local studioActor = CaptureStudio.Actor
-            local capComp = CaptureStudio.CaptureComp
-
-            for i = #CaptureStudio.MeshComps + 1, #item.specs do
-                local idXform = {
-                    Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
-                    Translation = { X = 0.0, Y = 0.0, Z = 0.0 },
-                    Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
-                }
-                local okM, mc = pcall(function() return studioActor:AddComponentByClass(smCls, false, idXform, false) end)
-                if okM and Core.IsValidObj(mc) then
-                    pcall(function() mc:SetCollisionEnabled(0) end)
-                    CaptureStudio.MeshComps[i] = mc
-                end
-            end
-
-            for i = 1, #CaptureStudio.MeshComps do
-                local mc = CaptureStudio.MeshComps[i]
-                local spec = item.specs[i]
-                if Core.IsValidObj(mc) then
-                    if spec and Core.IsValidObj(spec.sm) then
-                        mc:SetStaticMesh(spec.sm)
-                        mc:K2_SetRelativeLocationAndRotation(spec.loc, spec.rot, false, {}, false)
-                        mc:SetRelativeScale3D(spec.scale)
-                        for _, me in ipairs(spec.mats) do
-                            if Core.IsValidObj(me.mat) then
-                                mc:SetMaterial(me.idx, me.mat)
-                            end
-                        end
-                        mc:SetVisibility(true, false)
-                    else
-                        mc:SetVisibility(false, false)
-                    end
-                end
-            end
-
-            capComp:K2_SetRelativeLocationAndRotation(
-                { X = item.entry.camCx or 0.0, Y = item.entry.camCy or 0.0, Z = 1400.0 },
-                { Pitch = -90.0, Yaw = -90.0, Roll = 0.0 }, false, {}, false)
-            capComp.OrthoWidth = item.entry.orthoCm
-            capComp.TextureTarget = item.entry.rt
-            ApplyShowOnlyActor(capComp, studioActor)
-
-            local krl = Core.GetCDO(PATHS.KismetRenderLibCDO)
-            if Core.IsValidObj(krl) and krl.ClearRenderTarget2D then
-                pcall(function() krl:ClearRenderTarget2D(pc, item.entry.rt, COLORS.ModuleFill) end)
-            end
-            capComp:CaptureScene()
-            item.entry.ready = true
-
-            if item.entry.imgRefs then
-                for _, ref in ipairs(item.entry.imgRefs) do
-                    if Core.IsValidObj(ref.img) then
-                        pcall(function()
-                            ref.img:SetBrushFromTexture(item.entry.rt, false)
-                        end)
-                    end
-                end
-            end
-        end)
-        if not okCapRun then
-            capErr = tostring(errRun)
-        end
-    end
-
-    if not CaptureDiagLogged then
-        CaptureDiagLogged = true
-        Core.Log(string.format("[StationMap] FirstCapture specs=%d ortho=%.0f backdrop=%s ready=%s err=%s remaining=%d",
-            item and item.specs and #item.specs or -1,
-            item and item.entry and item.entry.orthoCm or 0,
-            tostring(Core.IsValidObj(CaptureStudio.BackdropComp)),
-            tostring(item and item.entry and item.entry.ready),
-            tostring(capErr),
-            #CaptureQueue))
-    end
-
-    if #CaptureQueue > 0 then
-        ExecuteInGameThreadAfterFrames(2, ProcessNextCapture)
-    else
-        CaptureRunning = false
-    end
-end
-
-local function ComputeSpecsBounds2D(specs)
-    local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
-    local any = false
-    for _, sp in ipairs(specs) do
-        if Core.IsValidObj(sp.sm) and sp.sm.ExtendedBounds and sp.sm.ExtendedBounds.BoxExtent and sp.sm.ExtendedBounds.Origin then
-            local eb = sp.sm.ExtendedBounds
-            local ox = (tonumber(eb.Origin.X) or 0.0) * sp.scale.X + sp.loc.X
-            local oy = (tonumber(eb.Origin.Y) or 0.0) * sp.scale.Y + sp.loc.Y
-            local ex = math.abs((tonumber(eb.BoxExtent.X) or 0.0) * sp.scale.X)
-            local ey = math.abs((tonumber(eb.BoxExtent.Y) or 0.0) * sp.scale.Y)
-            -- Rotate component extent by local Yaw if component is rotated inside actor
-            local yawRad = math.rad(sp.rot.Yaw or 0.0)
-            local ca, sa = math.abs(math.cos(yawRad)), math.abs(math.sin(yawRad))
-            local rex = ex * ca + ey * sa
-            local rey = ex * sa + ey * ca
-            any = true
-            if ox - rex < minX then minX = ox - rex end
-            if ox + rex > maxX then maxX = ox + rex end
-            if oy - rey < minY then minY = oy - rey end
-            if oy + rey > maxY then maxY = oy + rey end
-        end
-    end
-    if not any then return 0.0, 0.0, 100.0, 100.0 end
-    return (minX + maxX) * 0.5, (minY + maxY) * 0.5, math.max(50.0, maxX - minX), math.max(50.0, maxY - minY)
-end
-
-local function RequestMachineSprite(clsKey, actor, cellsX, cellsY, buildableOpt)
-    if not clsKey then return nil end
-    local existing = MachineSpriteCache[clsKey]
-    if existing then
-        return existing
-    end
-
-    local specs = Core.IsValidObj(actor) and CollectMeshSpecsFromActor(actor) or {}
-    if #specs == 0 and Core.IsValidObj(buildableOpt) then
-        local pc = Core.GetLocalPlayerController()
-        local aCls = nil
-        pcall(function() aCls = buildableOpt.ActorClass or buildableOpt.PreviewClass or buildableOpt.BlockClass end)
-        if Core.IsValidObj(pc) and Core.IsValidObj(aCls) then
-            local aPath = SafeFullPath(aCls)
-            if aPath then
-                local tmp = Core.SpawnActor(pc, aPath, { X = 0.0, Y = 0.0, Z = -60000.0 }, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
-                if Core.IsValidObj(tmp) then
-                    specs = CollectMeshSpecsFromActor(tmp)
-                    pcall(function() tmp:K2_DestroyActor() end)
-                end
-            end
-        end
-    end
-
-    if #specs == 0 then
-        if not CaptureDiagLogged then
-            CaptureDiagLogged = true
-            Core.Log(string.format("[StationMap] RequestMachineSprite NO SPECS clsKey=%s actorValid=%s bldValid=%s",
-                tostring(clsKey), tostring(Core.IsValidObj(actor)), tostring(Core.IsValidObj(buildableOpt))))
-        end
-        MachineSpriteCache[clsKey] = { unavailable = true }
+local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
+    if clsKey and MachineSpriteCache[clsKey] then
         return MachineSpriteCache[clsKey]
     end
 
-    local cx = math.max(1, cellsX or 1)
-    local cy = math.max(1, cellsY or 1)
-    local meshCx, meshCy, meshW, meshH = ComputeSpecsBounds2D(specs)
-    local orthoCm = math.max(cx * CELL_CM, meshW)
-    if orthoCm < (cy * CELL_CM * (cx / cy)) then
-        orthoCm = cy * CELL_CM * (cx / cy)
-    end
-    local rtW = Core.Clamp(cx * 80, 64, 256)
-    local rtH = Core.Clamp(cy * 80, 64, 256)
+    local typeKey, tier, dispName = StationData.GetMachineTypeAndTier(machine, buildableOpt)
+    local bgCol, borderCol = GetShadedColorForTypeAndTier(typeKey, tier)
+    local tex = StationData.GetBuildableIconTexture(machine, buildableOpt)
+    local directional = (cat == "Conveyor")
+        or typeKey:find("conveyor", 1, true) ~= nil
+        or typeKey:find("belt", 1, true) ~= nil
+        or typeKey:find("splitter", 1, true) ~= nil
+        or typeKey:find("balancer", 1, true) ~= nil
+        or typeKey:find("merger", 1, true) ~= nil
+        or typeKey:find("underground", 1, true) ~= nil
 
-    local pc = Core.GetLocalPlayerController()
-    local rt, rtErr = CreateSpriteRenderTarget(pc, rtW, rtH, COLORS.ModuleFill)
-    if not Core.IsValidObj(rt) then
-        if not CaptureDiagLogged then
-            CaptureDiagLogged = true
-            Core.Log(string.format("[StationMap] CreateRenderTarget2D FAILED clsKey=%s err=%s", tostring(clsKey), tostring(rtErr)))
-        end
-        MachineSpriteCache[clsKey] = { unavailable = true }
-        return MachineSpriteCache[clsKey]
+    if not IconDiagLogged and (Core.IsValidObj(machine) or Core.IsValidObj(buildableOpt)) then
+        IconDiagLogged = true
+        local bld = Core.IsValidObj(buildableOpt) and buildableOpt or (Core.IsValidObj(machine) and pcall(function() return machine.Buildable end) and machine.Buildable or nil)
+        Core.Log(string.format("[StationMap] 2DIconSample type=%s tier=%d name=%s bldValid=%s texValid=%s",
+            tostring(typeKey), tier, tostring(dispName), tostring(Core.IsValidObj(bld)), tostring(Core.IsValidObj(tex))))
     end
 
     local entry = {
-        rt = rt,
-        orthoCm = orthoCm,
-        camCx = (math.abs(meshCx) > 25.0) and meshCx or 0.0,
-        camCy = (math.abs(meshCy) > 25.0) and meshCy or 0.0,
-        cellsX = cx,
-        cellsY = cy,
-        ready = false,
-        queued = true,
-        imgRefs = {},
+        tex = tex,
+        bgCol = bgCol,
+        borderCol = borderCol,
+        typeKey = typeKey,
+        tier = tier,
+        directional = directional,
     }
-    MachineSpriteCache[clsKey] = entry
-    table.insert(CaptureQueue, { entry = entry, specs = specs })
-    if not CaptureRunning then
-        CaptureRunning = true
-        ExecuteInGameThreadAfterFrames(1, ProcessNextCapture)
+    if clsKey then
+        MachineSpriteCache[clsKey] = entry
     end
     return entry
 end
@@ -1095,56 +734,65 @@ local function CreateLabeledButton(parentWindow, pc, outer, labelStr, fontSz, wi
     return ov, btn, txt
 end
 
-local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, mx, my, pxW, pxH, yawDeg, cat, spriteEntry, isGhost, validGhost, zBase)
-    local isSquare = (math.abs(pxW - pxH) < 2.0)
+local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, mx, my, pxW, pxH, yawDeg, cat, spriteEntry, isGhost, validGhost, zBase, hasBottomOverlay)
+    local fillW = math.max(6.0, pxW - 2.0)
+    local fillH = math.max(6.0, pxH - 2.0)
 
-    if spriteEntry and not spriteEntry.unavailable and Core.IsValidObj(spriteEntry.rt) then
+    local bgCol = (spriteEntry and spriteEntry.bgCol) or GetColorForMachine(cat)
+    local bdrCol = (spriteEntry and spriteEntry.borderCol) or { R = 0.08, G = 0.10, B = 0.14, A = 1.0 }
+    if isGhost then
+        bgCol = validGhost and COLORS.GhostValid or COLORS.GhostInvalid
+        bdrCol = validGhost and COLORS.GhostBorderOk or COLORS.GhostBorderBad
+    end
+
+    -- Outer subtle frame border + full-footprint colored fill covering the entire machine rectangle
+    local bdrBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    if Core.IsValidObj(bdrBox) then
+        pcall(function()
+            bdrBox:SetVisibility(3)
+            bdrBox:SetBrushColor(bdrCol)
+        end)
+        local bs = targetCanvas:AddChildToCanvas(bdrBox)
+        SetCanvasSlot(bs, mx, my, math.max(6.0, pxW), math.max(6.0, pxH), 0.5, 0.5, zBase)
+    end
+
+    local fillBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    if Core.IsValidObj(fillBox) then
+        pcall(function()
+            fillBox:SetVisibility(3)
+            fillBox:SetBrushColor(bgCol)
+        end)
+        local fs = targetCanvas:AddChildToCanvas(fillBox)
+        SetCanvasSlot(fs, mx, my, fillW, fillH, 0.5, 0.5, zBase + 1)
+    end
+
+    -- Centered 2D build-menu machine asset inside the colored rectangle
+    if spriteEntry and Core.IsValidObj(spriteEntry.tex) then
         local img = Core.CreateRawWidget(PATHS.ImageClass, outer)
         if Core.IsValidObj(img) then
-            local baseW, baseH = pxW, pxH
-            if not isSquare and math.abs(((yawDeg or 0.0) % 180.0) - 90.0) < 45.0 then
-                baseW, baseH = pxH, pxW
-            end
+            local shiftUp = (hasBottomOverlay and pxH >= 52.0)
+            local availH = shiftUp and (fillH * 0.56) or (fillH * 0.80)
+            local availW = fillW * 0.80
+            local iconDim = math.max(6.0, math.min(availW, availH))
+            local iconY = shiftUp and (my - fillH * 0.17) or my
             pcall(function()
-                img:SetVisibility(3) -- HitTestInvisible so drag/click reaches canvas polling
-                img:SetBrushFromTexture(spriteEntry.rt, false)
+                img:SetVisibility(3)
+                img:SetBrushFromTexture(spriteEntry.tex, false)
                 if isGhost then
-                    SetImageWidgetOpacity(img, validGhost and COLORS.GhostValid or COLORS.GhostInvalid)
+                    SetImageWidgetOpacity(img, validGhost and { R = 0.85, G = 1.0, B = 1.0, A = 0.72 } or { R = 1.0, G = 0.5, B = 0.5, A = 0.72 })
                 else
                     SetImageWidgetOpacity(img, { R = 1.0, G = 1.0, B = 1.0, A = 1.0 })
                 end
-                if math.abs(yawDeg or 0.0) > 0.1 and img.SetRenderTransformAngle then
+                if spriteEntry.directional and math.abs(yawDeg or 0.0) > 0.1 and img.SetRenderTransformAngle then
                     img:SetRenderTransformAngle(yawDeg)
                 end
             end)
-            local slot = targetCanvas:AddChildToCanvas(img)
-            SetCanvasSlot(slot, mx, my, math.max(6.0, baseW), math.max(6.0, baseH), 0.5, 0.5, zBase)
-            if not spriteEntry.ready and spriteEntry.imgRefs then
-                table.insert(spriteEntry.imgRefs, { img = img })
-            end
-            return img
+            local islot = targetCanvas:AddChildToCanvas(img)
+            SetCanvasSlot(islot, mx, iconY, iconDim, iconDim, 0.5, 0.5, zBase + 2)
         end
     end
 
-    -- Fallback clean 2D tile if meshes couldn't be captured
-    local box = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if Core.IsValidObj(box) then
-        local col = GetColorForMachine(cat)
-        if isGhost then
-            col = validGhost and COLORS.GhostValid or COLORS.GhostInvalid
-        end
-        pcall(function()
-            box:SetVisibility(3)
-            box:SetBrushColor(col)
-        end)
-        if not isSquare and math.abs((yawDeg or 0.0) % 180.0 - 90.0) < 45.0 then
-            pxW, pxH = pxH, pxW
-        end
-        local slot = targetCanvas:AddChildToCanvas(box)
-        SetCanvasSlot(slot, mx, my, math.max(6.0, pxW - 2.0), math.max(6.0, pxH - 2.0), 0.5, 0.5, zBase)
-        return box
-    end
-    return nil
+    return fillBox
 end
 
 local function RenderBorderOutline(outer, canvas, cx, cy, w, h, thickness, col, zOrder)
@@ -1322,7 +970,7 @@ RefreshDynamicOverlay = function()
         if InteractionMode == "Place" and Core.IsValidObj(PendingBuildable) then
             local cx, cy = StationData.GetMachineFootprintCells(nil, PendingBuildable)
             local clsKey = select(1, GetMachineClassKey(nil, PendingBuildable))
-            local sprite = clsKey and RequestMachineSprite(clsKey, nil, cx, cy, PendingBuildable) or nil
+            local sprite = RequestMachineSprite(clsKey, nil, "Other", PendingBuildable)
             table.insert(itemsToPreview, {
                 buildable = PendingBuildable,
                 wx = wx, wy = wy,
@@ -1357,7 +1005,7 @@ RefreshDynamicOverlay = function()
             local pxW = rx * cellPx
             local pxH = ry * cellPx
 
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.OverlayCanvas, gmx, gmy, pxW, pxH, gp.yaw, "Other", gp.sprite, true, valid, 55)
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.OverlayCanvas, gmx, gmy, pxW, pxH, gp.yaw, "Other", gp.sprite, true, valid, 55, false)
             RenderBorderOutline(outer, MapUI.OverlayCanvas, gmx, gmy, pxW, pxH, 2.0, valid and COLORS.GhostBorderOk or COLORS.GhostBorderBad, 56)
         end
     end
@@ -1536,10 +1184,31 @@ RefreshStationMapCanvas = function()
             local okB, bldRaw = pcall(function() return m.Buildable end)
             local bld = okB and Core.IsValidObj(bldRaw) and bldRaw or nil
             local okR, rec = pcall(function() return m.Recipe end)
-            local clsKey, actor = GetMachineClassKey(m, bld)
-            local sprite = clsKey and RequestMachineSprite(clsKey, actor, cellsX, cellsY, bld) or nil
+            local clsKey = select(1, GetMachineClassKey(m, bld))
+            local sprite = RequestMachineSprite(clsKey, m, cat, bld)
             local mAddr = m:GetAddress()
             local isSel = SelectedMachines[mAddr] ~= nil
+
+            -- Prepare Container items OR Producer output items & rates/min
+            local overlayChips = {}
+            local isContainer = (cat == "Container")
+            local isProducer = false
+            if isContainer then
+                local topItems = StationData.GetContainerTopItems(m, (pxW >= 72.0) and 2 or 1)
+                for _, entry in ipairs(topItems) do
+                    table.insert(overlayChips, { item = entry.Item, rate = nil })
+                end
+            elseif cat ~= "Conveyor" then
+                local outputs = StationData.GetProducerOutputsAndRates(m)
+                if #outputs > 0 then
+                    isProducer = true
+                    local maxChips = (pxW >= 80.0) and 2 or 1
+                    for i = 1, math.min(maxChips, #outputs) do
+                        table.insert(overlayChips, { item = outputs[i].Item, rate = outputs[i].Rate })
+                    end
+                end
+            end
+            local hasBottomOverlay = (#overlayChips > 0)
 
             local recEntry = {
                 machine = m,
@@ -1564,7 +1233,7 @@ RefreshStationMapCanvas = function()
                 table.insert(RenderedConveyors, recEntry)
             end
 
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, isSel and 16 or 10)
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, isSel and 16 or 10, hasBottomOverlay)
 
             if isSel then
                 local selFill = Core.CreateRawWidget(PATHS.BorderClass, outer)
@@ -1576,51 +1245,87 @@ RefreshStationMapCanvas = function()
                 RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, pxW, pxH, 2.0, COLORS.Selected, 18)
             end
 
-            -- Major non-conveyor machines get clickable overlaid item icons showing what they produce/store
-            if IsMajorNonConveyorMachine(m, cat) then
-                local item = StationData.GetPrimaryItemForMachine(m)
-                if Core.IsValidObj(item) then
-                    local isHidden = StationData.IsMachineIconHidden(m)
-                    local iconSize = Core.Clamp(math.min(pxW, pxH) * 0.65, 16.0, 34.0)
-                    local ov = Core.CreateRawWidget(PATHS.OverlayClass, outer)
-                    local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
-                    local iconWidget = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
-                    if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(iconWidget) then
-                        pcall(function()
-                            iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.65 })
-                            iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                            local bSlot = ov:AddChildToOverlay(iconBtn)
-                            if Core.IsValidObj(bSlot) then
-                                bSlot:SetHorizontalAlignment(0)
-                                bSlot:SetVerticalAlignment(0)
-                            end
-                            local wSlot = ov:AddChildToOverlay(iconWidget)
-                            if Core.IsValidObj(wSlot) then
-                                wSlot:SetHorizontalAlignment(2)
-                                wSlot:SetVerticalAlignment(2)
-                            end
-                            iconWidget.TooltipEnabled = false
-                            iconWidget:SetVisibility(3) -- HitTestInvisible so clicks reach iconBtn
-                            iconWidget:SetIconSize(iconSize)
-                            iconWidget:SetItem(item)
-                            iconWidget:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
-                        end)
-                        local iconTarget = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
-                        local iSlot = iconTarget:AddChildToCanvas(ov)
-                        SetCanvasSlot(iSlot, mx, my, iconSize + 6.0, iconSize + 6.0, 0.5, 0.5, 40)
+            -- Clickable item / production-rate badge overlays on Containers (items only) & Producers (items + rate/min)
+            if hasBottomOverlay then
+                local isHidden = StationData.IsMachineIconHidden(m)
+                local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 14.0, 26.0)
+                local badgeW = #overlayChips * (iconSize + 10.0) + ((#overlayChips > 1) and 4.0 or 0.0)
+                if isProducer then
+                    badgeW = math.max(badgeW, #overlayChips * math.max(38.0, iconSize + 18.0))
+                end
+                local badgeH = isProducer and (iconSize + 16.0) or (iconSize + 6.0)
+                local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
 
-                        FloorIconButtons[mAddr] = { btn = iconBtn, widget = iconWidget }
-                        local capturedM = m
-                        local capturedIcon = iconWidget
-                        Core.RegisterWBPButtonClick(iconBtn, function()
-                            local nowHidden = StationData.ToggleMachineIcon(capturedM)
-                            if Core.IsValidObj(capturedIcon) then
-                                pcall(function()
-                                    capturedIcon:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = nowHidden and 0.25 or 1.0 })
-                                end)
+                local ov = Core.CreateRawWidget(PATHS.OverlayClass, outer)
+                local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
+                local chipsHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+                if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(chipsHBox) then
+                    pcall(function()
+                        iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.72 })
+                        iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                        local bSlot = ov:AddChildToOverlay(iconBtn)
+                        if Core.IsValidObj(bSlot) then
+                            bSlot:SetHorizontalAlignment(0)
+                            bSlot:SetVerticalAlignment(0)
+                        end
+                        local cSlot = ov:AddChildToOverlay(chipsHBox)
+                        if Core.IsValidObj(cSlot) then
+                            cSlot:SetHorizontalAlignment(2)
+                            cSlot:SetVerticalAlignment(2)
+                        end
+                        chipsHBox:SetVisibility(3)
+
+                        for ci, chip in ipairs(overlayChips) do
+                            local chipVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
+                            local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
+                            if Core.IsValidObj(chipVBox) and Core.IsValidObj(itemW) then
+                                chipVBox:SetVisibility(3)
+                                local iwSlot = chipVBox:AddChildToVerticalBox(itemW)
+                                if Core.IsValidObj(iwSlot) then iwSlot:SetHorizontalAlignment(2) end
+                                itemW.TooltipEnabled = false
+                                itemW:SetVisibility(3)
+                                itemW:SetIconSize(iconSize)
+                                itemW:SetItem(chip.item)
+                                itemW:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
+
+                                if chip.rate ~= nil then
+                                    local rTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+                                    if Core.IsValidObj(rTxt) then
+                                        local rtSlot = chipVBox:AddChildToVerticalBox(rTxt)
+                                        if Core.IsValidObj(rtSlot) then rtSlot:SetHorizontalAlignment(2) end
+                                        local rateStr = (chip.rate >= 10.0) and string.format("%.0f/min", chip.rate) or string.format("%.1f/min", chip.rate)
+                                        rTxt:SetVisibility(3)
+                                        rTxt:SetSize(9)
+                                        rTxt:SetText(Core.MakeText(rateStr))
+                                    end
+                                end
+
+                                local hbSlot = chipsHBox:AddChildToHorizontalBox(chipVBox)
+                                if Core.IsValidObj(hbSlot) then
+                                    hbSlot:SetVerticalAlignment(2)
+                                    if ci > 1 then
+                                        hbSlot:SetPadding({ Left = 4.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                                    end
+                                end
                             end
-                        end)
-                    end
+                        end
+                    end)
+
+                    local iconTarget = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
+                    local iSlot = iconTarget:AddChildToCanvas(ov)
+                    SetCanvasSlot(iSlot, mx, badgeY, badgeW, badgeH, 0.5, 0.5, 40)
+
+                    FloorIconButtons[mAddr] = { btn = iconBtn, widget = chipsHBox }
+                    local capturedM = m
+                    local capturedGroup = chipsHBox
+                    Core.RegisterWBPButtonClick(iconBtn, function()
+                        local nowHidden = StationData.ToggleMachineIcon(capturedM)
+                        if Core.IsValidObj(capturedGroup) then
+                            pcall(function()
+                                capturedGroup:SetRenderOpacity(nowHidden and 0.25 or 1.0)
+                            end)
+                        end
+                    end)
                 end
             end
         end
@@ -1633,8 +1338,8 @@ RefreshStationMapCanvas = function()
             local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
             local pxW = math.max(8.0, rx * cellPx)
             local pxH = math.max(8.0, ry * cellPx)
-            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gp.cellsX, gp.cellsY, gp.buildable) or gp.sprite
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, gmx, gmy, pxW, pxH, gp.yaw or 0, "Other", sprite, true, true, 22)
+            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, "Other", gp.buildable) or gp.sprite
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, gmx, gmy, pxW, pxH, gp.yaw or 0, "Other", sprite, true, true, 22, false)
             RenderBorderOutline(outer, MapUI.MapCanvas, gmx, gmy, pxW, pxH, 1.5, COLORS.GhostBorderOk, 23)
         end
     end
@@ -1711,7 +1416,7 @@ RebuildFloorButtons = function()
         local bgCol = isSel and { R = 0.45, G = 0.28, B = 0.04, A = 0.96 } or COLORS.FloorNormal
         local txtCol = isSel and COLORS.FloorSelected or COLORS.PlayerLocal
         local btnWrap, btn = CreateLabeledButton(
-            MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 15, 56.0, 38.0, bgCol, txtCol,
+            MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 18, 96.0, 72.0, bgCol, txtCol,
             function()
                 SelectedFloorIdx = thisIdx
                 ViewTransform.hasFitted = false
@@ -1725,7 +1430,7 @@ RebuildFloorButtons = function()
             local slot = MapUI.FloorSlotsBox:AddChildToVerticalBox(btnWrap)
             if Core.IsValidObj(slot) then
                 pcall(function()
-                    slot:SetPadding({ Left = 2.0, Top = 3.0, Right = 2.0, Bottom = 3.0 })
+                    slot:SetPadding({ Left = 4.0, Top = 6.0, Right = 4.0, Bottom = 6.0 })
                     slot:SetHorizontalAlignment(2)
                 end)
             end
@@ -2354,8 +2059,6 @@ CloseStationMap = function()
     InteractionMode = "Select"
     PendingBuildable = nil
     WaitingForBuildMenuSelection = false
-    CaptureQueue = {}
-    CaptureRunning = false
     RenderedMachines = {}
     RenderedConveyors = {}
     FloorIconButtons = {}
@@ -2572,14 +2275,14 @@ local function OpenStationMap()
     local floorFrame = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local floorInnerVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorSlotsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "^", 14, 56.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "^", 16, 96.0, 44.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         local total = #CurrentFloors
         if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
             FloorPageTopIdx = math.min(total, FloorPageTopIdx + 1)
             RebuildFloorButtons()
         end
     end)
-    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "v", 14, 56.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "v", 16, 96.0, 44.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
         if FloorPageTopIdx and FloorPageTopIdx > minTop then
             FloorPageTopIdx = math.max(minTop, FloorPageTopIdx - 1)
@@ -2590,22 +2293,24 @@ local function OpenStationMap()
     if Core.IsValidObj(floorFrame) and Core.IsValidObj(floorInnerVBox) and Core.IsValidObj(floorSlotsBox) then
         pcall(function()
             floorFrame:SetBrushColor(COLORS.FloorRailBg)
-            floorFrame:SetPadding({ Left = 6.0, Top = 8.0, Right = 6.0, Bottom = 8.0 })
+            floorFrame:SetPadding({ Left = 8.0, Top = 12.0, Right = 8.0, Bottom = 12.0 })
             if Core.IsValidObj(floorUpWrap) then
                 local uSlot = floorInnerVBox:AddChildToVerticalBox(floorUpWrap)
                 if Core.IsValidObj(uSlot) then
-                    uSlot:SetPadding({ Left = 2, Top = 0, Right = 2, Bottom = 4 })
+                    uSlot:SetPadding({ Left = 4, Top = 0, Right = 4, Bottom = 8 })
                     uSlot:SetHorizontalAlignment(2)
                 end
             end
             local fsSlot = floorInnerVBox:AddChildToVerticalBox(floorSlotsBox)
             if Core.IsValidObj(fsSlot) then
                 fsSlot:SetHorizontalAlignment(2)
+                fsSlot:SetVerticalAlignment(2)
+                fsSlot:SetSize({ Value = 1.0, SizeRule = 1 })
             end
             if Core.IsValidObj(floorDownWrap) then
                 local dSlot = floorInnerVBox:AddChildToVerticalBox(floorDownWrap)
                 if Core.IsValidObj(dSlot) then
-                    dSlot:SetPadding({ Left = 2, Top = 4, Right = 2, Bottom = 0 })
+                    dSlot:SetPadding({ Left = 4, Top = 8, Right = 4, Bottom = 0 })
                     dSlot:SetHorizontalAlignment(2)
                 end
             end
@@ -2617,15 +2322,16 @@ local function OpenStationMap()
         local fWrapSlot = rightVBox:AddChildToVerticalBox(floorFrame)
         if Core.IsValidObj(fWrapSlot) then
             pcall(function()
-                fWrapSlot:SetHorizontalAlignment(2) -- Center floor rail horizontally
-                fWrapSlot:SetVerticalAlignment(2)
+                fWrapSlot:SetHorizontalAlignment(2) -- Center wider floor rail horizontally
+                fWrapSlot:SetVerticalAlignment(0)   -- Fill vertical height above Apply button
                 fWrapSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+                fWrapSlot:SetPadding({ Left = 0.0, Top = 6.0, Right = 0.0, Bottom = 12.0 })
             end)
         end
     end
 
-    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 130.0, 36.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, CommitPendingGhosts)
-    local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 130.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, CommitPendingGhosts)
+    local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
         UpdateActionBar()
         RefreshStationMapCanvas()
@@ -2650,7 +2356,7 @@ local function OpenStationMap()
 
     local rightBoxWrap = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
     pcall(function()
-        rightBoxWrap:SetMinDesiredWidth(142.0)
+        rightBoxWrap:SetMinDesiredWidth(164.0)
         rightBoxWrap:AddChild(rightVBox)
     end)
     local rightBodySlot = bodyHBox:AddChildToHorizontalBox(rightBoxWrap)
