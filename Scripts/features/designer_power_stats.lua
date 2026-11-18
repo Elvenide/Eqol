@@ -804,7 +804,6 @@ local function ComputeDesignerPower(designerHud, st)
 
     return totalGen, totalCons
 end
-end
 
 local function CopyTextStyle(dstText, srcText, fallbackSize, overrideColor)
     if not Core.IsValidObj(dstText) then return end
