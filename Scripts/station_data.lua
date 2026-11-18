@@ -208,6 +208,7 @@ local CachedPlayersSnapshot = { time = -999, list = {} }
 local CachedFootprintsByClass = {} -- clsAddr -> { cellsX = n, cellsY = n }
 
 local StationDiagLoggedKey = nil
+local StationPropsDiagLoggedKey = nil
 
 local function ReadBoundsStruct(boundsObj)
     if not boundsObj then return nil end
@@ -305,8 +306,59 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
         end
     end
 
+    -- Check station arrays for module/block lists (StationBlock, Blocks, Modules, Rooms, etc.)
     if Core.IsValidObj(station) then
-        for _, propName in ipairs({ "Platforms", "Modules", "StationPlatforms", "ConnectedFrames", "Children" }) do
+        local stKey = tostring(station:GetAddress())
+        if StationPropsDiagLoggedKey ~= stKey then
+            StationPropsDiagLoggedKey = stKey
+            local simProps, simArrays, actComps = {}, {}, {}
+            pcall(function()
+                local c = station:GetClass()
+                local depth = 0
+                while Core.IsValidObj(c) and depth < 6 do
+                    depth = depth + 1
+                    if c.ForEachProperty then
+                        c:ForEachProperty(function(p)
+                            local pn = p:GetFName():ToString()
+                            if #simProps < 45 then table.insert(simProps, pn) end
+                            local okA, v = pcall(function() return station[pn] end)
+                            if okA and v ~= nil and type(v) == "userdata" then
+                                local okN, n = pcall(function() return v.GetArrayNum and v:GetArrayNum() or nil end)
+                                if okN and type(n) == "number" then
+                                    table.insert(simArrays, string.format("%s=%d", pn, n))
+                                end
+                            end
+                        end)
+                    end
+                    c = c.GetSuperStruct and c:GetSuperStruct() or nil
+                end
+            end)
+            local stAct = StationData.GetObjectActor(station)
+            if Core.IsValidObj(stAct) then
+                pcall(function()
+                    local scCls = Core.FindOrLoadClass("/Script/Engine.SceneComponent")
+                    if Core.IsValidObj(scCls) and stAct.K2_GetComponentsByClass then
+                        local compCounts = {}
+                        local comps = stAct:K2_GetComponentsByClass(scCls)
+                        StationData.ForEachArray(comps, function(_, elem)
+                            local cmp = Core.UnwrapArrayElem(elem)
+                            if Core.IsValidObj(cmp) then
+                                local cn = cmp:GetClass():GetFName():ToString()
+                                compCounts[cn] = (compCounts[cn] or 0) + 1
+                            end
+                        end)
+                        for k, cnt in pairs(compCounts) do
+                            table.insert(actComps, string.format("%s=%d", k, cnt))
+                        end
+                    end
+                end)
+            end
+            Core.Log(string.format("[StationData] StationPropsDiag cls=%s arrays=[%s] comps=[%s] props=[%s]",
+                station:GetClass():GetFName():ToString(),
+                table.concat(simArrays, ","), table.concat(actComps, ","), table.concat(simProps, ",")))
+        end
+
+        for _, propName in ipairs({ "Platforms", "Modules", "StationPlatforms", "ConnectedFrames", "Children", "Blocks", "StationBlocks", "StructureBlocks", "HullBlocks", "Rooms", "Sections" }) do
             local ok, arr = pcall(function() return station[propName] end)
             if ok and arr then
                 StationData.ForEachArray(arr, function(_, elem)
@@ -316,7 +368,7 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
                     else
                         local st = Core.UnwrapStruct(elem)
                         if st then
-                            for _, fName in ipairs({ "Platform", "PlatformObject", "Object", "Actor", "Frame" }) do
+                            for _, fName in ipairs({ "Platform", "PlatformObject", "Block", "BlockObject", "Module", "Object", "Actor", "Frame" }) do
                                 local okF, fObj = pcall(function() return st[fName] end)
                                 if okF and Core.IsValidObj(fObj) then
                                     addPlat(fObj)
@@ -327,6 +379,30 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
                     end
                 end)
             end
+        end
+
+        -- Also inspect ChildActorComponents on the station actor (modules spawned as child actors)
+        local stActor = StationData.GetObjectActor(station)
+        if Core.IsValidObj(stActor) then
+            pcall(function()
+                local caCls = Core.FindOrLoadClass("/Script/Engine.ChildActorComponent")
+                if Core.IsValidObj(caCls) and stActor.K2_GetComponentsByClass then
+                    local rawCac = stActor:K2_GetComponentsByClass(caCls)
+                    StationData.ForEachArray(rawCac, function(_, elem)
+                        local cac = Core.UnwrapArrayElem(elem)
+                        if Core.IsValidObj(cac) then
+                            local ca = cac.ChildActor
+                            if Core.IsValidObj(ca) then
+                                local cn = ""
+                                pcall(function() cn = ca:GetClass():GetFName():ToString():lower() end)
+                                if cn:find("block", 1, true) or cn:find("module", 1, true) or cn:find("platform", 1, true) or cn:find("room", 1, true) or cn:find("station", 1, true) then
+                                    addPlat(ca)
+                                end
+                            end
+                        end
+                    end)
+                end
+            end)
         end
 
         -- Also resolve station.PlatformIDs through DMSWorldSubsystem:GetObject(id)
@@ -1154,6 +1230,7 @@ end
 
 local BeltMatDiagLogged = false
 local UndergroundDiagLogged = false
+local PortDiagLoggedByCls = {}
 local CachedBeltTexByCls = {}
 local CachedBuildablesByCls = nil
 local CachedBuildablesByName = nil
@@ -1593,13 +1670,17 @@ function StationData.GetBuildableIconTexture(machine, buildableOpt)
                 if mNorm ~= "" and ti.normName:find(mNorm, 1, true) then sc = sc + 80 end
                 if dispNorm ~= "" and ti.normName:find(dispNorm, 1, true) then sc = sc + 70 end
                 -- Token matching (e.g. shipyard + dock, station + dock)
-                if (mNorm:find("shipyard", 1, true) or dispNorm:find("shipyard", 1, true)) and lf:find("shipyard", 1, true) then
-                    sc = sc + 35
-                    if lf:find("dock", 1, true) then sc = sc + 35 end
-                elseif (mNorm:find("stationblock", 1, true) or dispNorm:find("stationblock", 1, true) or mNorm:find("stationdock", 1, true))
-                    and lf:find("station", 1, true) and lf:find("dock", 1, true)
-                then
-                    sc = sc + 65
+                if mNorm:find("shipyard", 1, true) or dispNorm:find("shipyard", 1, true) then
+                    if lf:find("shipyard", 1, true) then
+                        sc = sc + 45
+                        if lf:find("core", 1, true) or lf:find("dock", 1, true) then sc = sc + 20 end
+                    end
+                elseif mNorm:find("dock", 1, true) or dispNorm:find("dock", 1, true) then
+                    if ti.lowName:find("industrialdock", 1, true) or ti.lowName:find("dock_0", 1, true) or ti.lowName:find("dockingcollar", 1, true) then
+                        sc = sc + 45
+                    elseif lf:find("dock", 1, true) then
+                        sc = sc + 30
+                    end
                 end
                 if sc > 0 then
                     if lf:find("/ui", 1, true) or lf:find("icon", 1, true) or ti.lowName:match("^t_") then sc = sc + 20 end
@@ -1607,7 +1688,7 @@ function StationData.GetBuildableIconTexture(machine, buildableOpt)
                 end
             end
         end
-        if Core.IsValidObj(bestTex) and bestScore >= 60 then
+        if Core.IsValidObj(bestTex) and bestScore >= 45 then
             return bestTex
         end
 
@@ -1616,28 +1697,12 @@ function StationData.GetBuildableIconTexture(machine, buildableOpt)
             local dockTex = {}
             for _, ti in ipairs(allTex) do
                 if ti.lowFull:find("dock", 1, true) or ti.lowFull:find("shipyard", 1, true) or ti.lowFull:find("airlock", 1, true) then
-                    table.insert(dockTex, ti.name)
+                    table.insert(dockTex, ti.full)
                 end
             end
-            local bldNames = {}
-            pcall(function()
-                local allB = FindAllOf("Buildable")
-                if allB then
-                    for _, b in ipairs(allB) do
-                        if Core.IsValidObj(b) then
-                            local bn = ""
-                            pcall(function() bn = b:GetFName():ToString() end)
-                            local lb = bn:lower()
-                            if lb:find("dock", 1, true) or lb:find("shipyard", 1, true) or lb:find("airlock", 1, true) then
-                                table.insert(bldNames, bn)
-                            end
-                        end
-                    end
-                end
-            end)
-            Core.Log(string.format("[StationData] MissingIconDiag cls=%s mNorm=%s bestTex=%s(%d) dockTex=[%s] dockBlds=[%s]",
+            Core.Log(string.format("[StationData] MissingIconDiag cls=%s mNorm=%s bestTex=%s(%d) dockPaths=[%s]",
                 clsKey, mNorm, Core.IsValidObj(bestTex) and bestTex:GetFName():ToString() or "nil", bestScore,
-                table.concat(dockTex, ","), table.concat(bldNames, ",")))
+                table.concat(dockTex, " | ")))
         end
     end
     return nil
@@ -1892,6 +1957,146 @@ function StationData.GetUndergroundBeltPairInfo(machine, xform)
     end
 
     return info
+end
+
+function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY)
+    local ports = {}
+    if not Core.IsValidObj(machine) then return ports end
+
+    local rawInputs, rawOutputs = {}, {}
+    pcall(function()
+        if machine.Inputs then
+            StationData.ForEachArray(machine.Inputs, function(_, elem)
+                local st = Core.UnwrapStruct(elem) or elem
+                if st and st.X ~= nil and st.Y ~= nil then
+                    table.insert(rawInputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
+                end
+            end)
+        end
+        if machine.Outputs then
+            StationData.ForEachArray(machine.Outputs, function(_, elem)
+                local st = Core.UnwrapStruct(elem) or elem
+                if st and st.X ~= nil and st.Y ~= nil then
+                    table.insert(rawOutputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
+                end
+            end)
+        end
+    end)
+
+    if #rawInputs == 0 and #rawOutputs == 0 then
+        return ports
+    end
+
+    local dimX, dimY = nil, nil
+    pcall(function()
+        local d = machine.MachineDimensions
+        if d and d.X and d.Y then
+            dimX = tonumber(d.X)
+            dimY = tonumber(d.Y)
+        end
+    end)
+
+    local cxCells = math.max(1, tonumber(cellsX) or 1)
+    local cyCells = math.max(1, tonumber(cellsY) or 1)
+    local halfCmX = cxCells * 50.0
+    local halfCmY = cyCells * 50.0
+
+    -- Determine coordinate origin & scale: 50cm subgrid (like Elevator 14x14) vs 100cm machine cells (0..dim-1)
+    local maxC = 0
+    for _, v in ipairs(rawInputs) do
+        if math.abs(v.x) > maxC then maxC = math.abs(v.x) end
+        if math.abs(v.y) > maxC then maxC = math.abs(v.y) end
+    end
+    for _, v in ipairs(rawOutputs) do
+        if math.abs(v.x) > maxC then maxC = math.abs(v.x) end
+        if math.abs(v.y) > maxC then maxC = math.abs(v.y) end
+    end
+
+    local use50Cm = false
+    if dimX and (dimX >= cxCells * 1.6 or (maxC >= cxCells)) then
+        use50Cm = true
+    elseif not dimX and maxC >= math.max(cxCells, cyCells) then
+        use50Cm = true
+    end
+    local unitCm = use50Cm and 50.0 or 100.0
+
+    local refX = dimX and ((dimX - 1.0) * 0.5) or (((use50Cm and cxCells * 2 or cxCells) - 1.0) * 0.5)
+    local refY = dimY and ((dimY - 1.0) * 0.5) or (((use50Cm and cyCells * 2 or cyCells) - 1.0) * 0.5)
+
+    -- Deduplicate ports sharing the same XY coordinate cell (some machines share bidirectional slots)
+    local merged = {}
+    local function addPortVec(v, isIn)
+        local key = string.format("%.2f,%.2f", v.x, v.y)
+        local entry = merged[key]
+        if not entry then
+            entry = { vx = v.x, vy = v.y, vz = v.z, isInput = false, isOutput = false }
+            merged[key] = entry
+        end
+        if isIn then entry.isInput = true else entry.isOutput = true end
+    end
+    for _, v in ipairs(rawInputs) do addPortVec(v, true) end
+    for _, v in ipairs(rawOutputs) do addPortVec(v, false) end
+
+    local rad = math.rad(myaw or 0.0)
+    local cosA, sinA = math.cos(rad), math.sin(rad)
+
+    for _, mp in pairs(merged) do
+        local lx = (mp.vx - refX) * unitCm
+        local ly = (mp.vy - refY) * unitCm
+
+        -- Determine outward cardinal side normal in unrotated machine frame
+        local nx, ny = 0.0, 0.0
+        if halfCmX > 0 and halfCmY > 0 then
+            if math.abs(lx) / halfCmX >= math.abs(ly) / halfCmY then
+                nx = (lx >= 0.0) and 1.0 or -1.0
+            else
+                ny = (ly >= 0.0) and 1.0 or -1.0
+            end
+        end
+
+        -- Position port indicator cleanly on the machine's outer edge cell
+        local portLx = lx
+        local portLy = ly
+        if nx ~= 0.0 then
+            portLx = nx * math.max(12.0, halfCmX - 24.0)
+        else
+            portLy = ny * math.max(12.0, halfCmY - 24.0)
+        end
+
+        -- Neighbor external conveyor center (100cm cell immediately outside that machine edge)
+        local adjLx = (nx ~= 0.0) and (nx * (halfCmX + 50.0)) or lx
+        local adjLy = (ny ~= 0.0) and (ny * (halfCmY + 50.0)) or ly
+
+        local wx = (mwx or 0.0) + portLx * cosA - portLy * sinA
+        local wy = (mwy or 0.0) + portLx * sinA + portLy * cosA
+        local ax = (mwx or 0.0) + adjLx * cosA - adjLy * sinA
+        local ay = (mwy or 0.0) + adjLx * sinA + adjLy * cosA
+
+        table.insert(ports, {
+            px = wx, py = wy,
+            adjX = ax, adjY = ay,
+            isInput = mp.isInput,
+            isOutput = mp.isOutput,
+        })
+    end
+
+    local clsKey = ""
+    pcall(function() clsKey = machine:GetClass():GetFName():ToString() end)
+    if clsKey ~= "" and not PortDiagLoggedByCls[clsKey] then
+        PortDiagLoggedByCls[clsKey] = true
+        local iParts, oParts = {}, {}
+        for i = 1, math.min(4, #rawInputs) do
+            table.insert(iParts, string.format("(%.1f,%.1f,%.1f)", rawInputs[i].x, rawInputs[i].y, rawInputs[i].z))
+        end
+        for i = 1, math.min(4, #rawOutputs) do
+            table.insert(oParts, string.format("(%.1f,%.1f,%.1f)", rawOutputs[i].x, rawOutputs[i].y, rawOutputs[i].z))
+        end
+        Core.Log(string.format("[StationData] PortSampleDiag cls=%s dim=(%s,%s) cells=(%d,%d) unit=%.0f in(%d)=[%s] out(%d)=[%s]",
+            clsKey, tostring(dimX), tostring(dimY), cxCells, cyCells, unitCm,
+            #rawInputs, table.concat(iParts, ","), #rawOutputs, table.concat(oParts, ",")))
+    end
+
+    return ports
 end
 
 function StationData.GetProducerOutputsAndRates(machine)
@@ -2165,9 +2370,11 @@ function StationData.InvalidateCaches()
     CachedBuildablesByName = nil
     CachedGameTexList = nil
     MissingIconDiagLogged = {}
+    PortDiagLoggedByCls = {}
     BeltMatDiagLogged = false
     UndergroundDiagLogged = false
     StationDiagLoggedKey = nil
+    StationPropsDiagLoggedKey = nil
 end
 
 --------------------------------------------------------------------------------

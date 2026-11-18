@@ -99,6 +99,7 @@ local ViewTransform = {
 -- Rendered Floor Cache (for fast hit-testing, box select, and hover without rebuilding widgets)
 local RenderedMachines = {}  -- list of { machine, x, y, z, yaw, cellsX, cellsY, halfW, halfH, cat, buildable, recipe, actorClsPath, displayName }
 local RenderedConveyors = {} -- subset of RenderedMachines where cat == "Conveyor"
+local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, halfH, isInput, isOutput, machineName }
 local RenderedGridLines = {} -- { border, slot, isVertical, spanOther, isMajor4, isMajor8 }
 local LastGridTier = nil
 local LastGridZoomRatio = nil
@@ -108,7 +109,9 @@ local TrackedButtons = {}    -- list of static WBP_Button_C instances for hover 
 local IconDiagLogged = false
 local MissingIconsLogged = {}
 local CursorDiagLogged = false
+local PawnLockDiagLogged = false
 local LastHoveredConvAddr = nil
+local LastHoveredPortIdx = nil
 local LastHadDynamicOverlay = false
 
 -- Selection, Ghosts, Build & Clipboard State
@@ -124,6 +127,8 @@ local KeyHandlersBound = false
 local LastWorldAddr = nil
 local LockedPawn = nil
 local SavedPawnSpeeds = nil
+local LockedPawnLocalPos = nil
+local LockedMoveComps = {}
 
 -- Input Polling State
 local InputPollActive = false
@@ -833,11 +838,29 @@ local function GetTierArrowColor(tier)
     else return BELT_TIER_COLORS[3] end
 end
 
+local function AddSharpChevronToCanvas(outer, canvas, tipX, cy, armLen, armThick, col, zBase)
+    -- Two 42-deg arms whose right tips intersect cleanly at (tipX, cy) forming a crisp V chevron (>)
+    local rad = math.rad(42.0)
+    local halfCos = (armLen * 0.5) * math.cos(rad)
+    local halfSin = (armLen * 0.5) * math.sin(rad)
+    local cx = tipX - halfCos
+    for _, sp in ipairs({ { dy = -halfSin, ang = 42.0 }, { dy = halfSin, ang = -42.0 } }) do
+        local bar = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        if Core.IsValidObj(bar) then
+            pcall(function()
+                bar:SetVisibility(3)
+                bar:SetBrushColor(col)
+                bar:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+                if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(sp.ang) end
+            end)
+            local bs = canvas:AddChildToCanvas(bar)
+            SetCanvasSlot(bs, cx, cy + sp.dy, armLen, armThick, 0.5, 0.5, zBase)
+        end
+    end
+end
+
 local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col, zOrder)
-    local s = math.max(8.0, sizePx or 18.0)
-    local armLen = s * 0.46
-    local armThick = math.max(2.0, s * 0.16)
-    local armOff = s * 0.14
+    local s = math.max(10.0, sizePx or 18.0)
     local tile = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     if not Core.IsValidObj(tile) then return nil end
     pcall(function()
@@ -850,20 +873,61 @@ local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col
     local tSlot = canvas:AddChildToCanvas(tile)
     SetCanvasSlot(tSlot, cx, cy, s, s, 0.5, 0.5, zOrder)
 
-    for _, spec in ipairs({ { dy = -armOff, ang = 38.0 }, { dy = armOff, ang = -38.0 } }) do
-        local bar = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(bar) then
-            pcall(function()
-                bar:SetVisibility(3)
-                bar:SetBrushColor(col)
-                bar:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
-                if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(spec.ang) end
-            end)
-            local bs = tile:AddChildToCanvas(bar)
-            SetCanvasSlot(bs, s * 0.52, s * 0.5 + spec.dy, armLen, armThick, 0.5, 0.5, 1)
+    local armLen = math.max(6.0, s * 0.44)
+    local armThick = math.max(1.8, math.min(3.2, s * 0.12))
+    AddSharpChevronToCanvas(outer, tile, s * 0.68, s * 0.5, armLen, armThick, col, 1)
+    return tile
+end
+
+local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder)
+    local sz = math.max(12.0, portSize or 20.0)
+    local half = sz * 0.5
+
+    -- Semi-transparent black core + inset bevel layers for a rounded-square silhouette
+    local bgMain = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    if Core.IsValidObj(bgMain) then
+        pcall(function()
+            bgMain:SetVisibility(3)
+            bgMain:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.55 })
+        end)
+        local s1 = canvas:AddChildToCanvas(bgMain)
+        SetCanvasSlot(s1, px, py, sz - 4.0, sz, 0.5, 0.5, zOrder)
+    end
+    local bgCross = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    if Core.IsValidObj(bgCross) then
+        pcall(function()
+            bgCross:SetVisibility(3)
+            bgCross:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.55 })
+        end)
+        local s2 = canvas:AddChildToCanvas(bgCross)
+        SetCanvasSlot(s2, px, py, sz, sz - 4.0, 0.5, 0.5, zOrder)
+    end
+
+    -- Thick black dashed border along all 4 edges (2 dashes per edge)
+    local dashCol = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
+    local thick = math.max(2.4, sz * 0.14)
+    local dashLen = math.max(4.0, (sz - 6.0) * 0.40)
+    local dashOff = (sz - 4.0) * 0.25
+    for _, sx in ipairs({ px - dashOff, px + dashOff }) do
+        for _, sy in ipairs({ py - half, py + half }) do
+            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(d) then
+                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
+                local ds = canvas:AddChildToCanvas(d)
+                SetCanvasSlot(ds, sx, sy, dashLen, thick, 0.5, 0.5, zOrder + 1)
+            end
         end
     end
-    return tile
+    for _, sy in ipairs({ py - dashOff, py + dashOff }) do
+        for _, sx in ipairs({ px - half, px + half }) do
+            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(d) then
+                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
+                local ds = canvas:AddChildToCanvas(d)
+                SetCanvasSlot(ds, sx, sy, thick, dashLen, 0.5, 0.5, zOrder + 1)
+            end
+        end
+    end
 end
 
 local function RenderDashedLine(outer, canvas, x1, y1, x2, y2, col, thickness, dashLen, gapLen, zOrder)
@@ -900,15 +964,15 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
     local fillW = math.max(6.0, pxW - 2.0)
     local fillH = math.max(6.0, pxH - 2.0)
 
-    -- Dedicated crisp 2D conveyor belt visual: gray belt bed, black/dark-gray guide rails, tier-shaded arrows
+    -- Dedicated crisp 2D conveyor belt visual: darker gray belt bed, black/dark-gray guide rails, sharp tier chevrons
     if cat == "Conveyor" then
         local tier = (spriteEntry and spriteEntry.tier) or 1
-        local tierDark = (tier == 1) and 1.0 or ((tier == 2) and 0.84 or 0.72)
+        local tierDark = (tier == 1) and 1.0 or ((tier == 2) and 0.78 or 0.62)
         local bgCol = isGhost and (validGhost and COLORS.GhostValid or COLORS.GhostInvalid)
-            or { R = 0.36 * tierDark, G = 0.38 * tierDark, B = 0.42 * tierDark, A = 0.96 }
+            or { R = 0.22 * tierDark, G = 0.24 * tierDark, B = 0.27 * tierDark, A = 0.96 }
         local bdrCol = isGhost and (validGhost and COLORS.GhostBorderOk or COLORS.GhostBorderBad)
-            or { R = 0.08, G = 0.09, B = 0.11, A = 0.98 }
-        local railCol = isGhost and bdrCol or { R = 0.07, G = 0.08, B = 0.10, A = 0.98 }
+            or { R = 0.06, G = 0.07, B = 0.09, A = 0.98 }
+        local railCol = isGhost and bdrCol or { R = 0.05, G = 0.06, B = 0.08, A = 0.98 }
         local arrowCol = isGhost and bdrCol or GetTierArrowColor(tier)
 
         local tile = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
@@ -931,7 +995,7 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
             end
 
             -- Top and bottom dark rail borders (rotated together with tile along belt axis)
-            local railThick = math.max(2.2, fillH * 0.13)
+            local railThick = math.max(2.0, fillH * 0.12)
             for _, ryOff in ipairs({ railThick * 0.5 + 1.0, pxH - railThick * 0.5 - 1.0 }) do
                 local rail = Core.CreateRawWidget(PATHS.BorderClass, outer)
                 if Core.IsValidObj(rail) then
@@ -941,25 +1005,11 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
                 end
             end
 
-            -- Two directional chevron ticks (>) pointing along +X (yaw=0)
-            local armLen = math.max(5.0, pxW * 0.24)
-            local armThick = math.max(2.0, pxH * 0.085)
-            local armOffY = pxH * 0.115
-            for _, cxOff in ipairs({ pxW * 0.34, pxW * 0.66 }) do
-                for _, sp in ipairs({ { dy = -armOffY, ang = 38.0 }, { dy = armOffY, ang = -38.0 } }) do
-                    local bar = Core.CreateRawWidget(PATHS.BorderClass, outer)
-                    if Core.IsValidObj(bar) then
-                        pcall(function()
-                            bar:SetVisibility(3)
-                            bar:SetBrushColor(arrowCol)
-                            bar:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
-                            if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(sp.ang) end
-                        end)
-                        local cs = tile:AddChildToCanvas(bar)
-                        SetCanvasSlot(cs, cxOff, pxH * 0.5 + sp.dy, armLen, armThick, 0.5, 0.5, 3)
-                    end
-                end
-            end
+            -- Two sharp apex-aligned chevrons (>>) pointing along +X (yaw=0)
+            local armLen = math.max(5.5, pxW * 0.25)
+            local armThick = math.max(1.6, math.min(2.6, pxH * 0.055))
+            AddSharpChevronToCanvas(outer, tile, pxW * 0.43, pxH * 0.5, armLen, armThick, arrowCol, 3)
+            AddSharpChevronToCanvas(outer, tile, pxW * 0.75, pxH * 0.5, armLen, armThick, arrowCol, 3)
             return tile
         end
     end
@@ -1105,6 +1155,10 @@ local function FitViewTransformToFloor()
         for _, me in ipairs(floor.machines) do
             table.insert(xs, me.x)
             table.insert(ys, me.y)
+            if me.x - 300.0 < minX then minX = me.x - 300.0 end
+            if me.x + 300.0 > maxX then maxX = me.x + 300.0 end
+            if me.y - 300.0 < minY then minY = me.y - 300.0 end
+            if me.y + 300.0 > maxY then maxY = me.y + 300.0 end
         end
         table.sort(xs)
         table.sort(ys)
@@ -1256,62 +1310,96 @@ RefreshDynamicOverlay = function()
         end
     end
 
-    -- 3. Conveyor item hover tooltip (only shown while cursor hovers a conveyor carrying an item)
+    -- 3. Hover tooltips: unconnected item port or conveyor carried item
     local hoveredConv = nil
+    local hoveredPort = nil
     if InteractionMode == "Select" and not MouseState.lDraggingBox and not MouseState.rPanning
         and MouseState.lastCursorMx and MouseState.lastCursorMy
         and MouseState.lastCursorMx >= 0 and MouseState.lastCursorMx <= ViewTransform.canvasW
         and MouseState.lastCursorMy >= 0 and MouseState.lastCursorMy <= ViewTransform.canvasH
     then
         local wx, wy = CanvasToWorld(MouseState.lastCursorMx, MouseState.lastCursorMy)
-        for _, cm in ipairs(RenderedConveyors) do
-            if math.abs(wx - cm.x) <= cm.halfW and math.abs(wy - cm.y) <= cm.halfH then
-                hoveredConv = cm
+        for _, rp in ipairs(RenderedPorts) do
+            if math.abs(wx - rp.x) <= rp.halfW and math.abs(wy - rp.y) <= rp.halfH then
+                hoveredPort = rp
                 break
             end
         end
-        if hoveredConv then
-            local item = StationData.GetPrimaryItemForMachine(hoveredConv.machine)
-            if Core.IsValidObj(item) then
-                local itemName = "Item"
+        if hoveredPort then
+            local portLabel = "Item Port"
+            if hoveredPort.isInput and not hoveredPort.isOutput then
+                portLabel = "Item Port (Input)"
+            elseif hoveredPort.isOutput and not hoveredPort.isInput then
+                portLabel = "Item Port (Output)"
+            elseif hoveredPort.isInput and hoveredPort.isOutput then
+                portLabel = "Item Port (Input / Output)"
+            end
+            local tipBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            local tipTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+            if Core.IsValidObj(tipBorder) and Core.IsValidObj(tipTxt) then
                 pcall(function()
-                    if item.DisplayName then itemName = item.DisplayName:ToString()
-                    elseif item.Name then itemName = item.Name:ToString()
-                    else itemName = SafeFNameStr(item) or "Item" end
+                    tipBorder:SetBrushColor(COLORS.TooltipBg)
+                    tipBorder:SetPadding({ Left = 8.0, Top = 5.0, Right = 8.0, Bottom = 5.0 })
+                    tipTxt:SetSize(12)
+                    tipTxt:SetText(Core.MakeText(portLabel))
+                    tipBorder:AddChild(tipTxt)
                 end)
-
-                local tipBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
-                local tipHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-                local tipIcon = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
-                local tipTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
-                if Core.IsValidObj(tipBorder) and Core.IsValidObj(tipHBox) and Core.IsValidObj(tipIcon) and Core.IsValidObj(tipTxt) then
+                local tx = Core.Clamp(MouseState.lastCursorMx + 18.0, 90.0, ViewTransform.canvasW - 110.0)
+                local ty = Core.Clamp(MouseState.lastCursorMy - 24.0, 24.0, ViewTransform.canvasH - 24.0)
+                local tSlot = MapUI.OverlayCanvas:AddChildToCanvas(tipBorder)
+                SetCanvasSlot(tSlot, tx, ty, 195.0, 28.0, 0.0, 1.0, 80)
+            end
+        else
+            for _, cm in ipairs(RenderedConveyors) do
+                if math.abs(wx - cm.x) <= cm.halfW and math.abs(wy - cm.y) <= cm.halfH then
+                    hoveredConv = cm
+                    break
+                end
+            end
+            if hoveredConv then
+                local item = StationData.GetPrimaryItemForMachine(hoveredConv.machine)
+                if Core.IsValidObj(item) then
+                    local itemName = "Item"
                     pcall(function()
-                        tipBorder:SetBrushColor(COLORS.TooltipBg)
-                        tipBorder:SetPadding({ Left = 6.0, Top = 4.0, Right = 8.0, Bottom = 4.0 })
-                        tipIcon:SetIconSize(22.0)
-                        tipIcon:SetItem(item)
-                        tipTxt:SetSize(12)
-                        tipTxt:SetText(Core.MakeText(itemName))
-                        local iSlot = tipHBox:AddChildToHorizontalBox(tipIcon)
-                        if Core.IsValidObj(iSlot) then
-                            iSlot:SetVerticalAlignment(2)
-                            iSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 6.0, Bottom = 0.0 })
-                        end
-                        local tSlot = tipHBox:AddChildToHorizontalBox(tipTxt)
-                        if Core.IsValidObj(tSlot) then tSlot:SetVerticalAlignment(2) end
-                        tipBorder:AddChild(tipHBox)
+                        if item.DisplayName then itemName = item.DisplayName:ToString()
+                        elseif item.Name then itemName = item.Name:ToString()
+                        else itemName = SafeFNameStr(item) or "Item" end
                     end)
-                    local tx = Core.Clamp(MouseState.lastCursorMx + 18.0, 90.0, ViewTransform.canvasW - 100.0)
-                    local ty = Core.Clamp(MouseState.lastCursorMy - 24.0, 24.0, ViewTransform.canvasH - 24.0)
-                    local tSlot = MapUI.OverlayCanvas:AddChildToCanvas(tipBorder)
-                    SetCanvasSlot(tSlot, tx, ty, 190.0, 32.0, 0.0, 1.0, 80)
+
+                    local tipBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
+                    local tipHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+                    local tipIcon = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
+                    local tipTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+                    if Core.IsValidObj(tipBorder) and Core.IsValidObj(tipHBox) and Core.IsValidObj(tipIcon) and Core.IsValidObj(tipTxt) then
+                        pcall(function()
+                            tipBorder:SetBrushColor(COLORS.TooltipBg)
+                            tipBorder:SetPadding({ Left = 6.0, Top = 4.0, Right = 8.0, Bottom = 4.0 })
+                            tipIcon:SetIconSize(22.0)
+                            tipIcon:SetItem(item)
+                            tipTxt:SetSize(12)
+                            tipTxt:SetText(Core.MakeText(itemName))
+                            local iSlot = tipHBox:AddChildToHorizontalBox(tipIcon)
+                            if Core.IsValidObj(iSlot) then
+                                iSlot:SetVerticalAlignment(2)
+                                iSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 6.0, Bottom = 0.0 })
+                            end
+                            local tSlot = tipHBox:AddChildToHorizontalBox(tipTxt)
+                            if Core.IsValidObj(tSlot) then tSlot:SetVerticalAlignment(2) end
+                            tipBorder:AddChild(tipHBox)
+                        end)
+                        local tx = Core.Clamp(MouseState.lastCursorMx + 18.0, 90.0, ViewTransform.canvasW - 100.0)
+                        local ty = Core.Clamp(MouseState.lastCursorMy - 24.0, 24.0, ViewTransform.canvasH - 24.0)
+                        local tSlot = MapUI.OverlayCanvas:AddChildToCanvas(tipBorder)
+                        SetCanvasSlot(tSlot, tx, ty, 190.0, 32.0, 0.0, 1.0, 80)
+                    end
                 end
             end
         end
     end
 
+    LastHoveredPortIdx = hoveredPort and hoveredPort.idx or nil
     LastHoveredConvAddr = hoveredConv and hoveredConv.addr or nil
-    LastHadDynamicOverlay = (MouseState.lDraggingBox or InteractionMode ~= "Select" or hoveredConv ~= nil)
+    LastHadDynamicOverlay = (MouseState.lDraggingBox or InteractionMode ~= "Select" or hoveredConv ~= nil or hoveredPort ~= nil)
 end
 
 local function RefreshSelectionLayer()
@@ -1371,6 +1459,7 @@ RefreshStationMapCanvas = function()
     ClearCanvasChildren(MapUI.IconCanvas)
     RenderedMachines = {}
     RenderedConveyors = {}
+    RenderedPorts = {}
     RenderedGridLines = {}
     LastGridTier = nil
     LastGridZoomRatio = nil
@@ -1388,7 +1477,7 @@ RefreshStationMapCanvas = function()
     local pc = MapUI.PC
     local cellPx = BASE_CELL_PX
 
-    -- Compute generous world bounds for the static 1x1 cell grid (covers floor + build margin around all modules)
+    -- Compute generous world bounds covering ALL station modules AND all floor machines so grid never cuts off
     local bMinX, bMaxX, bMinY, bMaxY = math.huge, -math.huge, math.huge, -math.huge
     for _, pe in ipairs(floor.platforms) do
         local b = pe.bounds
@@ -1396,6 +1485,14 @@ RefreshStationMapCanvas = function()
         if b.cx + b.ex > bMaxX then bMaxX = b.cx + b.ex end
         if b.cy - b.ey < bMinY then bMinY = b.cy - b.ey end
         if b.cy + b.ey > bMaxY then bMaxY = b.cy + b.ey end
+    end
+    if floor.machines then
+        for _, me in ipairs(floor.machines) do
+            if me.x - 400.0 < bMinX then bMinX = me.x - 400.0 end
+            if me.x + 400.0 > bMaxX then bMaxX = me.x + 400.0 end
+            if me.y - 400.0 < bMinY then bMinY = me.y - 400.0 end
+            if me.y + 400.0 > bMaxY then bMaxY = me.y + 400.0 end
+        end
     end
     local padCm = 2400.0
     local minCol = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM)
@@ -1690,6 +1787,64 @@ RefreshStationMapCanvas = function()
                             end)
                         end
                     end)
+                end
+            end
+        end
+    end
+
+    -- 3b. Render unconnected machine item ports (semi-transparent black rounded square + thick black dashed border)
+    local transportNodes = {}
+    for _, me in ipairs(floorMachines) do
+        local m = me.machine
+        if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
+            local cat = StationData.GetMachineCategory(m)
+            local cn = ""
+            pcall(function() cn = m:GetClass():GetFName():ToString():lower() end)
+            if cat == "Conveyor" or cn:find("splitter", 1, true) or cn:find("balancer", 1, true)
+                or cn:find("merger", 1, true) or cn:find("underground", 1, true)
+            then
+                table.insert(transportNodes, { x = me.x, y = me.y })
+                if cn:find("underground", 1, true) then
+                    local ui2 = StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform)
+                    if ui2 and ui2.pairX and ui2.pairY then
+                        table.insert(transportNodes, { x = ui2.pairX, y = ui2.pairY })
+                    end
+                end
+            end
+        end
+    end
+
+    local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.44)
+    local portHalfCm = 28.0
+    for _, rm in ipairs(RenderedMachines) do
+        local cn = ""
+        pcall(function() cn = rm.machine:GetClass():GetFName():ToString():lower() end)
+        local isTransportOnly = (rm.cat == "Conveyor")
+            or cn:find("splitter", 1, true) or cn:find("balancer", 1, true)
+            or cn:find("merger", 1, true) or cn:find("underground", 1, true)
+        if not isTransportOnly and Core.IsValidObj(rm.machine) then
+            local ports = StationData.GetMachineItemPorts(rm.machine, rm.x, rm.y, rm.yaw, rm.cellsX, rm.cellsY)
+            for _, p in ipairs(ports) do
+                local connected = false
+                for _, tn in ipairs(transportNodes) do
+                    if math.abs(tn.x - p.adjX) <= 68.0 and math.abs(tn.y - p.adjY) <= 68.0 then
+                        connected = true
+                        break
+                    end
+                end
+                if not connected then
+                    local pmx, pmy = WorldToBaseCanvas(p.px, p.py)
+                    RenderUnconnectedItemPort(outer, MapUI.MapCanvas, pmx, pmy, portBadgeBasePx, 22)
+                    table.insert(RenderedPorts, {
+                        idx = #RenderedPorts + 1,
+                        x = p.px,
+                        y = p.py,
+                        halfW = portHalfCm,
+                        halfH = portHalfCm,
+                        isInput = p.isInput,
+                        isOutput = p.isOutput,
+                        machineName = rm.displayName,
+                    })
                 end
             end
         end
@@ -2164,7 +2319,7 @@ local function EnsureInputPoll()
             return
         end
 
-        -- Keep player pawn body immobilized while map is open (even if submenus re-enable move input)
+        -- Keep player pawn body immobilized while map is open (disable movement components + anchor station-local pos)
         pcall(function()
             if pc.IsMoveInputIgnored and not pc:IsMoveInputIgnored() and pc.SetIgnoreMoveInput then
                 pc:SetIgnoreMoveInput(true)
@@ -2172,19 +2327,40 @@ local function EnsureInputPoll()
             if pc.IsLookInputIgnored and not pc:IsLookInputIgnored() and pc.SetIgnoreLookInput then
                 pc:SetIgnoreLookInput(true)
             end
-            if Core.IsValidObj(pc.Pawn) then
-                local cm = pc.Pawn.CharacterMovement
-                if Core.IsValidObj(cm) and (tonumber(cm.MaxWalkSpeed) or 0) > 0.1 then
-                    if not SavedPawnSpeeds then
-                        SavedPawnSpeeds = {
-                            walk = tonumber(cm.MaxWalkSpeed) or 600.0,
-                            fly = tonumber(cm.MaxFlySpeed) or 600.0,
-                            custom = tonumber(cm.MaxCustomMovementSpeed) or 600.0,
-                        }
+            local pawn = pc.Pawn
+            if Core.IsValidObj(pawn) then
+                if not LockedPawnLocalPos and CurrentStation then
+                    local liveXf = StationData.GetStationFrameTransform(CurrentStation)
+                    local loc = pawn:K2_GetActorLocation()
+                    if loc and type(loc.X) == "number" then
+                        local lx, ly, lz = StationData.WorldToStationLocal(liveXf, loc.X, loc.Y or 0, loc.Z or 0, nil, nil, nil)
+                        LockedPawnLocalPos = { x = lx, y = ly, z = lz }
                     end
+                elseif LockedPawnLocalPos and CurrentStation then
+                    local liveXf = StationData.GetStationFrameTransform(CurrentStation)
+                    local curLoc = pawn:K2_GetActorLocation()
+                    if curLoc and type(curLoc.X) == "number" then
+                        local tx, ty, tz = StationData.StationLocalToWorld(liveXf, LockedPawnLocalPos.x, LockedPawnLocalPos.y, LockedPawnLocalPos.z)
+                        local dx = (curLoc.X or 0) - tx
+                        local dy = (curLoc.Y or 0) - ty
+                        if (dx * dx + dy * dy) > 2.25 then
+                            pawn:K2_SetActorLocation({ X = tx, Y = ty, Z = curLoc.Z or tz }, false, {}, true)
+                        end
+                    end
+                end
+                for _, entry in ipairs(LockedMoveComps) do
+                    local mc = entry.comp
+                    if Core.IsValidObj(mc) then
+                        if mc.StopMovementImmediately then mc:StopMovementImmediately() end
+                        if mc.SetComponentTickEnabled then mc:SetComponentTickEnabled(false) end
+                    end
+                end
+                local cm = pawn.CharacterMovement
+                if Core.IsValidObj(cm) and (tonumber(cm.MaxWalkSpeed) or 0) > 0.1 then
                     cm.MaxWalkSpeed = 0.0
                     cm.MaxFlySpeed = 0.0
                     cm.MaxCustomMovementSpeed = 0.0
+                    if cm.MaxAcceleration then cm.MaxAcceleration = 0.0 end
                     if cm.StopMovementImmediately then cm:StopMovementImmediately() end
                 end
             end
@@ -2394,17 +2570,28 @@ local function EnsureInputPoll()
                 RefreshDynamicOverlay()
             end
         elseif cursorMoved then
+            local curPort = nil
             local curConv = nil
-            if insideMap and not MouseState.rPanning and #RenderedConveyors > 0 then
+            if insideMap and not MouseState.rPanning then
                 local wx, wy = CanvasToWorld(mx, my)
-                for _, cm in ipairs(RenderedConveyors) do
-                    if math.abs(wx - cm.x) <= cm.halfW and math.abs(wy - cm.y) <= cm.halfH then
-                        curConv = cm.addr
+                for _, rp in ipairs(RenderedPorts) do
+                    if math.abs(wx - rp.x) <= rp.halfW and math.abs(wy - rp.y) <= rp.halfH then
+                        curPort = rp.idx
                         break
                     end
                 end
+                if not curPort and #RenderedConveyors > 0 then
+                    for _, cm in ipairs(RenderedConveyors) do
+                        if math.abs(wx - cm.x) <= cm.halfW and math.abs(wy - cm.y) <= cm.halfH then
+                            curConv = cm.addr
+                            break
+                        end
+                    end
+                end
             end
-            if curConv ~= LastHoveredConvAddr or (curConv == nil and LastHadDynamicOverlay) then
+            if curPort ~= LastHoveredPortIdx or curConv ~= LastHoveredConvAddr
+                or ((curPort == nil and curConv == nil) and LastHadDynamicOverlay)
+            then
                 RefreshDynamicOverlay()
             end
         end
@@ -2429,7 +2616,33 @@ local function SetStationMapCursorMode(pc, win, active)
             local pawn = pc.Pawn
             if Core.IsValidObj(pawn) then
                 LockedPawn = pawn
+                LockedMoveComps = {}
                 if pawn.DisableInput then pawn:DisableInput(pc) end
+                local mcCls = Core.FindOrLoadClass("/Script/Engine.MovementComponent")
+                local mcNames = {}
+                if Core.IsValidObj(mcCls) and pawn.K2_GetComponentsByClass then
+                    local comps = pawn:K2_GetComponentsByClass(mcCls)
+                    StationData.ForEachArray(comps, function(_, elem)
+                        local mc = Core.UnwrapArrayElem(elem)
+                        if Core.IsValidObj(mc) then
+                            table.insert(mcNames, mc:GetClass():GetFName():ToString())
+                            local wasTick = true
+                            if mc.IsComponentTickEnabled then
+                                local okT, t = pcall(function() return mc:IsComponentTickEnabled() end)
+                                if okT and type(t) == "boolean" then wasTick = t end
+                            end
+                            table.insert(LockedMoveComps, {
+                                comp = mc,
+                                wasTick = wasTick,
+                                maxSpeed = tonumber(mc.MaxSpeed),
+                            })
+                            if mc.StopMovementImmediately then mc:StopMovementImmediately() end
+                            if mc.Deactivate then mc:Deactivate() end
+                            if mc.SetComponentTickEnabled then mc:SetComponentTickEnabled(false) end
+                            if mc.MaxSpeed ~= nil then mc.MaxSpeed = 0.0 end
+                        end
+                    end)
+                end
                 local cm = pawn.CharacterMovement
                 if Core.IsValidObj(cm) then
                     if not SavedPawnSpeeds then
@@ -2437,12 +2650,20 @@ local function SetStationMapCursorMode(pc, win, active)
                             walk = tonumber(cm.MaxWalkSpeed) or 600.0,
                             fly = tonumber(cm.MaxFlySpeed) or 600.0,
                             custom = tonumber(cm.MaxCustomMovementSpeed) or 600.0,
+                            accel = tonumber(cm.MaxAcceleration) or 2048.0,
                         }
                     end
                     cm.MaxWalkSpeed = 0.0
                     cm.MaxFlySpeed = 0.0
                     cm.MaxCustomMovementSpeed = 0.0
+                    if cm.MaxAcceleration then cm.MaxAcceleration = 0.0 end
                     if cm.StopMovementImmediately then cm:StopMovementImmediately() end
+                end
+                if not PawnLockDiagLogged then
+                    PawnLockDiagLogged = true
+                    local ign = (pc.IsMoveInputIgnored and pcall(function() return pc:IsMoveInputIgnored() end)) and pc:IsMoveInputIgnored() or "?"
+                    Core.Log(string.format("[StationMap] PawnLockDiag pawn=%s moveComps=[%s] moveIgnored=%s",
+                        pawn:GetClass():GetFName():ToString(), table.concat(mcNames, ","), tostring(ign)))
                 end
             end
         else
@@ -2450,6 +2671,15 @@ local function SetStationMapCursorMode(pc, win, active)
             if pc.ResetIgnoreLookInput then pc:ResetIgnoreLookInput() end
             if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(false) end
             if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(false) end
+            for _, entry in ipairs(LockedMoveComps) do
+                local mc = entry.comp
+                if Core.IsValidObj(mc) then
+                    if entry.maxSpeed and mc.MaxSpeed ~= nil then mc.MaxSpeed = entry.maxSpeed end
+                    if mc.SetComponentTickEnabled then mc:SetComponentTickEnabled(entry.wasTick ~= false) end
+                    if mc.Activate then mc:Activate(false) end
+                end
+            end
+            LockedMoveComps = {}
             local pawn = Core.IsValidObj(LockedPawn) and LockedPawn or pc.Pawn
             if Core.IsValidObj(pawn) then
                 if pawn.EnableInput then pawn:EnableInput(pc) end
@@ -2458,10 +2688,12 @@ local function SetStationMapCursorMode(pc, win, active)
                     cm.MaxWalkSpeed = SavedPawnSpeeds.walk
                     cm.MaxFlySpeed = SavedPawnSpeeds.fly
                     cm.MaxCustomMovementSpeed = SavedPawnSpeeds.custom
+                    if cm.MaxAcceleration and SavedPawnSpeeds.accel then cm.MaxAcceleration = SavedPawnSpeeds.accel end
                 end
             end
             LockedPawn = nil
             SavedPawnSpeeds = nil
+            LockedPawnLocalPos = nil
         end
     end)
     local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
@@ -2486,9 +2718,11 @@ CloseStationMap = function()
     WaitingForBuildMenuSelection = false
     RenderedMachines = {}
     RenderedConveyors = {}
+    RenderedPorts = {}
     RenderedGridLines = {}
     LastGridTier = nil
     LastGridZoomRatio = nil
+    LastHoveredPortIdx = nil
     FloorIconButtons = {}
     FloorRailButtons = {}
     TrackedButtons = {}
