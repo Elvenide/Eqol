@@ -207,26 +207,27 @@ local CachedMachinesByFrame = {} -- frameAddr -> { time = ..., list = {} }
 local CachedPlayersSnapshot = { time = -999, list = {} }
 local CachedFootprintsByClass = {} -- clsAddr -> { cellsX = n, cellsY = n }
 
+local StationDiagLoggedKey = nil
+
 local function ReadBoundsStruct(boundsObj)
     if not boundsObj then return nil end
     local unwrapped = Core.UnwrapStruct(boundsObj)
     if not unwrapped then return nil end
 
-    -- Case 1: FBox / FBox2D with Min / Max
+    -- Case 1: FBox / FFixedBox with Min / Max (float or fixed-point)
     local okMinMax, minV, maxV = pcall(function() return unwrapped.Min, unwrapped.Max end)
     if okMinMax and minV and maxV then
-        local okRead, x1, y1, z1, x2, y2, z2 = pcall(function()
-            return tonumber(minV.X), tonumber(minV.Y), tonumber(minV.Z or 0),
-                   tonumber(maxV.X), tonumber(maxV.Y), tonumber(maxV.Z or 0)
-        end)
-        if okRead and x1 and y1 and x2 and y2 then
+        local x1, y1, z1 = Core.GetFPVector(minV)
+        local x2, y2, z2 = Core.GetFPVector(maxV)
+        local dx, dy = math.abs(x2 - x1), math.abs(y2 - y1)
+        if dx >= 50.0 or dy >= 50.0 then
             return {
                 cx = (x1 + x2) * 0.5,
                 cy = (y1 + y2) * 0.5,
-                cz = ((z1 or 0) + (z2 or 0)) * 0.5,
-                ex = math.abs(x2 - x1) * 0.5,
-                ey = math.abs(y2 - y1) * 0.5,
-                ez = math.abs((z2 or 0) - (z1 or 0)) * 0.5,
+                cz = (z1 + z2) * 0.5,
+                ex = dx * 0.5,
+                ey = dy * 0.5,
+                ez = math.abs(z2 - z1) * 0.5,
             }
         end
     end
@@ -234,16 +235,48 @@ local function ReadBoundsStruct(boundsObj)
     -- Case 2: FBoxSphereBounds with Origin / BoxExtent
     local okOrig, origV, extV = pcall(function() return unwrapped.Origin, unwrapped.BoxExtent end)
     if okOrig and origV and extV then
-        local okRead, ox, oy, oz, ex, ey, ez = pcall(function()
-            return tonumber(origV.X), tonumber(origV.Y), tonumber(origV.Z or 0),
-                   tonumber(extV.X), tonumber(extV.Y), tonumber(extV.Z or 0)
-        end)
-        if okRead and ox and oy and ex and ey then
-            return { cx = ox, cy = oy, cz = oz or 0, ex = math.abs(ex), ey = math.abs(ey), ez = math.abs(ez or 300) }
+        local ox, oy, oz = Core.GetFPVector(origV)
+        local ex, ey, ez = Core.GetFPVector(extV)
+        if math.abs(ex) >= 50.0 or math.abs(ey) >= 50.0 then
+            return { cx = ox, cy = oy, cz = oz, ex = math.abs(ex), ey = math.abs(ey), ez = math.max(50.0, math.abs(ez)) }
+        end
+    end
+
+    -- Case 3: Center / Extent struct variants
+    local okCE, cenV, cenExtV = pcall(function()
+        return unwrapped.Center or unwrapped.Location, unwrapped.Extent or unwrapped.Extents or unwrapped.Size
+    end)
+    if okCE and cenV and cenExtV then
+        local ox, oy, oz = Core.GetFPVector(cenV)
+        local ex, ey, ez = Core.GetFPVector(cenExtV)
+        if math.abs(ex) >= 50.0 or math.abs(ey) >= 50.0 then
+            return { cx = ox, cy = oy, cz = oz, ex = math.abs(ex), ey = math.abs(ey), ez = math.max(50.0, math.abs(ez)) }
         end
     end
 
     return nil
+end
+
+local function InspectStructFieldNames(objOrStruct, maxFields)
+    local names = {}
+    if not objOrStruct then return "nil" end
+    local unwrapped = Core.UnwrapStruct(objOrStruct)
+    if not unwrapped then return "nil" end
+    pcall(function()
+        local cls = unwrapped.GetClass and unwrapped:GetClass() or (unwrapped.GetStruct and unwrapped:GetStruct())
+        local target = Core.IsValidObj(cls) and cls or unwrapped
+        if target and target.ForEachProperty then
+            target:ForEachProperty(function(prop)
+                if #names < (maxFields or 18) then
+                    local pn = nil
+                    pcall(function() pn = prop:GetFName():ToString() end)
+                    if pn then table.insert(names, pn) end
+                end
+            end)
+        end
+    end)
+    if #names == 0 then return "?" end
+    return table.concat(names, ",")
 end
 
 function StationData.GetStationPlatforms(station, fallbackFrame)
@@ -277,12 +310,40 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
             local ok, arr = pcall(function() return station[propName] end)
             if ok and arr then
                 StationData.ForEachArray(arr, function(_, elem)
-                    addPlat(Core.UnwrapArrayElem(elem))
+                    local u = Core.UnwrapArrayElem(elem)
+                    if Core.IsValidObj(u) then
+                        addPlat(u)
+                    else
+                        local st = Core.UnwrapStruct(elem)
+                        if st then
+                            for _, fName in ipairs({ "Platform", "PlatformObject", "Object", "Actor", "Frame" }) do
+                                local okF, fObj = pcall(function() return st[fName] end)
+                                if okF and Core.IsValidObj(fObj) then
+                                    addPlat(fObj)
+                                    break
+                                end
+                            end
+                        end
+                    end
                 end)
-                if #result > 0 then
-                    CachedPlatforms = { key = cacheKey, time = now, list = result }
-                    return result
-                end
+            end
+        end
+
+        -- Also resolve station.PlatformIDs through DMSWorldSubsystem:GetObject(id)
+        local okPids, pids = pcall(function() return station.PlatformIDs end)
+        if okPids and pids then
+            local worldSub = Core.GetWorldSubsystem(Core.GetLocalPlayerController(), Core.PATHS.WorldSubsystemClass)
+            if Core.IsValidObj(worldSub) and worldSub.GetObject then
+                StationData.ForEachArray(pids, function(_, elem)
+                    local rawId = elem
+                    pcall(function() if type(elem.get) == "function" then rawId = elem:get() end end)
+                    if rawId ~= nil then
+                        local okObj, obj = pcall(function() return worldSub:GetObject(rawId) end)
+                        if okObj and Core.IsValidObj(obj) then
+                            addPlat(obj)
+                        end
+                    end
+                end)
             end
         end
     end
@@ -298,8 +359,11 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
         if okG and Core.IsValidObj(g) then targetGridAddr = g:GetAddress() end
     end
 
-    -- Fallback: scan live StationPlatform / StationPlatformObject actors belonging to this station / power grid
-    for _, searchCls in ipairs({ "StationPlatform", "StationPlatformObject" }) do
+    -- Scan live StationPlatform / StationPlatformObject instances belonging to this station
+    local okAllSt, allStations = pcall(FindAllOf, "StationObject")
+    local singleStationInWorld = (okAllSt and allStations and #allStations <= 1)
+
+    for _, searchCls in ipairs({ "StationPlatformObject", "StationPlatform" }) do
         local okAll, allPlats = pcall(FindAllOf, searchCls)
         if okAll and allPlats then
             local stAddr = Core.IsValidObj(station) and station:GetAddress() or nil
@@ -314,25 +378,33 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
                         end
                     end
                     if not belongs and stAddr then
-                        for _, propName in ipairs({ "Station", "ParentStation", "OwnerStation", "Parent" }) do
+                        for _, propName in ipairs({ "Station", "ParentStation", "OwnerStation", "OwningStation", "Parent", "ParentFrame" }) do
                             local okS, sVal = pcall(function() return p[propName] end)
                             if okS and Core.IsValidObj(sVal) and sVal:GetAddress() == stAddr then
                                 belongs = true
                                 break
                             end
                         end
-                        if not belongs and p.GetFrame then
-                            local okF, fVal = pcall(function() return p:GetFrame() end)
-                            if okF and Core.IsValidObj(fVal) and fVal:GetAddress() == stAddr then
-                                belongs = true
+                        if not belongs then
+                            for _, fnName in ipairs({ "GetStation", "GetFrame", "GetParentFrame" }) do
+                                if p[fnName] then
+                                    local okF, fVal = pcall(function() return p[fnName](p) end)
+                                    if okF and Core.IsValidObj(fVal) and fVal:GetAddress() == stAddr then
+                                        belongs = true
+                                        break
+                                    end
+                                end
                             end
                         end
                     end
                     if not belongs and stId then
-                        local okPid, pid = pcall(function() return p.ParentID end)
+                        local okPid, pid = pcall(function() return p.ParentID or p.StationID end)
                         if okPid and pid ~= nil and tostring(pid) == stId then
                             belongs = true
                         end
+                    end
+                    if not belongs and singleStationInWorld then
+                        belongs = true
                     end
                     if belongs then
                         addPlat(p)
@@ -340,10 +412,11 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
                 end
             end
         end
-        if #result > 0 then break end
     end
 
-    CachedPlatforms = { key = cacheKey, time = now, list = result }
+    if #result > 0 then
+        CachedPlatforms = { key = cacheKey, time = now, list = result }
+    end
     return result
 end
 
@@ -583,6 +656,48 @@ end
 --         currentFloorIndex (matching walkFrame or playerZ),
 --         unitSize (estimated 1x1 module width in Unreal cm),
 --         gridOriginX, gridOriginY (100cm grid alignment from first module edge).
+local function CollectExtraStationZLevels(station, allMachines)
+    local zPts = {}
+    local seen = {}
+    local function pushZ(z)
+        if type(z) ~= "number" then return end
+        for _, ez in ipairs(seen) do
+            if math.abs(z - ez) <= 220.0 then return end
+        end
+        table.insert(seen, z)
+        table.insert(zPts, z)
+    end
+
+    -- 1. Elevator stack stops give authoritative floor Z heights (every ~511cm or ~800cm)
+    local okEl, elevs = pcall(FindAllOf, "ElevatorObject")
+    if okEl and elevs then
+        for _, el in ipairs(elevs) do
+            if Core.IsValidObj(el) then
+                pcall(function()
+                    local stack = el.ElevatorStack
+                    if stack then
+                        StationData.ForEachArray(stack, function(_, elem)
+                            local stopObj = Core.UnwrapArrayElem(elem)
+                            if Core.IsValidObj(stopObj) and stopObj.bIsElevatorStop == true then
+                                local _, _, sz = StationData.GetMachineWorldPosAndYaw(stopObj)
+                                pushZ(sz)
+                            end
+                        end)
+                    end
+                end)
+            end
+        end
+    end
+
+    -- 2. Machine Z coordinates cover any floor that has machines
+    for _, m in ipairs(allMachines) do
+        local _, _, mz = StationData.GetMachineWorldPosAndYaw(m)
+        pushZ(mz)
+    end
+
+    return zPts
+end
+
 function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
     local plats = StationData.GetStationPlatforms(station, walkFrame)
     if #plats == 0 and Core.IsValidObj(walkFrame) then
@@ -590,14 +705,40 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
     end
 
     local entries = {}
+    local seenBoundSig = {}
     local minHalf = nil
     for idx1, p in ipairs(plats) do
         local b = StationData.GetPlatformWorldBounds(p, station, idx1)
         table.insert(entries, { platform = p, bounds = b })
+        seenBoundSig[string.format("%.0f:%.0f:%.0f", b.cx, b.cy, b.cz)] = true
         local smaller = math.min(b.ex, b.ey)
         if not minHalf or smaller < minHalf then
             minHalf = smaller
         end
+    end
+
+    -- Also ingest any station.PlatformBounds entries not already represented by a platform object
+    local pbCount = 0
+    if Core.IsValidObj(station) then
+        pcall(function()
+            local pbArr = station.PlatformBounds
+            if pbArr then
+                StationData.ForEachArray(pbArr, function(idx1, elem)
+                    pbCount = pbCount + 1
+                    local b = ReadBoundsStruct(elem)
+                    if b then
+                        local sig = string.format("%.0f:%.0f:%.0f", b.cx, b.cy, b.cz)
+                        if not seenBoundSig[sig] then
+                            seenBoundSig[sig] = true
+                            local matchPlat = plats[idx1] or plats[1] or station
+                            table.insert(entries, { platform = matchPlat, bounds = b })
+                            local smaller = math.min(b.ex, b.ey)
+                            if not minHalf or smaller < minHalf then minHalf = smaller end
+                        end
+                    end
+                end)
+            end
+        end)
     end
 
     local unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
@@ -626,8 +767,71 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
         end
     end
 
-    -- Collect all station machines (owned by station / walkFrame / platforms) and bin onto floors by Z
+    -- Collect all station machines (owned by station / walkFrame / platforms)
     local allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
+
+    -- Discover any missing Z floors from Elevators & machine Z coordinates
+    local extraZs = CollectExtraStationZLevels(station, allMachines)
+    -- If existing single fallback floor was only at default cz=0 with no real actor bounds, replace/augment cleanly
+    if #floors == 1 and not (entries[1] and entries[1].bounds and entries[1].bounds.hasActor) and #extraZs > 0 then
+        local onlyDefault = (math.abs(floors[1].z) < 1.0)
+        if onlyDefault then
+            local nearZero = false
+            for _, ez in ipairs(extraZs) do
+                if math.abs(ez - floors[1].z) <= zTolerance then nearZero = true break end
+            end
+            if not nearZero then
+                floors = {}
+            end
+        end
+    end
+
+    local fallbackPlat = entries[1] and entries[1].platform or walkFrame or station
+    local templateBoundsList = {}
+    for _, e in ipairs(entries) do
+        table.insert(templateBoundsList, e.bounds)
+    end
+    if #templateBoundsList == 0 then
+        table.insert(templateBoundsList, { cx = 0, cy = 0, cz = 0, ex = 600, ey = 600, ez = 300, yaw = 0 })
+    end
+
+    for _, ez in ipairs(extraZs) do
+        local foundFl = nil
+        for _, fl in ipairs(floors) do
+            if math.abs(ez - fl.z) <= zTolerance then
+                foundFl = fl
+                break
+            end
+        end
+        if not foundFl then
+            local synthPlats = {}
+            for _, tb in ipairs(templateBoundsList) do
+                table.insert(synthPlats, {
+                    platform = fallbackPlat,
+                    bounds = {
+                        cx = tb.cx, cy = tb.cy, cz = ez,
+                        ex = tb.ex, ey = tb.ey, ez = tb.ez or 300.0,
+                        yaw = tb.yaw or 0.0,
+                        synthetic = true,
+                    },
+                })
+            end
+            table.insert(floors, {
+                index = #floors + 1,
+                z = ez,
+                platforms = synthPlats,
+                machines = {},
+            })
+        end
+    end
+
+    -- Sort floors strictly bottom-to-top and re-index 1..N
+    table.sort(floors, function(a, b) return a.z < b.z end)
+    for i, fl in ipairs(floors) do
+        fl.index = i
+    end
+
+    -- Bin machines onto their nearest floor by Z
     local stationFallback = entries[1] and entries[1].bounds or nil
     for _, m in ipairs(allMachines) do
         local mx, my, mz, myaw = StationData.GetMachineWorldPosAndYaw(m, stationFallback)
@@ -651,39 +855,43 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
         end
     end
 
-    -- Compute 100cm grid alignment origin from first module's corner edge
-    local gridOriginX, gridOriginY = 0.0, 0.0
-    if entries[1] and entries[1].bounds then
-        local b0 = entries[1].bounds
-        gridOriginX = b0.cx - b0.ex
-        gridOriginY = b0.cy - b0.ey
+    -- For synthetic floor outlines, expand/align to contain that floor's machines cleanly if needed
+    for _, fl in ipairs(floors) do
+        local hasSynth = false
+        for _, pe in ipairs(fl.platforms) do
+            if pe.bounds.synthetic then hasSynth = true break end
+        end
+        if hasSynth and #fl.machines > 0 then
+            local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
+            for _, me in ipairs(fl.machines) do
+                if me.x < minX then minX = me.x end
+                if me.x > maxX then maxX = me.x end
+                if me.y < minY then minY = me.y end
+                if me.y > maxY then maxY = me.y end
+            end
+            local cx = math.floor(((minX + maxX) * 0.5) / 100.0 + 0.5) * 100.0
+            local cy = math.floor(((minY + maxY) * 0.5) / 100.0 + 0.5) * 100.0
+            local ex = math.max(600.0, math.ceil(((maxX - minX) * 0.5 + 300.0) / 100.0) * 100.0)
+            local ey = math.max(600.0, math.ceil(((maxY - minY) * 0.5 + 300.0) / 100.0) * 100.0)
+            for _, pe in ipairs(fl.platforms) do
+                if pe.bounds.synthetic then
+                    pe.bounds.cx, pe.bounds.cy, pe.bounds.ex, pe.bounds.ey = cx, cy, ex, ey
+                end
+            end
+        end
     end
 
+    -- Compute 100cm grid alignment origin from first module's corner edge
+    local gridOriginX, gridOriginY = 0.0, 0.0
+    local firstB = floors[1] and floors[1].platforms[1] and floors[1].platforms[1].bounds
+    if firstB then
+        gridOriginX = firstB.cx - firstB.ex
+        gridOriginY = firstB.cy - firstB.ey
+    end
+
+    -- Determine player's active floor (prefer playerZ if floors differ by Z)
     local currentFloorIndex = 1
-    if Core.IsValidObj(walkFrame) then
-        local walkAddr = walkFrame:GetAddress()
-        local foundByFrame = false
-        for _, fl in ipairs(floors) do
-            for _, pe in ipairs(fl.platforms) do
-                if pe.platform:GetAddress() == walkAddr then
-                    currentFloorIndex = fl.index
-                    foundByFrame = true
-                    break
-                end
-            end
-            if foundByFrame then break end
-        end
-        if not foundByFrame and type(playerZ) == "number" and #floors > 0 then
-            local bestDist = math.huge
-            for _, fl in ipairs(floors) do
-                local d = math.abs(playerZ - fl.z)
-                if d < bestDist then
-                    bestDist = d
-                    currentFloorIndex = fl.index
-                end
-            end
-        end
-    elseif type(playerZ) == "number" and #floors > 0 then
+    if type(playerZ) == "number" and #floors > 0 then
         local bestDist = math.huge
         for _, fl in ipairs(floors) do
             local d = math.abs(playerZ - fl.z)
@@ -692,6 +900,49 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
                 currentFloorIndex = fl.index
             end
         end
+    elseif Core.IsValidObj(walkFrame) then
+        local walkAddr = walkFrame:GetAddress()
+        for _, fl in ipairs(floors) do
+            for _, pe in ipairs(fl.platforms) do
+                if Core.IsValidObj(pe.platform) and pe.platform:GetAddress() == walkAddr then
+                    currentFloorIndex = fl.index
+                    break
+                end
+            end
+        end
+    end
+
+    -- One-shot runtime diagnostic per station so we can verify platform/floor structures in UE4SS.log
+    local diagKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or "none"
+    if StationDiagLoggedKey ~= diagKey then
+        StationDiagLoggedKey = diagKey
+        local wfCls = Core.IsValidObj(walkFrame) and (walkFrame:GetClass():GetFName():ToString()) or "nil"
+        local stCls = Core.IsValidObj(station) and (station:GetClass():GetFName():ToString()) or "nil"
+        local platFields, pbFields = "?", "?"
+        local platArrLen = 0
+        if Core.IsValidObj(station) then
+            pcall(function()
+                if station.Platforms then
+                    StationData.ForEachArray(station.Platforms, function(idx, el)
+                        platArrLen = platArrLen + 1
+                        if idx == 1 then platFields = InspectStructFieldNames(el, 14) end
+                    end)
+                end
+                if station.PlatformBounds then
+                    StationData.ForEachArray(station.PlatformBounds, function(idx, el)
+                        if idx == 1 then pbFields = InspectStructFieldNames(el, 14) end
+                    end)
+                end
+            end)
+        end
+        local flParts = {}
+        for _, fl in ipairs(floors) do
+            table.insert(flParts, string.format("#%d(z=%.0f,p=%d,m=%d)", fl.index, fl.z, #fl.platforms, #fl.machines))
+        end
+        Core.Log(string.format(
+            "[StationData] Diag wf=%s st=%s st.Platforms=%d[%s] st.PlatformBounds=%d[%s] resolvedPlats=%d extraZs=%d totalMachs=%d floors=%d {%s}",
+            wfCls, stCls, platArrLen, platFields, pbCount, pbFields, #plats, #extraZs, #allMachines, #floors, table.concat(flParts, ", ")
+        ))
     end
 
     return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY
@@ -1050,6 +1301,7 @@ end
 function StationData.InvalidateCaches()
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
+    StationDiagLoggedKey = nil
 end
 
 --------------------------------------------------------------------------------
