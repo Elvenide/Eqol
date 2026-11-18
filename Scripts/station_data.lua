@@ -850,6 +850,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     -- Ingest station platforms in station-local coordinates
     local entries = {}
     local minHalf = nil
+    local platDiagParts = {}
     for idx1, p in ipairs(plats) do
         local b = StationData.GetPlatformWorldBounds(p, station, idx1)
         local lcx, lcy, lcz = StationData.WorldToStationLocal(xform, b.cx, b.cy, b.cz, nil, nil, nil)
@@ -861,23 +862,48 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
             hasActor = b.hasActor,
         }
         table.insert(entries, { platform = p, bounds = localB })
+        local pClsName = Core.IsValidObj(p) and (pcall(function() return p:GetClass():GetFName():ToString() end) and p:GetClass():GetFName():ToString() or "?") or "nil"
+        table.insert(platDiagParts, string.format("%s(z=%.0f,ex=%.0f,ey=%.0f,ez=%.0f,act=%s)", pClsName, lcz, b.ex, b.ey, b.ez, tostring(b.hasActor)))
         local smaller = math.min(b.ex, b.ey)
         if not minHalf or smaller < minHalf then minHalf = smaller end
-        if not hasElevators and (#floors == 0 or b.hasActor) then
+        if #floors == 0 or (not hasElevators and b.hasActor) then
             local fl = ensureFloorForZ(lcz)
             if fl then table.insert(fl.platforms, { platform = p, bounds = localB }) end
+        elseif hasElevators and (b.hasActor or b.ex >= 200.0) then
+            -- Assign this module to existing elevator-defined floor(s) without creating extra floors
+            local spanLo = lcz - math.max(350.0, localB.ez - 150.0)
+            local spanHi = lcz + math.max(350.0, localB.ez - 150.0)
+            local matchedAny = false
+            for _, fl in ipairs(floors) do
+                if fl.z >= spanLo and fl.z <= spanHi then
+                    table.insert(fl.platforms, { platform = p, bounds = localB })
+                    matchedAny = true
+                end
+            end
+            if not matchedAny then
+                local bestFl, bestDz = nil, math.huge
+                for _, fl in ipairs(floors) do
+                    local dz = math.abs(lcz - fl.z)
+                    if dz < bestDz then bestDz = dz; bestFl = fl end
+                end
+                if bestFl and bestDz <= math.max(600.0, localB.ez + 200.0) then
+                    table.insert(bestFl.platforms, { platform = p, bounds = localB })
+                end
+            end
         end
     end
 
-    -- Compute local positions of all machines (only create Z floors from machines when station has NO elevators)
+    -- Compute local positions of all machines (filtering out irrelevant map clutter like solar panels & turrets)
     local localMachines = {}
     for _, m in ipairs(allMachines) do
-        local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, xform)
-        local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
-        if not skipZero then
-            table.insert(localMachines, { machine = m, x = lx, y = ly, z = lz, yaw = lyaw })
-            if not hasElevators and #floors == 0 then
-                ensureFloorForZ(lz)
+        if not StationData.ShouldHideMachineOnMap(m) then
+            local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, xform)
+            local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
+            if not skipZero then
+                table.insert(localMachines, { machine = m, x = lx, y = ly, z = lz, yaw = lyaw })
+                if not hasElevators and #floors == 0 then
+                    ensureFloorForZ(lz)
+                end
             end
         end
     end
@@ -975,6 +1001,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         end
         Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevCols=%d elevStops=[%s] floors(%d): %s",
             playerLx, playerLy, playerLz, currentFloorIndex, #elevStopLists, elevStr, #floors, table.concat(flParts, ", ")))
+        Core.Log(string.format("[StationData] PlatsDiag count=%d items=[%s]", #platDiagParts, table.concat(platDiagParts, "; ")))
 
         local clsCounts = {}
         for _, m in ipairs(allMachines) do
@@ -1126,6 +1153,7 @@ function StationData.GetItemIconTexture(item)
 end
 
 local BeltMatDiagLogged = false
+local UndergroundDiagLogged = false
 local CachedBeltTexByCls = {}
 local CachedBuildablesByCls = nil
 local CachedBuildablesByName = nil
@@ -1204,6 +1232,7 @@ local function FindBuildableForMachineClass(machine)
                 "ObjectClass", "MachineClass", "ActorClass", "ConstructionClass",
                 "BuilderClass", "BlockClass", "StationObjectClass", "SpawnClass",
                 "PlaceableClass", "PreviewClass", "DockedClass", "DockClass",
+                "Blueprint", "Class", "ShipClass",
             }
             local discoveredExtra = false
             if all then
@@ -1584,17 +1613,31 @@ function StationData.GetBuildableIconTexture(machine, buildableOpt)
 
         if clsKey ~= "" and not MissingIconDiagLogged[clsKey] then
             MissingIconDiagLogged[clsKey] = true
-            local bProps = {}
+            local dockTex = {}
+            for _, ti in ipairs(allTex) do
+                if ti.lowFull:find("dock", 1, true) or ti.lowFull:find("shipyard", 1, true) or ti.lowFull:find("airlock", 1, true) then
+                    table.insert(dockTex, ti.name)
+                end
+            end
+            local bldNames = {}
             pcall(function()
                 local allB = FindAllOf("Buildable")
-                if allB and allB[1] and allB[1]:GetClass() and allB[1]:GetClass().ForEachProperty then
-                    allB[1]:GetClass():ForEachProperty(function(p)
-                        table.insert(bProps, p:GetFName():ToString())
-                    end)
+                if allB then
+                    for _, b in ipairs(allB) do
+                        if Core.IsValidObj(b) then
+                            local bn = ""
+                            pcall(function() bn = b:GetFName():ToString() end)
+                            local lb = bn:lower()
+                            if lb:find("dock", 1, true) or lb:find("shipyard", 1, true) or lb:find("airlock", 1, true) then
+                                table.insert(bldNames, bn)
+                            end
+                        end
+                    end
                 end
             end)
-            Core.Log(string.format("[StationData] MissingIconDiag cls=%s mNorm=%s bestTex=%s(%d) buildableProps=[%s]",
-                clsKey, mNorm, Core.IsValidObj(bestTex) and bestTex:GetFName():ToString() or "nil", bestScore, table.concat(bProps, ",")))
+            Core.Log(string.format("[StationData] MissingIconDiag cls=%s mNorm=%s bestTex=%s(%d) dockTex=[%s] dockBlds=[%s]",
+                clsKey, mNorm, Core.IsValidObj(bestTex) and bestTex:GetFName():ToString() or "nil", bestScore,
+                table.concat(dockTex, ","), table.concat(bldNames, ",")))
         end
     end
     return nil
@@ -1662,6 +1705,29 @@ function StationData.GetMachineTypeAndTier(machine, buildableOpt)
     return base, tier, (dispName ~= "" and dispName or "Machine")
 end
 
+local function GetItemIdentityKey(item)
+    if not Core.IsValidObj(item) then return nil end
+    local parts = {}
+    pcall(function()
+        if item.DisplayName then
+            local dn = item.DisplayName:ToString()
+            if dn and dn ~= "" then table.insert(parts, dn) end
+        end
+    end)
+    pcall(function()
+        local fn = item:GetFName():ToString()
+        if fn and fn ~= "" then
+            -- Strip trailing instance number (_2147...) if items are instanced
+            fn = fn:gsub("_%d+$", "")
+            table.insert(parts, fn)
+        end
+    end)
+    if #parts > 0 then
+        return table.concat(parts, "|")
+    end
+    return tostring(item:GetAddress())
+end
+
 function StationData.GetContainerTopItems(container, maxCount)
     local items = {}
     local inv = StationData.GetContainerInventory(container)
@@ -1675,7 +1741,7 @@ function StationData.GetContainerTopItems(container, maxCount)
             if st and Core.IsValidObj(st.Item) then
                 local amt = tonumber(st.Amount) or 0
                 if amt > 0 then
-                    local k = StationData.GetObjectKey(st.Item)
+                    local k = GetItemIdentityKey(st.Item)
                     if not byKey[k] then
                         byKey[k] = { Item = st.Item, Amount = 0 }
                     end
@@ -1692,6 +1758,140 @@ function StationData.GetContainerTopItems(container, maxCount)
         while #items > maxCount do table.remove(items) end
     end
     return items
+end
+
+function StationData.ShouldHideMachineOnMap(machine, buildableOpt)
+    local parts = {}
+    if Core.IsValidObj(machine) then
+        pcall(function() table.insert(parts, machine:GetClass():GetFName():ToString()) end)
+        pcall(function()
+            local b = machine.Buildable
+            if Core.IsValidObj(b) and b.DisplayName then table.insert(parts, b.DisplayName:ToString()) end
+        end)
+    end
+    if Core.IsValidObj(buildableOpt) then
+        pcall(function()
+            if buildableOpt.DisplayName then table.insert(parts, buildableOpt.DisplayName:ToString()) end
+        end)
+    end
+    local combined = table.concat(parts, " "):lower()
+    if combined:find("solar", 1, true) then return true end
+    if combined:find("turret", 1, true) then return true end
+    return false
+end
+
+function StationData.GetUndergroundBeltPairInfo(machine, xform)
+    if not Core.IsValidObj(machine) then return nil end
+    local cName = ""
+    pcall(function() cName = machine:GetClass():GetFName():ToString():lower() end)
+    if not cName:find("underground", 1, true) then return nil end
+
+    local mx, my, mz, myaw = GetMachineLocalPosAndYaw(machine, xform)
+    local info = {
+        isUnderground = true,
+        isInput = nil,
+        pairX = nil,
+        pairY = nil,
+        pairZ = nil,
+        pairAddr = nil,
+    }
+
+    local okIn, bIn = pcall(function()
+        if machine.bIsInput ~= nil then return machine.bIsInput end
+        if machine.bIsEntrance ~= nil then return machine.bIsEntrance end
+        if machine.bInput ~= nil then return machine.bInput end
+        return nil
+    end)
+    if okIn and type(bIn) == "boolean" then info.isInput = bIn end
+
+    local okOut, bOut = pcall(function()
+        if machine.bIsOutput ~= nil then return machine.bIsOutput end
+        if machine.bIsExit ~= nil then return machine.bIsExit end
+        if machine.bOutput ~= nil then return machine.bOutput end
+        return nil
+    end)
+    if info.isInput == nil and okOut and type(bOut) == "boolean" then info.isInput = not bOut end
+
+    -- 1. Check linked simulation belt object properties
+    for _, prop in ipairs({ "OtherBelt", "ConnectedBelt", "OutputBelt", "TargetBelt", "LinkedBelt", "Partner", "ExitBelt", "Pair", "OtherEnd", "LinkedObject", "ConnectedObject" }) do
+        local okP, other = pcall(function() return machine[prop] end)
+        if okP and Core.IsValidObj(other) and other:GetAddress() ~= machine:GetAddress() then
+            local ox, oy, oz = GetMachineLocalPosAndYaw(other, xform)
+            info.pairX, info.pairY, info.pairZ = ox, oy, oz
+            info.pairAddr = other:GetAddress()
+            break
+        end
+    end
+
+    -- 2. Check vector / endpoint location properties on machine or actor
+    local actor = StationData.GetObjectActor(machine)
+    if not info.pairX then
+        for _, owner in ipairs({ machine, actor }) do
+            if Core.IsValidObj(owner) then
+                for _, vProp in ipairs({ "EndLocation", "TargetLocation", "OutputLocation", "ExitLocation", "OtherLocation", "PairLocation", "SecondLocation" }) do
+                    local okV, v = pcall(function() return owner[vProp] end)
+                    if okV and v then
+                        local vx, vy, vz = Core.GetFPVector(v)
+                        if (vx ~= 0 or vy ~= 0) and xform then
+                            local lox, loy, loz = StationData.WorldToStationLocal(xform, vx, vy, vz, nil, nil, nil)
+                            if (math.abs(lox - mx) + math.abs(loy - my)) > 60.0 then
+                                info.pairX, info.pairY, info.pairZ = lox, loy, loz
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            if info.pairX then break end
+        end
+    end
+
+    -- 3. Check if the underground actor contains a distinct second mesh / child actor >= 80cm from actor root
+    local compDiag = {}
+    if not info.pairX and Core.IsValidObj(actor) then
+        pcall(function()
+            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            if Core.IsValidObj(smCls) and actor.K2_GetComponentsByClass then
+                local rawComps = actor:K2_GetComponentsByClass(smCls)
+                local bestDist = 80.0
+                StationData.ForEachArray(rawComps, function(_, elem)
+                    local c = Core.UnwrapArrayElem(elem)
+                    if Core.IsValidObj(c) and c.K2_GetComponentLocation then
+                        local loc = c:K2_GetComponentLocation()
+                        if loc and type(loc.X) == "number" then
+                            local lox, loy, loz = StationData.WorldToStationLocal(xform, loc.X, loc.Y or 0, loc.Z or 0, nil, nil, nil)
+                            local d = math.sqrt((lox - mx) ^ 2 + (loy - my) ^ 2)
+                            if not UndergroundDiagLogged then
+                                table.insert(compDiag, string.format("%s@(%.0f,%.0f)", c:GetFName():ToString(), lox - mx, loy - my))
+                            end
+                            if d > bestDist then
+                                bestDist = d
+                                info.pairX, info.pairY, info.pairZ = lox, loy, loz
+                            end
+                        end
+                    end
+                end)
+            end
+        end)
+    end
+
+    if not UndergroundDiagLogged then
+        UndergroundDiagLogged = true
+        local mProps, aProps = {}, {}
+        pcall(function()
+            machine:GetClass():ForEachProperty(function(p) table.insert(mProps, p:GetFName():ToString()) end)
+        end)
+        if Core.IsValidObj(actor) then
+            pcall(function()
+                actor:GetClass():ForEachProperty(function(p) table.insert(aProps, p:GetFName():ToString()) end)
+            end)
+        end
+        Core.Log(string.format("[StationData] UndergroundDiag cls=%s pair=(%s,%s) isIn=%s mProps=[%s] aProps=[%s] comps=[%s]",
+            cName, tostring(info.pairX), tostring(info.pairY), tostring(info.isInput),
+            table.concat(mProps, ","), table.concat(aProps, ","), table.concat(compDiag, ",")))
+    end
+
+    return info
 end
 
 function StationData.GetProducerOutputsAndRates(machine)
@@ -1966,6 +2166,7 @@ function StationData.InvalidateCaches()
     CachedGameTexList = nil
     MissingIconDiagLogged = {}
     BeltMatDiagLogged = false
+    UndergroundDiagLogged = false
     StationDiagLoggedKey = nil
 end
 

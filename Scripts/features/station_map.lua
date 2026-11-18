@@ -47,7 +47,7 @@ local COLORS = {
     GridLine      = { R = 0.240, G = 0.300, B = 0.380, A = 0.28 },
     GridMajor     = { R = 0.340, G = 0.430, B = 0.540, A = 0.48 },
     ModuleFill    = { R = 0.085, G = 0.115, B = 0.155, A = 0.92 },
-    ModuleBorder  = { R = 0.520, G = 0.620, B = 0.740, A = 0.92 },
+    ModuleBorder  = { R = 0.720, G = 0.800, B = 0.900, A = 0.96 },
     Assembler     = { R = 0.150, G = 0.560, B = 0.760, A = 0.92 },
     Container     = { R = 0.780, G = 0.560, B = 0.140, A = 0.92 },
     Conveyor      = { R = 0.290, G = 0.360, B = 0.440, A = 0.90 },
@@ -122,6 +122,8 @@ local WaitingForBuildMenuSelection = false
 local WaitingBuildMenuSince = 0
 local KeyHandlersBound = false
 local LastWorldAddr = nil
+local LockedPawn = nil
+local SavedPawnSpeeds = nil
 
 -- Input Polling State
 local InputPollActive = false
@@ -477,12 +479,7 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
     local typeKey, tier, dispName = StationData.GetMachineTypeAndTier(machine, buildableOpt)
     local bgCol, borderCol = GetShadedColorForTypeAndTier(typeKey, tier)
     local tex = nil
-    local gotBeltTex = false
-    if cat == "Conveyor" and Core.IsValidObj(machine) then
-        tex = StationData.GetConveyorBeltTexture(machine)
-        gotBeltTex = Core.IsValidObj(tex)
-    end
-    if not Core.IsValidObj(tex) then
+    if cat ~= "Conveyor" then
         tex = StationData.GetBuildableIconTexture(machine, buildableOpt)
     end
     local directional = (cat == "Conveyor")
@@ -499,7 +496,7 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
         Core.Log(string.format("[StationMap] 2DIconSample type=%s tier=%d name=%s bldValid=%s texValid=%s",
             tostring(typeKey), tier, tostring(dispName), tostring(Core.IsValidObj(bld)), tostring(Core.IsValidObj(tex))))
     end
-    if not Core.IsValidObj(tex) and clsKey and not MissingIconsLogged[clsKey] then
+    if cat ~= "Conveyor" and not Core.IsValidObj(tex) and clsKey and not MissingIconsLogged[clsKey] then
         MissingIconsLogged[clsKey] = true
         local hasBld = Core.IsValidObj(buildableOpt) or (Core.IsValidObj(machine) and pcall(function() return Core.IsValidObj(machine.Buildable) end) and Core.IsValidObj(machine.Buildable))
         Core.Log(string.format("[StationMap] Missing2DIcon cls=%s type=%s tier=%d name=%s bldValid=%s",
@@ -513,7 +510,7 @@ local function RequestMachineSprite(clsKey, machine, cat, buildableOpt)
         typeKey = typeKey,
         tier = tier,
         directional = directional,
-        fullTileTex = gotBeltTex,
+        fullTileTex = false,
     }
     if clsKey then
         MachineSpriteCache[clsKey] = entry
@@ -823,9 +820,149 @@ local function CreateLabeledButton(parentWindow, pc, outer, labelStr, fontSz, wi
     return ov, btn, txt
 end
 
+local BELT_TIER_COLORS = {
+    [1] = { R = 0.98, G = 0.84, B = 0.12, A = 1.0 }, -- Mk1: Yellow
+    [2] = { R = 0.96, G = 0.48, B = 0.08, A = 1.0 }, -- Mk2: Orange
+    [3] = { R = 0.90, G = 0.18, B = 0.16, A = 1.0 }, -- Mk3: Red
+}
+
+local function GetTierArrowColor(tier)
+    local t = tonumber(tier) or 1
+    if t <= 1 then return BELT_TIER_COLORS[1]
+    elseif t == 2 then return BELT_TIER_COLORS[2]
+    else return BELT_TIER_COLORS[3] end
+end
+
+local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col, zOrder)
+    local s = math.max(8.0, sizePx or 18.0)
+    local armLen = s * 0.46
+    local armThick = math.max(2.0, s * 0.16)
+    local armOff = s * 0.14
+    local tile = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    if not Core.IsValidObj(tile) then return nil end
+    pcall(function()
+        tile:SetVisibility(3)
+        tile:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+        if math.abs(yawDeg or 0.0) > 0.1 and tile.SetRenderTransformAngle then
+            tile:SetRenderTransformAngle(yawDeg)
+        end
+    end)
+    local tSlot = canvas:AddChildToCanvas(tile)
+    SetCanvasSlot(tSlot, cx, cy, s, s, 0.5, 0.5, zOrder)
+
+    for _, spec in ipairs({ { dy = -armOff, ang = 38.0 }, { dy = armOff, ang = -38.0 } }) do
+        local bar = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        if Core.IsValidObj(bar) then
+            pcall(function()
+                bar:SetVisibility(3)
+                bar:SetBrushColor(col)
+                bar:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+                if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(spec.ang) end
+            end)
+            local bs = tile:AddChildToCanvas(bar)
+            SetCanvasSlot(bs, s * 0.52, s * 0.5 + spec.dy, armLen, armThick, 0.5, 0.5, 1)
+        end
+    end
+    return tile
+end
+
+local function RenderDashedLine(outer, canvas, x1, y1, x2, y2, col, thickness, dashLen, gapLen, zOrder)
+    local dx, dy = x2 - x1, y2 - y1
+    local dist = math.sqrt(dx * dx + dy * dy)
+    if dist < 4.0 then return end
+    local ang = math.deg(math.atan(dy, dx))
+    local dLen = dashLen or 10.0
+    local gLen = gapLen or 7.0
+    local step = dLen + gLen
+    local ux, uy = dx / dist, dy / dist
+    local t = 4.0
+    while t < dist - 4.0 do
+        local segLen = math.min(dLen, (dist - 4.0) - t)
+        if segLen >= 2.0 then
+            local mid = t + segLen * 0.5
+            local b = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(b) then
+                pcall(function()
+                    b:SetVisibility(3)
+                    b:SetBrushColor(col)
+                    b:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+                    if math.abs(ang) > 0.1 and b.SetRenderTransformAngle then b:SetRenderTransformAngle(ang) end
+                end)
+                local bs = canvas:AddChildToCanvas(b)
+                SetCanvasSlot(bs, x1 + ux * mid, y1 + uy * mid, segLen, thickness or 2.4, 0.5, 0.5, zOrder)
+            end
+        end
+        t = t + step
+    end
+end
+
 local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, mx, my, pxW, pxH, yawDeg, cat, spriteEntry, isGhost, validGhost, zBase, hasBottomOverlay)
     local fillW = math.max(6.0, pxW - 2.0)
     local fillH = math.max(6.0, pxH - 2.0)
+
+    -- Dedicated crisp 2D conveyor belt visual: gray belt bed, black/dark-gray guide rails, tier-shaded arrows
+    if cat == "Conveyor" then
+        local tier = (spriteEntry and spriteEntry.tier) or 1
+        local tierDark = (tier == 1) and 1.0 or ((tier == 2) and 0.84 or 0.72)
+        local bgCol = isGhost and (validGhost and COLORS.GhostValid or COLORS.GhostInvalid)
+            or { R = 0.36 * tierDark, G = 0.38 * tierDark, B = 0.42 * tierDark, A = 0.96 }
+        local bdrCol = isGhost and (validGhost and COLORS.GhostBorderOk or COLORS.GhostBorderBad)
+            or { R = 0.08, G = 0.09, B = 0.11, A = 0.98 }
+        local railCol = isGhost and bdrCol or { R = 0.07, G = 0.08, B = 0.10, A = 0.98 }
+        local arrowCol = isGhost and bdrCol or GetTierArrowColor(tier)
+
+        local tile = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+        if Core.IsValidObj(tile) then
+            pcall(function()
+                tile:SetVisibility(3)
+                tile:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+                if math.abs(yawDeg or 0.0) > 0.1 and tile.SetRenderTransformAngle then
+                    tile:SetRenderTransformAngle(yawDeg)
+                end
+            end)
+            local ts = targetCanvas:AddChildToCanvas(tile)
+            SetCanvasSlot(ts, mx, my, pxW, pxH, 0.5, 0.5, zBase)
+
+            local bg = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(bg) then
+                pcall(function() bg:SetVisibility(3); bg:SetBrushColor(bgCol) end)
+                local bs = tile:AddChildToCanvas(bg)
+                SetCanvasSlot(bs, pxW * 0.5, pxH * 0.5, fillW, fillH, 0.5, 0.5, 1)
+            end
+
+            -- Top and bottom dark rail borders (rotated together with tile along belt axis)
+            local railThick = math.max(2.2, fillH * 0.13)
+            for _, ryOff in ipairs({ railThick * 0.5 + 1.0, pxH - railThick * 0.5 - 1.0 }) do
+                local rail = Core.CreateRawWidget(PATHS.BorderClass, outer)
+                if Core.IsValidObj(rail) then
+                    pcall(function() rail:SetVisibility(3); rail:SetBrushColor(railCol) end)
+                    local rs = tile:AddChildToCanvas(rail)
+                    SetCanvasSlot(rs, pxW * 0.5, ryOff, fillW, railThick, 0.5, 0.5, 2)
+                end
+            end
+
+            -- Two directional chevron ticks (>) pointing along +X (yaw=0)
+            local armLen = math.max(5.0, pxW * 0.24)
+            local armThick = math.max(2.0, pxH * 0.085)
+            local armOffY = pxH * 0.115
+            for _, cxOff in ipairs({ pxW * 0.34, pxW * 0.66 }) do
+                for _, sp in ipairs({ { dy = -armOffY, ang = 38.0 }, { dy = armOffY, ang = -38.0 } }) do
+                    local bar = Core.CreateRawWidget(PATHS.BorderClass, outer)
+                    if Core.IsValidObj(bar) then
+                        pcall(function()
+                            bar:SetVisibility(3)
+                            bar:SetBrushColor(arrowCol)
+                            bar:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+                            if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(sp.ang) end
+                        end)
+                        local cs = tile:AddChildToCanvas(bar)
+                        SetCanvasSlot(cs, cxOff, pxH * 0.5 + sp.dy, armLen, armThick, 0.5, 0.5, 3)
+                    end
+                end
+            end
+            return tile
+        end
+    end
 
     local bgCol = (spriteEntry and spriteEntry.bgCol) or GetColorForMachine(cat)
     local bdrCol = (spriteEntry and spriteEntry.borderCol) or { R = 0.08, G = 0.10, B = 0.14, A = 1.0 }
@@ -855,7 +992,7 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
         SetCanvasSlot(fs, mx, my, fillW, fillH, 0.5, 0.5, zBase + 1)
     end
 
-    -- Centered 2D build-menu machine asset inside the colored rectangle (or full-tile belt texture for conveyors)
+    -- Centered 2D build-menu machine asset inside the colored rectangle
     if spriteEntry and Core.IsValidObj(spriteEntry.tex) then
         local img = Core.CreateRawWidget(PATHS.ImageClass, outer)
         if Core.IsValidObj(img) then
@@ -1359,7 +1496,7 @@ RefreshStationMapCanvas = function()
             local slot = MapUI.MapCanvas:AddChildToCanvas(modFill)
             SetCanvasSlot(slot, mx, my, mw, mh, 0.5, 0.5, 2)
         end
-        RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 2.5, COLORS.ModuleBorder, 4)
+        RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
     end
 
     -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX
@@ -1368,15 +1505,25 @@ RefreshStationMapCanvas = function()
         floorMachines = {}
         local allM = StationData.GetAllStationMachines(CurrentStation, {}, CurrentWalkFrame)
         for _, m in ipairs(allM) do
-            local mwx, mwy, mwz, myaw = StationData.GetMachineWorldPosAndYaw(m, floor.platforms[1] and floor.platforms[1].bounds)
-            table.insert(floorMachines, { machine = m, x = mwx, y = mwy, z = mwz, yaw = myaw })
+            if not StationData.ShouldHideMachineOnMap(m) then
+                local mwx, mwy, mwz, myaw = StationData.GetMachineWorldPosAndYaw(m, floor.platforms[1] and floor.platforms[1].bounds)
+                table.insert(floorMachines, { machine = m, x = mwx, y = mwy, z = mwz, yaw = myaw })
+            end
         end
         floor.machines = floorMachines
     end
 
+    local presentAddrs = {}
+    for _, me in ipairs(floorMachines) do
+        if Core.IsValidObj(me.machine) then
+            presentAddrs[me.machine:GetAddress()] = true
+        end
+    end
+    local seenUndergroundPairs = {}
+
     for _, me in ipairs(floorMachines) do
         local m = me.machine
-        if Core.IsValidObj(m) then
+        if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
             local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
             local mx, my = WorldToBaseCanvas(mwx, mwy)
             local cat = StationData.GetMachineCategory(m)
@@ -1435,6 +1582,33 @@ RefreshStationMapCanvas = function()
             end
 
             CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
+
+            -- Underground belt enhancements: direction arrow on tile + dashed pair line + second endpoint tile
+            local uInfo = StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform)
+            if uInfo then
+                local arrowCol = GetTierArrowColor(sprite and sprite.tier or 1)
+                RenderDirectionChevron(outer, MapUI.MapCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                if uInfo.pairX and uInfo.pairY then
+                    local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
+                    local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
+                    if not seenUndergroundPairs[pKey] then
+                        seenUndergroundPairs[pKey] = true
+                        local lineCol = { R = arrowCol.R, G = arrowCol.G, B = arrowCol.B, A = 0.80 }
+                        local x1, y1, x2, y2 = mx, my, omx, omy
+                        if uInfo.isInput == false then
+                            x1, y1, x2, y2 = omx, omy, mx, my
+                        end
+                        RenderDashedLine(outer, MapUI.MapCanvas, x1, y1, x2, y2, lineCol, 2.6, 10.0, 6.0, 17)
+                        local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
+                        RenderDirectionChevron(outer, MapUI.MapCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
+                    end
+                    -- Render second endpoint tile if the paired end wasn't already listed as a separate simulation object
+                    if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
+                        CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
+                        RenderDirectionChevron(outer, MapUI.MapCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                    end
+                end
+            end
 
             if hasBottomOverlay then
                 local isHidden = StationData.IsMachineIconHidden(m)
@@ -1990,6 +2164,32 @@ local function EnsureInputPoll()
             return
         end
 
+        -- Keep player pawn body immobilized while map is open (even if submenus re-enable move input)
+        pcall(function()
+            if pc.IsMoveInputIgnored and not pc:IsMoveInputIgnored() and pc.SetIgnoreMoveInput then
+                pc:SetIgnoreMoveInput(true)
+            end
+            if pc.IsLookInputIgnored and not pc:IsLookInputIgnored() and pc.SetIgnoreLookInput then
+                pc:SetIgnoreLookInput(true)
+            end
+            if Core.IsValidObj(pc.Pawn) then
+                local cm = pc.Pawn.CharacterMovement
+                if Core.IsValidObj(cm) and (tonumber(cm.MaxWalkSpeed) or 0) > 0.1 then
+                    if not SavedPawnSpeeds then
+                        SavedPawnSpeeds = {
+                            walk = tonumber(cm.MaxWalkSpeed) or 600.0,
+                            fly = tonumber(cm.MaxFlySpeed) or 600.0,
+                            custom = tonumber(cm.MaxCustomMovementSpeed) or 600.0,
+                        }
+                    end
+                    cm.MaxWalkSpeed = 0.0
+                    cm.MaxFlySpeed = 0.0
+                    cm.MaxCustomMovementSpeed = 0.0
+                    if cm.StopMovementImmediately then cm:StopMovementImmediately() end
+                end
+            end
+        end)
+
         -- Fallback build-menu pickup if WBP_Building_C sets pc.Builder.Buildable, or reset if cancelled
         if WaitingForBuildMenuSelection then
             local picked = nil
@@ -2226,11 +2426,42 @@ local function SetStationMapCursorMode(pc, win, active)
         if active then
             if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(true) end
             if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(true) end
+            local pawn = pc.Pawn
+            if Core.IsValidObj(pawn) then
+                LockedPawn = pawn
+                if pawn.DisableInput then pawn:DisableInput(pc) end
+                local cm = pawn.CharacterMovement
+                if Core.IsValidObj(cm) then
+                    if not SavedPawnSpeeds then
+                        SavedPawnSpeeds = {
+                            walk = tonumber(cm.MaxWalkSpeed) or 600.0,
+                            fly = tonumber(cm.MaxFlySpeed) or 600.0,
+                            custom = tonumber(cm.MaxCustomMovementSpeed) or 600.0,
+                        }
+                    end
+                    cm.MaxWalkSpeed = 0.0
+                    cm.MaxFlySpeed = 0.0
+                    cm.MaxCustomMovementSpeed = 0.0
+                    if cm.StopMovementImmediately then cm:StopMovementImmediately() end
+                end
+            end
         else
             if pc.ResetIgnoreMoveInput then pc:ResetIgnoreMoveInput() end
             if pc.ResetIgnoreLookInput then pc:ResetIgnoreLookInput() end
             if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(false) end
             if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(false) end
+            local pawn = Core.IsValidObj(LockedPawn) and LockedPawn or pc.Pawn
+            if Core.IsValidObj(pawn) then
+                if pawn.EnableInput then pawn:EnableInput(pc) end
+                local cm = pawn.CharacterMovement
+                if Core.IsValidObj(cm) and SavedPawnSpeeds then
+                    cm.MaxWalkSpeed = SavedPawnSpeeds.walk
+                    cm.MaxFlySpeed = SavedPawnSpeeds.fly
+                    cm.MaxCustomMovementSpeed = SavedPawnSpeeds.custom
+                end
+            end
+            LockedPawn = nil
+            SavedPawnSpeeds = nil
         end
     end)
     local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
