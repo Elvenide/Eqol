@@ -1819,7 +1819,7 @@ RefreshStationMapCanvas = function()
             or cn:find("splitter", 1, true) or cn:find("balancer", 1, true)
             or cn:find("merger", 1, true) or cn:find("underground", 1, true)
         if not isTransportOnly and Core.IsValidObj(rm.machine) then
-            local ports = StationData.GetMachineItemPorts(rm.machine, rm.x, rm.y, rm.yaw, rm.cellsX, rm.cellsY)
+            local ports = StationData.GetMachineItemPorts(rm.machine, rm.x, rm.y, rm.yaw, rm.cellsX, rm.cellsY, CurrentFrameXform)
             for _, p in ipairs(ports) do
                 local connected = false
                 for _, tn in ipairs(transportNodes) do

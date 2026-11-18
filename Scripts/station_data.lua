@@ -383,6 +383,33 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
             end
         end
 
+        -- Collect station module/block subobjects from station.Subobjects (BPO_Station_02A_C, BPO_LargeConnector_C, etc.)
+        pcall(function()
+            if station.Subobjects then
+                local machCls = GetClassCached("MachineObject", "/Script/MainSequence.MachineObject")
+                local invCls = GetClassCached("Inventory", "/Script/MainSequence.Inventory")
+                local pgCls = GetClassCached("PowerGrid", "/Script/MainSequence.PowerGrid")
+                StationData.ForEachArray(station.Subobjects, function(_, elem)
+                    local so = Core.UnwrapArrayElem(elem)
+                    if Core.IsValidObj(so) then
+                        local skip = false
+                        if Core.IsValidObj(machCls) and so:IsA(machCls) then skip = true end
+                        if not skip and Core.IsValidObj(invCls) and so:IsA(invCls) then skip = true end
+                        if not skip and Core.IsValidObj(pgCls) and so:IsA(pgCls) then skip = true end
+                        if not skip then
+                            local cn = so:GetClass():GetFName():ToString()
+                            if cn == "CharacterCollisionEnvironment" or cn == "Inventory" or cn == "PowerGrid" then
+                                skip = true
+                            end
+                        end
+                        if not skip then
+                            addPlat(so)
+                        end
+                    end
+                end)
+            end
+        end)
+
         -- Also inspect ChildActorComponents on the station actor (modules spawned as child actors)
         local stActor = StationData.GetObjectActor(station)
         if Core.IsValidObj(stActor) then
@@ -527,6 +554,7 @@ end
 function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
     local cx, cy, cz = nil, nil, nil
     local yaw = 0
+    local fwdX, fwdY, fwdZ = nil, nil, nil
     local ex, ey, ez = nil, nil, nil
     local hasActor = false
 
@@ -552,6 +580,7 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
             hasActor = true
             local okFwd, fwd = pcall(function() return actor:GetActorForwardVector() end)
             if okFwd and fwd and type(fwd.X) == "number" and type(fwd.Y) == "number" then
+                fwdX, fwdY, fwdZ = fwd.X, fwd.Y, fwd.Z or 0.0
                 yaw = math.deg(math.atan(fwd.Y, fwd.X))
             else
                 local okRot, rot = pcall(function() return actor:K2_GetActorRotation() end)
@@ -572,34 +601,55 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
                     if lx > maxLx then maxLx = lx end
                     if ly > maxLy then maxLy = ly end
                 end
-                if maxLx > 200.0 then ex = maxLx end
-                if maxLy > 200.0 then ey = maxLy end
+                if maxLx > 150.0 then ex = maxLx end
+                if maxLy > 150.0 then ey = maxLy end
             end
 
-            -- Also measure StaticMeshComponents on platform actor if connectors didn't give extents
+            -- Measure full local bounds across StaticMeshComponents on module/platform actor
             if not ex or not ey then
                 pcall(function()
                     local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
                     if Core.IsValidObj(smCls) and actor.K2_GetComponentsByClass then
                         local compsRaw = actor:K2_GetComponentsByClass(smCls)
-                        local maxEx, maxEy = 0.0, 0.0
+                        local minLx, maxLx = math.huge, -math.huge
+                        local minLy, maxLy = math.huge, -math.huge
+                        local maxEz = 0.0
+                        local anyMesh = false
                         StationData.ForEachArray(compsRaw, function(_, elem)
                             local c = Core.UnwrapArrayElem(elem)
                             if Core.IsValidObj(c) and c.StaticMesh and c.StaticMesh.ExtendedBounds then
                                 local eb = c.StaticMesh.ExtendedBounds
-                                if eb.BoxExtent then
+                                if eb.BoxExtent and eb.Origin then
                                     local rs = c.RelativeScale3D
-                                    local sx = rs and (tonumber(rs.X) or 1.0) or 1.0
-                                    local sy = rs and (tonumber(rs.Y) or 1.0) or 1.0
+                                    local rl = c.RelativeLocation
+                                    local sx = math.abs(rs and (tonumber(rs.X) or 1.0) or 1.0)
+                                    local sy = math.abs(rs and (tonumber(rs.Y) or 1.0) or 1.0)
+                                    local sz = math.abs(rs and (tonumber(rs.Z) or 1.0) or 1.0)
+                                    local rx = rl and (tonumber(rl.X) or 0.0) or 0.0
+                                    local ry = rl and (tonumber(rl.Y) or 0.0) or 0.0
+                                    local ox = (tonumber(eb.Origin.X) or 0.0) * sx + rx
+                                    local oy = (tonumber(eb.Origin.Y) or 0.0) * sy + ry
                                     local bx = math.abs((tonumber(eb.BoxExtent.X) or 0.0) * sx)
                                     local by = math.abs((tonumber(eb.BoxExtent.Y) or 0.0) * sy)
-                                    if bx > maxEx then maxEx = bx end
-                                    if by > maxEy then maxEy = by end
+                                    local bz = math.abs((tonumber(eb.BoxExtent.Z) or 0.0) * sz)
+                                    if bx >= 50.0 and by >= 50.0 then
+                                        anyMesh = true
+                                        if ox - bx < minLx then minLx = ox - bx end
+                                        if ox + bx > maxLx then maxLx = ox + bx end
+                                        if oy - by < minLy then minLy = oy - by end
+                                        if oy + by > maxLy then maxLy = oy + by end
+                                        if bz > maxEz then maxEz = bz end
+                                    end
                                 end
                             end
                         end)
-                        if maxEx >= 400.0 then ex = math.floor(maxEx / 50.0 + 0.5) * 50.0 end
-                        if maxEy >= 400.0 then ey = math.floor(maxEy / 50.0 + 0.5) * 50.0 end
+                        if anyMesh then
+                            local halfW = math.max(100.0, (maxLx - minLx) * 0.5)
+                            local halfH = math.max(100.0, (maxLy - minLy) * 0.5)
+                            ex = math.floor(halfW / 50.0 + 0.5) * 50.0
+                            ey = math.floor(halfH / 50.0 + 0.5) * 50.0
+                            if maxEz > 50.0 then ez = maxEz end
+                        end
                     end
                 end)
             end
@@ -628,33 +678,39 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
         if not ez and boundsInfo.ez > 50.0 then ez = boundsInfo.ez end
     end
 
-    -- Check platform.Location (fixed-point vector, potentially relative to station)
+    -- Check platform.Location (fixed-point vector or 100cm grid cell vector for subobject blocks)
     if not cx and Core.IsValidObj(platform) then
         local okL, loc = pcall(function() return platform.Location end)
         if okL and loc then
             local x, y, z = Core.GetFPVector(loc)
-            if Core.IsValidObj(station) and station:GetAddress() ~= platform:GetAddress() then
-                local stActor = StationData.GetObjectActor(station)
-                if Core.IsValidObj(stActor) then
-                    local okSL, sl = pcall(function() return stActor:K2_GetActorLocation() end)
-                    if okSL and sl and type(sl.X) == "number" then
-                        -- Check whether platform.Location looks station-local vs world
-                        if math.abs(x - sl.X) > 200000.0 or math.abs(y - sl.Y) > 200000.0 then
-                            x = sl.X + x
-                            y = sl.Y + y
-                            z = (sl.Z or 0) + z
+            local xformSt = StationData.GetStationFrameTransform(station)
+            if math.abs(x) <= 500.0 and math.abs(y) <= 500.0 and math.abs(z) <= 500.0 and Core.IsValidObj(station) and station:GetAddress() ~= platform:GetAddress() then
+                -- Convert 100cm grid-cell FIntVector into world coordinates via station transform
+                local wx, wy, wz = StationData.StationLocalToWorld(xformSt, x * 100.0, y * 100.0, z * 100.0)
+                cx, cy, cz = wx, wy, wz
+            else
+                if Core.IsValidObj(station) and station:GetAddress() ~= platform:GetAddress() then
+                    local stActor = StationData.GetObjectActor(station)
+                    if Core.IsValidObj(stActor) then
+                        local okSL, sl = pcall(function() return stActor:K2_GetActorLocation() end)
+                        if okSL and sl and type(sl.X) == "number" then
+                            if math.abs(x - sl.X) > 200000.0 or math.abs(y - sl.Y) > 200000.0 then
+                                x = sl.X + x
+                                y = sl.Y + y
+                                z = (sl.Z or 0) + z
+                            end
                         end
                     end
                 end
+                cx, cy, cz = x, y, z
             end
-            cx, cy, cz = x, y, z
         end
     end
 
-    -- Check platform.Dimensions / platform.Size (e.g. grid size or cm)
+    -- Check platform.Dimensions / MachineDimensions / Size (e.g. grid size or cm)
     if (not ex or not ey) and Core.IsValidObj(platform) then
         pcall(function()
-            for _, dimProp in ipairs({ "Dimensions", "Size", "PlatformDimensions", "GridSize" }) do
+            for _, dimProp in ipairs({ "Dimensions", "Size", "PlatformDimensions", "GridSize", "MachineDimensions" }) do
                 local d = platform[dimProp]
                 if d and d.X and d.Y then
                     local dx, dy = math.abs(tonumber(d.X) or 0), math.abs(tonumber(d.Y) or 0)
@@ -678,6 +734,9 @@ function StationData.GetPlatformWorldBounds(platform, station, platIndex1)
         ey = ey or 600.0,
         ez = ez or 300.0,
         yaw = yaw,
+        fwdX = fwdX,
+        fwdY = fwdY,
+        fwdZ = fwdZ,
         id = platId,
         hasActor = hasActor,
     }
@@ -1188,23 +1247,33 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     local platDiagParts = {}
     for idx1, p in ipairs(plats) do
         local b = StationData.GetPlatformWorldBounds(p, station, idx1)
-        local lcx, lcy, lcz = StationData.WorldToStationLocal(xform, b.cx, b.cy, b.cz, nil, nil, nil)
+        local lcx, lcy, lcz, lyaw = StationData.WorldToStationLocal(xform, b.cx, b.cy, b.cz, b.fwdX, b.fwdY, b.fwdZ)
+        local lex, ley = b.ex, b.ey
+        if b.fwdX and b.fwdY then
+            local normRot = (math.floor((lyaw or 0) / 90.0 + 0.5) % 4 + 4) % 4
+            if normRot == 1 or normRot == 3 then
+                lex, ley = b.ey, b.ex
+            end
+        end
         local localB = {
             cx = lcx, cy = lcy, cz = lcz,
-            ex = b.ex, ey = b.ey, ez = b.ez,
-            yaw = 0.0,
+            ex = lex, ey = ley, ez = b.ez,
+            yaw = lyaw or 0.0,
             id = b.id,
             hasActor = b.hasActor,
         }
         table.insert(entries, { platform = p, bounds = localB })
         local pClsName = Core.IsValidObj(p) and (pcall(function() return p:GetClass():GetFName():ToString() end) and p:GetClass():GetFName():ToString() or "?") or "nil"
-        table.insert(platDiagParts, string.format("%s(z=%.0f,ex=%.0f,ey=%.0f,ez=%.0f,act=%s)", pClsName, lcz, b.ex, b.ey, b.ez, tostring(b.hasActor)))
-        local smaller = math.min(b.ex, b.ey)
+        if #platDiagParts < 12 then
+            table.insert(platDiagParts, string.format("%s(c=(%.0f,%.0f,%.0f),e=(%.0f,%.0f,%.0f),y=%.0f,act=%s)",
+                pClsName, lcx, lcy, lcz, lex, ley, b.ez, lyaw or 0, tostring(b.hasActor)))
+        end
+        local smaller = math.min(lex, ley)
         if not minHalf or smaller < minHalf then minHalf = smaller end
         if #floors == 0 or (not hasElevators and b.hasActor) then
             local fl = ensureFloorForZ(lcz)
             if fl then table.insert(fl.platforms, { platform = p, bounds = localB }) end
-        elseif hasElevators and (b.hasActor or b.ex >= 200.0) then
+        elseif hasElevators and (b.hasActor or lex >= 150.0) then
             -- Assign this module to existing elevator-defined floor(s) without creating extra floors
             local spanLo = lcz - math.max(350.0, localB.ez - 150.0)
             local spanHi = lcz + math.max(350.0, localB.ez - 150.0)
@@ -2218,29 +2287,176 @@ function StationData.GetUndergroundBeltPairInfo(machine, xform)
     return info
 end
 
-function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY)
+function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY, xform)
     local ports = {}
     if not Core.IsValidObj(machine) then return ports end
+
+    local function tryExtractVec(elem)
+        local st = Core.UnwrapStruct(elem) or elem
+        if not st then return nil end
+        local vx, vy, vz = nil, nil, nil
+        pcall(function()
+            if st.X ~= nil and st.Y ~= nil then
+                vx, vy, vz = tonumber(st.X), tonumber(st.Y), tonumber(st.Z) or 0
+            elseif st.x ~= nil and st.y ~= nil then
+                vx, vy, vz = tonumber(st.x), tonumber(st.y), tonumber(st.z) or 0
+            elseif st.Location and st.Location.X ~= nil then
+                vx, vy, vz = tonumber(st.Location.X), tonumber(st.Location.Y), tonumber(st.Location.Z) or 0
+            elseif st.Position and st.Position.X ~= nil then
+                vx, vy, vz = tonumber(st.Position.X), tonumber(st.Position.Y), tonumber(st.Position.Z) or 0
+            elseif st.Offset and st.Offset.X ~= nil then
+                vx, vy, vz = tonumber(st.Offset.X), tonumber(st.Offset.Y), tonumber(st.Offset.Z) or 0
+            elseif st.Cell and st.Cell.X ~= nil then
+                vx, vy, vz = tonumber(st.Cell.X), tonumber(st.Cell.Y), tonumber(st.Cell.Z) or 0
+            end
+        end)
+        if vx and vy then return { x = vx, y = vy, z = vz or 0 } end
+        return nil
+    end
 
     local rawInputs, rawOutputs = {}, {}
     pcall(function()
         if machine.Inputs then
             StationData.ForEachArray(machine.Inputs, function(_, elem)
-                local st = Core.UnwrapStruct(elem) or elem
-                if st and st.X ~= nil and st.Y ~= nil then
-                    table.insert(rawInputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
-                end
+                local v = tryExtractVec(elem)
+                if v then table.insert(rawInputs, v) end
             end)
         end
         if machine.Outputs then
             StationData.ForEachArray(machine.Outputs, function(_, elem)
-                local st = Core.UnwrapStruct(elem) or elem
-                if st and st.X ~= nil and st.Y ~= nil then
-                    table.insert(rawOutputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
-                end
+                local v = tryExtractVec(elem)
+                if v then table.insert(rawOutputs, v) end
             end)
         end
     end)
+
+    -- Log element schema if Inputs/Outputs array is non-empty yet couldn't decode to XYZ
+    if #rawInputs == 0 and #rawOutputs == 0 then
+        local inLen = 0
+        pcall(function()
+            if machine.Inputs and machine.Inputs.GetArrayNum then inLen = tonumber(machine.Inputs:GetArrayNum()) or 0 end
+        end)
+        local outLen = 0
+        pcall(function()
+            if machine.Outputs and machine.Outputs.GetArrayNum then outLen = tonumber(machine.Outputs:GetArrayNum()) or 0 end
+        end)
+        if (inLen > 0 or outLen > 0) and not PortDiagLoggedByCls["elemSchema"] then
+            PortDiagLoggedByCls["elemSchema"] = true
+            local firstElem = nil
+            pcall(function()
+                if inLen > 0 then firstElem = machine.Inputs[1]
+                elseif outLen > 0 then firstElem = machine.Outputs[1] end
+            end)
+            local innerInfo = "?"
+            pcall(function()
+                local c = machine:GetClass()
+                local d = 0
+                while Core.IsValidObj(c) and d < 6 do
+                    d = d + 1
+                    if c.ForEachProperty then
+                        c:ForEachProperty(function(p)
+                            local pn = p:GetFName():ToString()
+                            if pn == "Inputs" or pn == "Outputs" then
+                                local inn = p.GetInner and p:GetInner() or nil
+                                local iCls = inn and inn:GetClass():GetFName():ToString() or "?"
+                                local sName = ""
+                                if inn and inn.GetStruct then
+                                    local stObj = inn:GetStruct()
+                                    if Core.IsValidObj(stObj) then
+                                        sName = stObj:GetFName():ToString() .. "(" .. InspectStructFieldNames(stObj, 10) .. ")"
+                                    end
+                                end
+                                innerInfo = string.format("%s inner=%s struct=%s", pn, iCls, sName)
+                            end
+                        end)
+                    end
+                    c = c.GetSuperStruct and c:GetSuperStruct() or nil
+                end
+            end)
+            Core.Log(string.format("[StationData] PortElemTypeDiag cls=%s in=%d out=%d type=%s str=%s schema=[%s]",
+                machine:GetClass():GetFName():ToString(), inLen, outLen,
+                type(firstElem), tostring(firstElem), innerInfo))
+        end
+    end
+
+    -- Fallback A: Read actual Port / BPC_MachinePortInteraction SceneComponents directly from the spawned machine actor
+    if #rawInputs == 0 and #rawOutputs == 0 and xform then
+        local actor = StationData.GetObjectActor(machine)
+        if Core.IsValidObj(actor) then
+            local cxCells = math.max(1, tonumber(cellsX) or 1)
+            local cyCells = math.max(1, tonumber(cellsY) or 1)
+            local halfCmX = cxCells * 50.0
+            local halfCmY = cyCells * 50.0
+            local rad = math.rad(myaw or 0.0)
+            local cosA, sinA = math.cos(rad), math.sin(rad)
+            local mergedActorPorts = {}
+
+            pcall(function()
+                local scCls = Core.FindOrLoadClass("/Script/Engine.SceneComponent")
+                if Core.IsValidObj(scCls) and actor.K2_GetComponentsByClass then
+                    local rawComps = actor:K2_GetComponentsByClass(scCls)
+                    StationData.ForEachArray(rawComps, function(_, elem)
+                        local cmp = Core.UnwrapArrayElem(elem)
+                        if Core.IsValidObj(cmp) and cmp.K2_GetComponentLocation then
+                            local cn = cmp:GetFName():ToString()
+                            if cn:match("^Port%d+$") or cn:find("MachinePort", 1, true) then
+                                local loc = cmp:K2_GetComponentLocation()
+                                if loc and type(loc.X) == "number" then
+                                    local lpx, lpy = StationData.WorldToStationLocal(xform, loc.X, loc.Y or 0, loc.Z or 0, nil, nil, nil)
+                                    -- Transform into unrotated machine-local space to snap to exact side & adjacent conveyor cell
+                                    local dx, dy = lpx - (mwx or 0), lpy - (mwy or 0)
+                                    local ux = dx * cosA + dy * sinA
+                                    local uy = -dx * sinA + dy * cosA
+                                    local nx, ny = 0.0, 0.0
+                                    if math.abs(ux) / math.max(1.0, halfCmX) >= math.abs(uy) / math.max(1.0, halfCmY) then
+                                        nx = (ux >= 0) and 1.0 or -1.0
+                                    else
+                                        ny = (uy >= 0) and 1.0 or -1.0
+                                    end
+                                    -- Snap tangential offset onto 100cm machine grid cell centers
+                                    local function snapTangent(val, spanCells)
+                                        if (spanCells % 2) == 1 then
+                                            return math.floor(val / 100.0 + 0.5) * 100.0
+                                        else
+                                            return (math.floor(val / 100.0) + 0.5) * 100.0
+                                        end
+                                    end
+                                    local tangX = snapTangent(ux, cxCells)
+                                    local tangY = snapTangent(uy, cyCells)
+                                    local portUx = (nx ~= 0) and (nx * math.max(12.0, halfCmX - 22.0)) or tangX
+                                    local portUy = (ny ~= 0) and (ny * math.max(12.0, halfCmY - 22.0)) or tangY
+                                    local adjUx = (nx ~= 0) and (nx * (halfCmX + 50.0)) or tangX
+                                    local adjUy = (ny ~= 0) and (ny * (halfCmY + 50.0)) or tangY
+
+                                    local wx = (mwx or 0) + portUx * cosA - portUy * sinA
+                                    local wy = (mwy or 0) + portUx * sinA + portUy * cosA
+                                    local ax = (mwx or 0) + adjUx * cosA - adjUy * sinA
+                                    local ay = (mwy or 0) + adjUx * sinA + adjUy * cosA
+
+                                    local dedupKey = string.format("%.0f,%.0f", wx / 20.0, wy / 20.0)
+                                    if not mergedActorPorts[dedupKey] then
+                                        mergedActorPorts[dedupKey] = {
+                                            px = wx, py = wy,
+                                            adjX = ax, adjY = ay,
+                                            isInput = true,
+                                            isOutput = true,
+                                        }
+                                    end
+                                end
+                            end
+                        end
+                    end)
+                end
+            end)
+
+            for _, mp in pairs(mergedActorPorts) do
+                table.insert(ports, mp)
+            end
+            if #ports > 0 then
+                return ports
+            end
+        end
+    end
 
     if #rawInputs == 0 and #rawOutputs == 0 then
         -- Fallback 1: check alternate property names on machine
