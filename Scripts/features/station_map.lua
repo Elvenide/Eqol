@@ -27,6 +27,8 @@ local PATHS = {
     BorderClass       = "/Script/UMG.Border",
     SizeBoxClass      = "/Script/UMG.SizeBox",
     OverlayClass      = "/Script/UMG.Overlay",
+    ScrollBoxClass    = "/Script/UMG.ScrollBox",
+    SpacerClass       = "/Script/UMG.Spacer",
     VerticalBoxClass  = "/Script/UMG.VerticalBox",
     HorizontalBoxClass= "/Script/UMG.HorizontalBox",
     WidgetLayoutLibCDO= "/Script/UMG.Default__WidgetLayoutLibrary",
@@ -81,6 +83,7 @@ local MapUI = nil
 
 local CurrentStation = nil
 local CurrentWalkFrame = nil
+local CurrentFrameXform = nil
 local CurrentFloors = {}
 local SelectedFloorIdx = 1
 local FloorPageTopIdx = nil -- highest floor index currently shown in the 5-slot floor bar
@@ -533,10 +536,19 @@ local function EnsureCaptureStudio(pc)
         end
     end
 
-    -- Tinted dark-slate floor backdrop matching COLORS.ModuleFill if BasicShapeMaterial is available
+    -- Tinted dark-slate floor backdrop matching COLORS.ModuleFill if a flat/unlit Material is available
     local backdropComp = nil
     local planeMesh = Core.FindOrLoadClass(PATHS.PlaneMeshPath)
-    local baseMat = Core.FindOrLoadClass("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial")
+    local baseMat = nil
+    for _, mp in ipairs({
+        "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",
+        "/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial",
+        "/Engine/EngineMaterials/DefaultLitSpriteMaterial.DefaultLitSpriteMaterial",
+        "/Engine/EngineMaterials/DefaultDiffuse.DefaultDiffuse",
+    }) do
+        local m = Core.FindOrLoadClass(mp)
+        if Core.IsValidObj(m) then baseMat = m break end
+    end
     if Core.IsValidObj(planeMesh) and Core.IsValidObj(baseMat) then
         local okB, bc = pcall(function() return studioActor:AddComponentByClass(smCls, false, idXform, false) end)
         if okB and Core.IsValidObj(bc) then
@@ -546,6 +558,7 @@ local function EnsureCaptureStudio(pc)
                 if Core.IsValidObj(dmi) then
                     if dmi.SetVectorParameterValue then
                         dmi:SetVectorParameterValue(FName("Color"), COLORS.ModuleFill)
+                        dmi:SetVectorParameterValue(FName("BaseColor"), COLORS.ModuleFill)
                     end
                     bc:K2_SetRelativeLocation({ X = 0.0, Y = 0.0, Z = -25.0 }, false, {}, false)
                     bc:SetRelativeScale3D({ X = 60.0, Y = 60.0, Z = 1.0 })
@@ -556,6 +569,23 @@ local function EnsureCaptureStudio(pc)
                 end
             end)
         end
+    elseif not CaptureDiagLogged then
+        local matList = {}
+        pcall(function()
+            local allMats = FindAllOf("Material")
+            if allMats then
+                for _, mat in ipairs(allMats) do
+                    if Core.IsValidObj(mat) and #matList < 12 then
+                        local fn = SafeFullPath(mat) or "?"
+                        if fn:find("Color", 1, true) or fn:find("Unlit", 1, true) or fn:find("Flat", 1, true) or fn:find("Basic", 1, true) or fn:find("UI", 1, true) then
+                            table.insert(matList, fn)
+                        end
+                    end
+                end
+            end
+        end)
+        Core.Log(string.format("[StationMap] Backdrop diag plane=%s baseMat=%s flatCandidates=[%s]",
+            tostring(Core.IsValidObj(planeMesh)), tostring(Core.IsValidObj(baseMat)), table.concat(matList, "; ")))
     end
 
     CaptureStudio.Actor = studioActor
@@ -1030,12 +1060,22 @@ local function CreateLabeledButton(parentWindow, pc, outer, labelStr, fontSz, wi
             tSlot:SetPadding({ Left = 6.0, Top = 2.0, Right = 6.0, Bottom = 2.0 })
         end
         -- Re-apply size/text/visibility AFTER parenting (WBP_Text_C Construct resets defaults on parent attach)
-        txt:SetVisibility(3) -- HitTestInvisible so clicks reach WBP_Button_C underneath
-        txt:SetSize(fontSz or 12)
-        txt:SetText(Core.MakeText(labelStr or ""))
-        if textCol and Core.IsValidObj(txt.TextBlock) and txt.TextBlock.SetColorAndOpacity then
-            txt.TextBlock:SetColorAndOpacity({ SpecifiedColor = textCol, ColorUseRule = 0 })
+        local function ApplyTextProps()
+            if not Core.IsValidObj(txt) then return end
+            pcall(function()
+                txt:SetVisibility(3) -- HitTestInvisible so clicks reach WBP_Button_C underneath
+                if Core.IsValidObj(txt.TextBlock) then
+                    txt.TextBlock:SetVisibility(3)
+                end
+                txt:SetSize(fontSz or 12)
+                txt:SetText(Core.MakeText(labelStr or ""))
+                if textCol and Core.IsValidObj(txt.TextBlock) and txt.TextBlock.SetColorAndOpacity then
+                    txt.TextBlock:SetColorAndOpacity({ SpecifiedColor = textCol, ColorUseRule = 0 })
+                end
+            end)
         end
+        ApplyTextProps()
+        ExecuteInGameThreadAfterFrames(1, ApplyTextProps)
     end)
 
     Core.RegisterWBPButtonClick(btn, onClick)
@@ -1196,6 +1236,9 @@ end
 local function MeasureMapCanvasSize()
     if not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then return false end
     local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+    local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
+    local pc = Core.GetLocalPlayerController()
+
     if Core.IsValidObj(slateLib) and slateLib.GetLocalSize then
         for _, wgt in ipairs({ MapUI.MapCanvas, MapUI.MapBg }) do
             if Core.IsValidObj(wgt) and wgt.GetCachedGeometry then
@@ -1211,18 +1254,27 @@ local function MeasureMapCanvasSize()
                 end
             end
         end
-        if Core.IsValidObj(MapUI.Window) and MapUI.Window.GetCachedGeometry then
-            local okW, wsz = pcall(function() return slateLib:GetLocalSize(MapUI.Window:GetCachedGeometry()) end)
-            if okW and wsz then
-                local ww, wh = tonumber(wsz.X), tonumber(wsz.Y)
-                if IsFiniteNum(ww) and IsFiniteNum(wh) and ww > 320.0 and wh > 240.0 then
-                    local w = ww - 168.0
-                    local h = wh - 74.0
-                    local changed = (math.abs(w - ViewTransform.canvasW) > 4.0 or math.abs(h - ViewTransform.canvasH) > 4.0)
-                    ViewTransform.canvasW = w
-                    ViewTransform.canvasH = h
-                    return changed
-                end
+    end
+
+    if Core.IsValidObj(layoutLib) and Core.IsValidObj(pc) and layoutLib.GetViewportSize then
+        local okV, rawVp = pcall(function() return layoutLib:GetViewportSize(pc) end)
+        local vpScale = 1.0
+        pcall(function()
+            if layoutLib.GetViewportScale then
+                local s = tonumber(layoutLib:GetViewportScale(pc))
+                if IsFiniteNum(s) and s > 0.05 then vpScale = s end
+            end
+        end)
+        if okV and rawVp and IsFiniteNum(tonumber(rawVp.X)) and IsFiniteNum(tonumber(rawVp.Y)) and rawVp.X > 100 then
+            local umgW = rawVp.X / vpScale
+            local umgH = rawVp.Y / vpScale
+            local w = umgW * 0.88 - 170.0
+            local h = umgH * 0.90 - 76.0
+            if w > 120.0 and h > 120.0 then
+                local changed = (math.abs(w - ViewTransform.canvasW) > 4.0 or math.abs(h - ViewTransform.canvasH) > 4.0)
+                ViewTransform.canvasW = w
+                ViewTransform.canvasH = h
+                return changed
             end
         end
     end
@@ -1374,6 +1426,7 @@ RefreshStationMapCanvas = function()
     end
 
     ClearCanvasChildren(MapUI.MapCanvas)
+    ClearCanvasChildren(MapUI.IconCanvas)
     RenderedMachines = {}
     RenderedConveyors = {}
     FloorIconButtons = {}
@@ -1413,7 +1466,7 @@ RefreshStationMapCanvas = function()
             local isMajor = (math.abs(((gx - ViewTransform.gridOriginX) / CELL_CM) % 4) < 0.01)
             pcall(function() line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine) end)
             local s = MapUI.MapCanvas:AddChildToCanvas(line)
-            SetCanvasSlot(s, mx, ch * 0.5, 1.0, ch, 0.5, 0.5, 1)
+            SetCanvasSlot(s, mx, ch * 0.5, 1.5, ch, 0.5, 0.5, 1)
         end
         gx = gx + stepCm
     end
@@ -1429,7 +1482,7 @@ RefreshStationMapCanvas = function()
             local isMajor = (math.abs(((gy - ViewTransform.gridOriginY) / CELL_CM) % 4) < 0.01)
             pcall(function() line:SetBrushColor(isMajor and COLORS.GridMajor or COLORS.GridLine) end)
             local s = MapUI.MapCanvas:AddChildToCanvas(line)
-            SetCanvasSlot(s, cw * 0.5, my, cw, 1.0, 0.5, 0.5, 1)
+            SetCanvasSlot(s, cw * 0.5, my, cw, 1.5, 0.5, 0.5, 1)
         end
         gy = gy + stepCm
     end
@@ -1552,8 +1605,9 @@ RefreshStationMapCanvas = function()
                             iconWidget:SetItem(item)
                             iconWidget:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
                         end)
-                        local iSlot = MapUI.MapCanvas:AddChildToCanvas(ov)
-                        SetCanvasSlot(iSlot, mx, my, iconSize + 6.0, iconSize + 6.0, 0.5, 0.5, 30)
+                        local iconTarget = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
+                        local iSlot = iconTarget:AddChildToCanvas(ov)
+                        SetCanvasSlot(iSlot, mx, my, iconSize + 6.0, iconSize + 6.0, 0.5, 0.5, 40)
 
                         FloorIconButtons[mAddr] = { btn = iconBtn, widget = iconWidget }
                         local capturedM = m
@@ -1585,26 +1639,30 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 5. Render player markers & nametags on this floor
+    -- 5. Render player markers & nametags on this floor (converted into station-local space)
     local allPlayers = StationData.GetAllPlayersInfo(pc)
     for _, p in ipairs(allPlayers) do
-        if p.HasPos and math.abs(p.Z - floor.z) <= 250.0 then
-            local pmx, pmy = WorldToCanvas(p.X, p.Y)
-            local pDot = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(pDot) then
-                local col = p.IsLocal and COLORS.PlayerLocal or (p.IsOnline and COLORS.PlayerOnline or COLORS.PlayerOffline)
-                pcall(function() pDot:SetBrushColor(col) end)
-                local pSlot = MapUI.MapCanvas:AddChildToCanvas(pDot)
-                SetCanvasSlot(pSlot, pmx, pmy, 10.0, 10.0, 0.5, 0.5, 45)
-            end
-            local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
-            if Core.IsValidObj(nameTxt) then
-                pcall(function()
-                    nameTxt:SetSize(10)
-                    nameTxt:SetText(Core.MakeText(p.Name))
-                end)
-                local nSlot = MapUI.MapCanvas:AddChildToCanvas(nameTxt)
-                SetCanvasSlot(nSlot, pmx, pmy - 14.0, 120.0, 18.0, 0.5, 1.0, 46)
+        if p.HasPos then
+            local plx, ply, plz = StationData.WorldToStationLocal(CurrentFrameXform, p.X, p.Y, p.Z, nil, nil, nil)
+            if math.abs(plz - floor.z) <= 220.0 then
+                local pmx, pmy = WorldToCanvas(plx, ply)
+                local pDot = Core.CreateRawWidget(PATHS.BorderClass, outer)
+                if Core.IsValidObj(pDot) then
+                    local col = p.IsLocal and COLORS.PlayerLocal or (p.IsOnline and COLORS.PlayerOnline or COLORS.PlayerOffline)
+                    pcall(function() pDot:SetBrushColor(col) end)
+                    local pSlot = MapUI.MapCanvas:AddChildToCanvas(pDot)
+                    SetCanvasSlot(pSlot, pmx, pmy, 10.0, 10.0, 0.5, 0.5, 45)
+                end
+                local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+                if Core.IsValidObj(nameTxt) then
+                    local nSlot = MapUI.MapCanvas:AddChildToCanvas(nameTxt)
+                    SetCanvasSlot(nSlot, pmx, pmy - 14.0, 120.0, 18.0, 0.5, 1.0, 46)
+                    pcall(function()
+                        nameTxt:SetVisibility(3)
+                        nameTxt:SetSize(10)
+                        nameTxt:SetText(Core.MakeText(p.Name))
+                    end)
+                end
             end
         end
     end
@@ -1756,7 +1814,8 @@ local function CommitPendingGhosts()
     for _, g in ipairs(PendingGhosts) do
         local targetFloor = CurrentFloors[g.floorIdx] or CurrentFloors[SelectedFloorIdx]
         local plat, pb = FindPlatformAtWorldXY(g.x, g.y, targetFloor)
-        local ok, err = IssueRemoteBuildMachine(pc, CurrentStation, plat, pb, g.buildable, g.x, g.y, g.z, g.yaw, g.recipe)
+        local wx, wy, wz = StationData.StationLocalToWorld(CurrentFrameXform, g.x, g.y, g.z)
+        local ok, err = IssueRemoteBuildMachine(pc, CurrentStation, plat, pb, g.buildable, wx, wy, wz, g.yaw, g.recipe)
         if ok then
             builtCount = builtCount + 1
         else
@@ -1955,24 +2014,42 @@ local function GetMapCanvasCursorPos(pc)
             vpPos = vp
             local vx, vy = tonumber(vp.X), tonumber(vp.Y)
             if IsFiniteNum(vx) and IsFiniteNum(vy) then
-                local okWG, wGeom = pcall(function() return MapUI.Window:GetCachedGeometry() end)
-                if okWG and wGeom and slateLib.GetLocalSize then
-                    local okWS, wSz = pcall(function() return slateLib:GetLocalSize(wGeom) end)
-                    if okWS and wSz and IsFiniteNum(tonumber(wSz.X)) and IsFiniteNum(tonumber(wSz.Y)) and wSz.X > 100 and wSz.Y > 100 then
-                        local fullW = wSz.X / 0.88
-                        local fullH = wSz.Y / 0.90
-                        local winLeft = fullW * 0.06
-                        local winTop = fullH * 0.05
-                        -- Offset inside WBP_WindowBase_C content + top toolbar
-                        lx = vx - (winLeft + 10.0)
-                        ly = vy - (winTop + 64.0)
+                local fullW, fullH = nil, nil
+                if layoutLib.GetViewportSize then
+                    local okVS, rawVp = pcall(function() return layoutLib:GetViewportSize(pc) end)
+                    local vpScale = 1.0
+                    pcall(function()
+                        if layoutLib.GetViewportScale then
+                            local s = tonumber(layoutLib:GetViewportScale(pc))
+                            if IsFiniteNum(s) and s > 0.05 then vpScale = s end
+                        end
+                    end)
+                    if okVS and rawVp and IsFiniteNum(tonumber(rawVp.X)) and IsFiniteNum(tonumber(rawVp.Y)) and rawVp.X > 100 then
+                        fullW = rawVp.X / vpScale
+                        fullH = rawVp.Y / vpScale
                     end
+                end
+                if (not fullW or not fullH) and slateLib.GetLocalSize then
+                    local okWG, wGeom = pcall(function() return MapUI.Window:GetCachedGeometry() end)
+                    if okWG and wGeom then
+                        local okWS, wSz = pcall(function() return slateLib:GetLocalSize(wGeom) end)
+                        if okWS and wSz and IsFiniteNum(tonumber(wSz.X)) and IsFiniteNum(tonumber(wSz.Y)) and wSz.X > 100 and wSz.Y > 100 then
+                            fullW = wSz.X / 0.88
+                            fullH = wSz.Y / 0.90
+                        end
+                    end
+                end
+                if fullW and fullH then
+                    local winLeft = fullW * 0.06
+                    local winTop = fullH * 0.05
+                    lx = vx - (winLeft + 10.0)
+                    ly = vy - (winTop + 66.0)
                 end
             end
         end
     end
 
-    if not CursorDiagLogged and (lx ~= nil or vpPos ~= nil) then
+    if not CursorDiagLogged and (lx ~= nil) then
         CursorDiagLogged = true
         local ax = absPos and tonumber(absPos.X) or -999
         local ay = absPos and tonumber(absPos.Y) or -999
@@ -2198,10 +2275,19 @@ local function EnsureInputPoll()
             MouseState.rPanning = false
         end
 
-        -- Mouse Wheel & +/- Keyboard Zoom (polled every engine frame via ExecuteInGameThreadAfterFrames(1))
+        -- Mouse Wheel (via ScrollBox offset delta + key/axis fallback) & +/- Keyboard Zoom
         if not WaitingForBuildMenuSelection then
             local scrollDelta = keyZoom
-            if scrollDelta == 0 and insideMap then
+            if scrollDelta == 0 and MapUI and Core.IsValidObj(MapUI.WheelScrollBox) and MapUI.WheelScrollBox.GetScrollOffset then
+                pcall(function()
+                    local off = tonumber(MapUI.WheelScrollBox:GetScrollOffset())
+                    if IsFiniteNum(off) and math.abs(off - 2000.0) > 0.25 then
+                        scrollDelta = (off < 2000.0) and 1 or -1
+                        MapUI.WheelScrollBox:SetScrollOffset(2000.0)
+                    end
+                end)
+            end
+            if scrollDelta == 0 then
                 pcall(function()
                     if pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") }) then scrollDelta = 1
                     elseif pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollDown") }) then scrollDelta = -1
@@ -2236,7 +2322,18 @@ end
 
 local function SetStationMapCursorMode(pc, win, active)
     if not Core.IsValidObj(pc) then return end
-    pcall(function() pc.bShowMouseCursor = active end)
+    pcall(function()
+        pc.bShowMouseCursor = active
+        if active then
+            if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(true) end
+            if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(true) end
+        else
+            if pc.ResetIgnoreMoveInput then pc:ResetIgnoreMoveInput() end
+            if pc.ResetIgnoreLookInput then pc:ResetIgnoreLookInput() end
+            if pc.SetIgnoreMoveInput then pc:SetIgnoreMoveInput(false) end
+            if pc.SetIgnoreLookInput then pc:SetIgnoreLookInput(false) end
+        end
+    end)
     local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
     if Core.IsValidObj(widgetSub) then
         pcall(function() widgetSub:SetCursorVisible(active) end)
@@ -2337,6 +2434,9 @@ local function OpenStationMap()
     local mapBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local mapOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
     local mapCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local wheelScrollBox = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
+    local wheelSpacer = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+    local iconCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local overlayCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local rightVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local statusText = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
@@ -2355,10 +2455,37 @@ local function OpenStationMap()
         mapBg:SetBrushColor(COLORS.WindowBg)
         mapCanvas:SetClipping(1)
         overlayCanvas:SetClipping(1)
+        overlayCanvas:SetVisibility(4) -- SelfHitTestInvisible
         local mcSlot = mapOverlay:AddChildToOverlay(mapCanvas)
         if Core.IsValidObj(mcSlot) then
             mcSlot:SetHorizontalAlignment(0) -- Fill
             mcSlot:SetVerticalAlignment(0)   -- Fill
+        end
+        if Core.IsValidObj(wheelScrollBox) and Core.IsValidObj(wheelSpacer) then
+            wheelSpacer:SetHeightOverride(5000.0)
+            wheelSpacer:SetVisibility(4)
+            wheelScrollBox:AddChild(wheelSpacer)
+            pcall(function()
+                wheelScrollBox:SetScrollBarVisibility(1) -- Collapsed
+                wheelScrollBox.bAllowRightClickDragScrolling = false
+                wheelScrollBox.bAnimateWheelScrolling = false
+                wheelScrollBox.ConsumeMouseWheel = 1 -- Always
+                wheelScrollBox:SetScrollOffset(2000.0)
+            end)
+            local wsSlot = mapOverlay:AddChildToOverlay(wheelScrollBox)
+            if Core.IsValidObj(wsSlot) then
+                wsSlot:SetHorizontalAlignment(0)
+                wsSlot:SetVerticalAlignment(0)
+            end
+        end
+        if Core.IsValidObj(iconCanvas) then
+            iconCanvas:SetClipping(1)
+            iconCanvas:SetVisibility(4) -- SelfHitTestInvisible; child icon buttons remain clickable!
+            local icSlot = mapOverlay:AddChildToOverlay(iconCanvas)
+            if Core.IsValidObj(icSlot) then
+                icSlot:SetHorizontalAlignment(0)
+                icSlot:SetVerticalAlignment(0)
+            end
         end
         local ovSlot = mapOverlay:AddChildToOverlay(overlayCanvas)
         if Core.IsValidObj(ovSlot) then
@@ -2553,6 +2680,8 @@ local function OpenStationMap()
         PC = pc,
         MapBg = mapBg,
         MapCanvas = mapCanvas,
+        WheelScrollBox = wheelScrollBox,
+        IconCanvas = iconCanvas,
         OverlayCanvas = overlayCanvas,
         FloorSlotsBox = floorSlotsBox,
         FloorUpBtn = floorUpWrap,
@@ -2566,15 +2695,20 @@ local function OpenStationMap()
         StatusText = statusText,
     }
 
-    local pz = 0.0
+    local px, py, pz = 0.0, 0.0, 0.0
     if Core.IsValidObj(pc.Pawn) then
         local okLoc, loc = pcall(function() return pc.Pawn:K2_GetActorLocation() end)
-        if okLoc and loc then pz = loc.Z or 0.0 end
+        if okLoc and loc then
+            px = loc.X or 0.0
+            py = loc.Y or 0.0
+            pz = loc.Z or 0.0
+        end
     end
 
     CurrentStation = station
     CurrentWalkFrame = walkFrame
-    local floors, curIdx, _, gox, goy = StationData.BuildStationFloorMap(station, walkFrame, pz)
+    local floors, curIdx, _, gox, goy, xform = StationData.BuildStationFloorMap(station, walkFrame, px, py, pz)
+    CurrentFrameXform = xform
     CurrentFloors = floors
     SelectedFloorIdx = curIdx
     FloorPageTopIdx = nil

@@ -629,6 +629,76 @@ function StationData.GetPlatformConnectors(platform)
     return connectors
 end
 
+function StationData.GetStationFrameTransform(station)
+    local act = Core.IsValidObj(station) and StationData.GetObjectActor(station) or nil
+    if not Core.IsValidObj(act) and Core.IsValidObj(station) then
+        pcall(function() if station.K2_GetActorLocation then act = station end end)
+    end
+    if not Core.IsValidObj(act) then
+        return {
+            ox = 0.0, oy = 0.0, oz = 0.0,
+            fx = 1.0, fy = 0.0, fz = 0.0,
+            rx = 0.0, ry = 1.0, rz = 0.0,
+            ux = 0.0, uy = 0.0, uz = 1.0,
+            hasActor = false,
+            actor = nil,
+        }
+    end
+    local ox, oy, oz = 0.0, 0.0, 0.0
+    local fx, fy, fz = 1.0, 0.0, 0.0
+    local rx, ry, rz = 0.0, 1.0, 0.0
+    local ux, uy, uz = 0.0, 0.0, 1.0
+    pcall(function()
+        local loc = act:K2_GetActorLocation()
+        if loc and type(loc.X) == "number" then ox, oy, oz = loc.X, loc.Y or 0.0, loc.Z or 0.0 end
+        local fw = act:GetActorForwardVector()
+        if fw and type(fw.X) == "number" then fx, fy, fz = fw.X, fw.Y or 0.0, fw.Z or 0.0 end
+        local rt = act:GetActorRightVector()
+        if rt and type(rt.X) == "number" then rx, ry, rz = rt.X, rt.Y or 1.0, rt.Z or 0.0 end
+        local up = act:GetActorUpVector()
+        if up and type(up.X) == "number" then ux, uy, uz = up.X, up.Y or 0.0, up.Z or 1.0 end
+    end)
+    return {
+        ox = ox, oy = oy, oz = oz,
+        fx = fx, fy = fy, fz = fz,
+        rx = rx, ry = ry, rz = rz,
+        ux = ux, uy = uy, uz = uz,
+        hasActor = true,
+        actor = act,
+    }
+end
+
+function StationData.WorldToStationLocal(xform, wx, wy, wz, fwdX, fwdY, fwdZ)
+    if not xform or not xform.hasActor then
+        local yaw = (fwdX and fwdY) and math.deg(math.atan(fwdY, fwdX)) or 0.0
+        return wx or 0.0, wy or 0.0, wz or 0.0, yaw
+    end
+    local dx = (wx or 0.0) - xform.ox
+    local dy = (wy or 0.0) - xform.oy
+    local dz = (wz or 0.0) - xform.oz
+    local lx = dx * xform.fx + dy * xform.fy + dz * xform.fz
+    local ly = dx * xform.rx + dy * xform.ry + dz * xform.rz
+    local lz = dx * xform.ux + dy * xform.uy + dz * xform.uz
+    local yaw = 0.0
+    if fwdX and fwdY then
+        local fz = fwdZ or 0.0
+        local lfx = fwdX * xform.fx + fwdY * xform.fy + fz * xform.fz
+        local lfy = fwdX * xform.rx + fwdY * xform.ry + fz * xform.rz
+        yaw = math.deg(math.atan(lfy, lfx))
+    end
+    return lx, ly, lz, yaw
+end
+
+function StationData.StationLocalToWorld(xform, lx, ly, lz)
+    if not xform or not xform.hasActor then
+        return lx or 0.0, ly or 0.0, lz or 0.0
+    end
+    local wx = xform.ox + lx * xform.fx + ly * xform.rx + lz * xform.ux
+    local wy = xform.oy + lx * xform.fy + ly * xform.ry + lz * xform.uy
+    local wz = xform.oz + lx * xform.fz + ly * xform.rz + lz * xform.uz
+    return wx, wy, wz
+end
+
 function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds)
     local actor = StationData.GetObjectActor(machine)
     if Core.IsValidObj(actor) then
@@ -651,228 +721,191 @@ function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds)
     return 0, 0, 0, 0
 end
 
--- Clusters station platforms into discrete floors sorted bottom-to-top (1..N).
--- Returns floors = { { index=1, z=..., platforms={ { platform=..., bounds=... }, ... }, machines={ ... } }, ... },
---         currentFloorIndex (matching walkFrame or playerZ),
---         unitSize (estimated 1x1 module width in Unreal cm),
---         gridOriginX, gridOriginY (100cm grid alignment from first module edge).
-local function CollectExtraStationZLevels(station, allMachines, stationRefZ)
-    local zPts = {}
-    local seen = {}
-    local function pushZ(z)
-        if type(z) ~= "number" then return end
-        if stationRefZ and math.abs(z) < 1.0 and math.abs(stationRefZ) > 500.0 then
-            return -- Ignore unspawned/default Z=0 machines when station itself is deep in space
+local function GetMachineLocalPosAndYaw(machine, xform)
+    local actor = StationData.GetObjectActor(machine)
+    if Core.IsValidObj(actor) then
+        local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
+        if okLoc and loc and type(loc.X) == "number" then
+            local fx, fy, fz = nil, nil, nil
+            local okF, fwd = pcall(function() return actor:GetActorForwardVector() end)
+            if okF and fwd and type(fwd.X) == "number" then
+                fx, fy, fz = fwd.X, fwd.Y or 0.0, fwd.Z or 0.0
+            end
+            return StationData.WorldToStationLocal(xform, loc.X, loc.Y or 0.0, loc.Z or 0.0, fx, fy, fz)
         end
-        for _, ez in ipairs(seen) do
-            if math.abs(z - ez) <= 220.0 then return end
-        end
-        table.insert(seen, z)
-        table.insert(zPts, z)
     end
 
-    -- 1. Elevators belonging ONLY to THIS station (via station.Elevators -> ElevatorStack)
-    if Core.IsValidObj(station) then
+    local okL, loc = pcall(function() return machine.Location end)
+    if okL and loc then
+        local x, y, z = Core.GetFPVector(loc)
+        -- If actor isn't spawned, check if machine.Location looks station-local vs world
+        if xform and xform.hasActor and (math.abs(x - xform.ox) > 200000.0 or math.abs(y - xform.oy) > 200000.0) then
+            return x, y, z, 0.0
+        end
+        return StationData.WorldToStationLocal(xform, x, y, z, nil, nil, nil)
+    end
+    return 0.0, 0.0, 0.0, 0.0
+end
+
+local function CollectElevatorStopLocalZs(station, allMachines, xform)
+    local stopLists = {}
+    local seenElev = {}
+    local elevCls = GetClassCached("ElevatorObject", "/Script/MainSequence.ElevatorObject")
+
+    local function inspectElev(el)
+        if not Core.IsValidObj(el) then return end
+        local addr = el:GetAddress()
+        if seenElev[addr] then return end
+        seenElev[addr] = true
         pcall(function()
-            local elevs = station.Elevators
-            if elevs then
-                StationData.ForEachArray(elevs, function(_, eElem)
-                    local el = Core.UnwrapArrayElem(eElem)
-                    if Core.IsValidObj(el) and el.ElevatorStack then
-                        StationData.ForEachArray(el.ElevatorStack, function(_, elem)
-                            local stopObj = Core.UnwrapArrayElem(elem)
-                            if Core.IsValidObj(stopObj) and stopObj.bIsElevatorStop == true then
-                                local _, _, sz = StationData.GetMachineWorldPosAndYaw(stopObj)
-                                pushZ(sz)
-                            end
-                        end)
-                    end
-                end)
+            local stack = el.ElevatorStack
+            if not stack then return end
+            local list = {}
+            StationData.ForEachArray(stack, function(_, elem)
+                local stopObj = Core.UnwrapArrayElem(elem)
+                if Core.IsValidObj(stopObj) and stopObj.bIsElevatorStop == true then
+                    local _, _, lz = GetMachineLocalPosAndYaw(stopObj, xform)
+                    table.insert(list, lz)
+                end
+            end)
+            if #list >= 2 then
+                table.insert(stopLists, list)
             end
         end)
     end
 
-    -- 2. Machine Z coordinates cover any floor that has machines on this station
-    for _, m in ipairs(allMachines) do
-        local _, _, mz = StationData.GetMachineWorldPosAndYaw(m)
-        pushZ(mz)
+    if Core.IsValidObj(station) then
+        pcall(function()
+            if station.Elevators then
+                StationData.ForEachArray(station.Elevators, function(_, elem)
+                    inspectElev(Core.UnwrapArrayElem(elem))
+                end)
+            end
+        end)
     end
-
-    return zPts
+    if allMachines and Core.IsValidObj(elevCls) then
+        for _, m in ipairs(allMachines) do
+            if Core.IsValidObj(m) and m:IsA(elevCls) then
+                inspectElev(m)
+            end
+        end
+    end
+    return stopLists
 end
 
-function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
+function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, playerZ)
+    local xform = StationData.GetStationFrameTransform(station)
     local plats = StationData.GetStationPlatforms(station, walkFrame)
     if #plats == 0 and Core.IsValidObj(walkFrame) then
         plats = { walkFrame }
     end
 
+    -- Collect all station machines first so we can orient Up axis via ElevatorStack stops
+    local allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
+
+    -- Check ElevatorStack order (stop 1 -> stop N) to ensure local +Z runs Floor 1 (bottom) -> Floor N (top)
+    local elevStopLists = CollectElevatorStopLocalZs(station, allMachines, xform)
+    local bestElevStops = nil
+    for _, sl in ipairs(elevStopLists) do
+        if not bestElevStops or #sl > #bestElevStops then bestElevStops = sl end
+    end
+    if bestElevStops and #bestElevStops >= 2 and bestElevStops[#bestElevStops] < bestElevStops[1] then
+        -- Station actor is upside-down (Roll ~ 180 deg): invert Up and Right axes so Floor 1..N ascends and XY isn't mirrored
+        xform.ux, xform.uy, xform.uz = -xform.ux, -xform.uy, -xform.uz
+        xform.rx, xform.ry, xform.rz = -xform.rx, -xform.ry, -xform.rz
+        for _, sl in ipairs(elevStopLists) do
+            for k = 1, #sl do sl[k] = -sl[k] end
+        end
+    end
+
+    local zTolerance = 190.0
+    local floors = {}
+    local function ensureFloorForZ(lz)
+        if type(lz) ~= "number" then return nil end
+        for _, fl in ipairs(floors) do
+            if math.abs(lz - fl.z) <= zTolerance then
+                return fl
+            end
+        end
+        local nf = {
+            index = #floors + 1,
+            z = lz,
+            platforms = {},
+            machines = {},
+        }
+        table.insert(floors, nf)
+        return nf
+    end
+
+    -- Seed floors from station elevator stops first (exact floor levels!)
+    if bestElevStops then
+        for _, sz in ipairs(bestElevStops) do
+            ensureFloorForZ(sz)
+        end
+    end
+
+    -- Ingest station platforms in station-local coordinates
     local entries = {}
-    local seenBoundSig = {}
     local minHalf = nil
     for idx1, p in ipairs(plats) do
         local b = StationData.GetPlatformWorldBounds(p, station, idx1)
-        table.insert(entries, { platform = p, bounds = b })
-        seenBoundSig[string.format("%.0f:%.0f:%.0f", b.cx, b.cy, b.cz)] = true
+        local lcx, lcy, lcz = StationData.WorldToStationLocal(xform, b.cx, b.cy, b.cz, nil, nil, nil)
+        local localB = {
+            cx = lcx, cy = lcy, cz = lcz,
+            ex = b.ex, ey = b.ey, ez = b.ez,
+            yaw = 0.0,
+            id = b.id,
+            hasActor = b.hasActor,
+        }
+        table.insert(entries, { platform = p, bounds = localB })
         local smaller = math.min(b.ex, b.ey)
-        if not minHalf or smaller < minHalf then
-            minHalf = smaller
+        if not minHalf or smaller < minHalf then minHalf = smaller end
+        if #floors == 0 or b.hasActor then
+            local fl = ensureFloorForZ(lcz)
+            if fl then table.insert(fl.platforms, { platform = p, bounds = localB }) end
         end
     end
 
-    -- Also ingest any station.PlatformBounds entries not already represented by a platform object
-    local pbCount = 0
-    if Core.IsValidObj(station) then
-        pcall(function()
-            local pbArr = station.PlatformBounds
-            if pbArr then
-                StationData.ForEachArray(pbArr, function(idx1, elem)
-                    pbCount = pbCount + 1
-                    local b = ReadBoundsStruct(elem)
-                    if b then
-                        local sig = string.format("%.0f:%.0f:%.0f", b.cx, b.cy, b.cz)
-                        if not seenBoundSig[sig] then
-                            seenBoundSig[sig] = true
-                            local matchPlat = plats[idx1] or plats[1] or station
-                            table.insert(entries, { platform = matchPlat, bounds = b })
-                            local smaller = math.min(b.ex, b.ey)
-                            if not minHalf or smaller < minHalf then minHalf = smaller end
-                        end
-                    end
-                end)
-            end
-        end)
-    end
-
-    local unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
-    local zTolerance = 250.0
-
-    table.sort(entries, function(a, b) return a.bounds.cz < b.bounds.cz end)
-
-    local floors = {}
-    for _, entry in ipairs(entries) do
-        local placed = false
-        for _, fl in ipairs(floors) do
-            if math.abs(entry.bounds.cz - fl.z) <= zTolerance then
-                table.insert(fl.platforms, entry)
-                fl.z = (fl.z * (#fl.platforms - 1) + entry.bounds.cz) / #fl.platforms
-                placed = true
-                break
-            end
-        end
-        if not placed then
-            table.insert(floors, {
-                index = #floors + 1,
-                z = entry.bounds.cz,
-                platforms = { entry },
-                machines = {},
-            })
+    -- Compute local positions of all machines & add any additional floors not covered by elevator stops
+    local localMachines = {}
+    for _, m in ipairs(allMachines) do
+        local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, xform)
+        local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
+        if not skipZero then
+            table.insert(localMachines, { machine = m, x = lx, y = ly, z = lz, yaw = lyaw })
+            ensureFloorForZ(lz)
         end
     end
 
-    -- Collect all station machines (owned by station / walkFrame / platforms)
-    local allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
-
-    -- Discover any missing Z floors from THIS station's Elevators & machine Z coordinates
-    local stRefZ = nil
-    local stAct = Core.IsValidObj(station) and StationData.GetObjectActor(station) or nil
-    if Core.IsValidObj(stAct) then
-        pcall(function()
-            local l = stAct:K2_GetActorLocation()
-            if l and type(l.Z) == "number" then stRefZ = l.Z end
-        end)
-    end
-    local extraZs = CollectExtraStationZLevels(station, allMachines, stRefZ)
-    -- If existing single fallback floor was only at default cz=0 with no real actor bounds, replace/augment cleanly
-    if #floors == 1 and not (entries[1] and entries[1].bounds and entries[1].bounds.hasActor) and #extraZs > 0 then
-        local onlyDefault = (math.abs(floors[1].z) < 1.0)
-        if onlyDefault then
-            local nearZero = false
-            for _, ez in ipairs(extraZs) do
-                if math.abs(ez - floors[1].z) <= zTolerance then nearZero = true break end
-            end
-            if not nearZero then
-                floors = {}
-            end
-        end
+    if #floors == 0 then
+        table.insert(floors, { index = 1, z = 0.0, platforms = entries, machines = {} })
     end
 
-    local fallbackPlat = entries[1] and entries[1].platform or walkFrame or station
-    local templateBoundsList = {}
-    for _, e in ipairs(entries) do
-        table.insert(templateBoundsList, e.bounds)
-    end
-    if #templateBoundsList == 0 then
-        table.insert(templateBoundsList, { cx = 0, cy = 0, cz = 0, ex = 600, ey = 600, ez = 300, yaw = 0 })
-    end
-
-    for _, ez in ipairs(extraZs) do
-        local foundFl = nil
-        for _, fl in ipairs(floors) do
-            if math.abs(ez - fl.z) <= zTolerance then
-                foundFl = fl
-                break
-            end
-        end
-        if not foundFl then
-            local synthPlats = {}
-            for _, tb in ipairs(templateBoundsList) do
-                table.insert(synthPlats, {
-                    platform = fallbackPlat,
-                    bounds = {
-                        cx = tb.cx, cy = tb.cy, cz = ez,
-                        ex = tb.ex, ey = tb.ey, ez = tb.ez or 300.0,
-                        yaw = tb.yaw or 0.0,
-                        synthetic = true,
-                    },
-                })
-            end
-            table.insert(floors, {
-                index = #floors + 1,
-                z = ez,
-                platforms = synthPlats,
-                machines = {},
-            })
-        end
-    end
-
-    -- Sort floors strictly bottom-to-top and re-index 1..N
+    -- Sort floors bottom-to-top (1 = bottom, N = top)
     table.sort(floors, function(a, b) return a.z < b.z end)
     for i, fl in ipairs(floors) do
         fl.index = i
     end
 
-    -- Bin machines onto their nearest floor by Z
-    local stationFallback = entries[1] and entries[1].bounds or nil
-    for _, m in ipairs(allMachines) do
-        local mx, my, mz, myaw = StationData.GetMachineWorldPosAndYaw(m, stationFallback)
-        local bestFl = nil
-        local bestDz = math.huge
+    -- Bin machines onto their nearest floor by local Z
+    for _, lm in ipairs(localMachines) do
+        local bestFl, bestDz = nil, math.huge
         for _, fl in ipairs(floors) do
-            local dz = math.abs(mz - fl.z)
+            local dz = math.abs(lm.z - fl.z)
             if dz < bestDz then
                 bestDz = dz
                 bestFl = fl
             end
         end
         if bestFl then
-            table.insert(bestFl.machines, {
-                machine = m,
-                x = mx,
-                y = my,
-                z = mz,
-                yaw = myaw,
-            })
+            table.insert(bestFl.machines, lm)
         end
     end
 
-    -- For synthetic floor outlines, expand/align to contain that floor's machines cleanly if needed
+    -- Ensure each floor has module outlines covering its deck bounds cleanly
+    local fallbackPlat = entries[1] and entries[1].platform or walkFrame or station
     for _, fl in ipairs(floors) do
-        local hasSynth = false
-        for _, pe in ipairs(fl.platforms) do
-            if pe.bounds.synthetic then hasSynth = true break end
-        end
-        if hasSynth and #fl.machines > 0 then
+        if #fl.platforms == 0 and #fl.machines > 0 then
             local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
             for _, me in ipairs(fl.machines) do
                 if me.x < minX then minX = me.x end
@@ -884,15 +917,19 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
             local cy = math.floor(((minY + maxY) * 0.5) / 100.0 + 0.5) * 100.0
             local ex = math.max(600.0, math.ceil(((maxX - minX) * 0.5 + 300.0) / 100.0) * 100.0)
             local ey = math.max(600.0, math.ceil(((maxY - minY) * 0.5 + 300.0) / 100.0) * 100.0)
-            for _, pe in ipairs(fl.platforms) do
-                if pe.bounds.synthetic then
-                    pe.bounds.cx, pe.bounds.cy, pe.bounds.ex, pe.bounds.ey = cx, cy, ex, ey
-                end
-            end
+            table.insert(fl.platforms, {
+                platform = fallbackPlat,
+                bounds = { cx = cx, cy = cy, cz = fl.z, ex = ex, ey = ey, ez = 200.0, yaw = 0.0, synthetic = true },
+            })
+        elseif #fl.platforms == 0 then
+            table.insert(fl.platforms, {
+                platform = fallbackPlat,
+                bounds = { cx = 0.0, cy = 0.0, cz = fl.z, ex = 600.0, ey = 600.0, ez = 200.0, yaw = 0.0, synthetic = true },
+            })
         end
     end
 
-    -- Compute 100cm grid alignment origin from first module's corner edge
+    local unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
     local gridOriginX, gridOriginY = 0.0, 0.0
     local firstB = floors[1] and floors[1].platforms[1] and floors[1].platforms[1].bounds
     if firstB then
@@ -900,88 +937,89 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerZ)
         gridOriginY = firstB.cy - firstB.ey
     end
 
-    -- Determine player's active floor (prefer playerZ if floors differ by Z)
+    -- Select current floor using station-local player Z
+    local playerLx, playerLy, playerLz = 0.0, 0.0, 0.0
+    if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" then
+        playerLx, playerLy, playerLz = StationData.WorldToStationLocal(xform, playerX, playerY, playerZ, nil, nil, nil)
+    end
     local currentFloorIndex = 1
-    if type(playerZ) == "number" and #floors > 0 then
+    if #floors > 0 then
         local bestDist = math.huge
         for _, fl in ipairs(floors) do
-            local d = math.abs(playerZ - fl.z)
+            local d = math.abs(playerLz - fl.z)
             if d < bestDist then
                 bestDist = d
                 currentFloorIndex = fl.index
             end
         end
-    elseif Core.IsValidObj(walkFrame) then
-        local walkAddr = walkFrame:GetAddress()
-        for _, fl in ipairs(floors) do
-            for _, pe in ipairs(fl.platforms) do
-                if Core.IsValidObj(pe.platform) and pe.platform:GetAddress() == walkAddr then
-                    currentFloorIndex = fl.index
-                    break
-                end
-            end
-        end
     end
 
-    -- One-shot runtime diagnostic per station so we can inspect exact BuildingBlocks/Elevators/Station structure
+    -- One-shot runtime diagnostic: dump local floors, elevator stops, and non-empty station/actor properties
     local diagKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or "none"
     if StationDiagLoggedKey ~= diagKey then
         StationDiagLoggedKey = diagKey
-        local wfCls = Core.IsValidObj(walkFrame) and (walkFrame:GetClass():GetFName():ToString()) or "nil"
-        local stCls = Core.IsValidObj(station) and (station:GetClass():GetFName():ToString()) or "nil"
-        local stLocStr = "noActor"
-        if Core.IsValidObj(stAct) then
-            pcall(function()
-                local l = stAct:K2_GetActorLocation()
-                local r = stAct:K2_GetActorRotation()
-                stLocStr = string.format("%s@(%.0f,%.0f,%.0f rot=%.1f,%.1f,%.1f)",
-                    stAct:GetClass():GetFName():ToString(), l.X or 0, l.Y or 0, l.Z or 0, r.Pitch or 0, r.Yaw or 0, r.Roll or 0)
-            end)
+        local elevStr = bestElevStops and (function()
+            local t = {}
+            for i, z in ipairs(bestElevStops) do t[i] = string.format("%.0f", z) end
+            return table.concat(t, ",")
+        end)() or "none"
+        local flParts = {}
+        for _, fl in ipairs(floors) do
+            local sample = fl.machines[1] and Core.IsValidObj(fl.machines[1].machine) and fl.machines[1].machine:GetClass():GetFName():ToString() or "-"
+            table.insert(flParts, string.format("#%d(lz=%.0f,m=%d,%s)", fl.index, fl.z, #fl.machines, sample))
         end
-        local function ArrCountAndFirst(obj, prop)
-            local n, first = 0, "nil"
+        Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevStops=[%s] floors(%d): %s",
+            playerLx, playerLy, playerLz, currentFloorIndex, elevStr, #floors, table.concat(flParts, ", ")))
+
+        -- Inspect any non-empty array properties on station and its actor to locate modular station blocks/rooms
+        local function LogNonEmptyArrays(tag, obj)
+            if not Core.IsValidObj(obj) then return end
+            local found = {}
             pcall(function()
-                local arr = obj[prop]
-                if arr then
-                    StationData.ForEachArray(arr, function(idx, el)
-                        n = n + 1
-                        if idx == 1 then
-                            local u = Core.UnwrapArrayElem(el)
-                            if Core.IsValidObj(u) then
-                                local c = u:GetClass():GetFName():ToString()
-                                local ux, uy, uz = StationData.GetMachineWorldPosAndYaw(u)
-                                first = string.format("%s@(%.0f,%.0f,%.0f)", c, ux, uy, uz)
-                            else
-                                first = "struct[" .. InspectStructFieldNames(el, 8) .. "]"
+                local cls = obj:GetClass()
+                if Core.IsValidObj(cls) and cls.ForEachProperty then
+                    cls:ForEachProperty(function(prop)
+                        local pn = nil
+                        pcall(function() pn = prop:GetFName():ToString() end)
+                        if pn then
+                            local okV, v = pcall(function() return obj[pn] end)
+                            if okV and v ~= nil then
+                                local okLen, len = pcall(function() return v.GetArrayNum and v:GetArrayNum() or #v end)
+                                if okLen and type(len) == "number" and len > 0 then
+                                    table.insert(found, string.format("%s=%d", pn, len))
+                                end
                             end
                         end
                     end)
                 end
             end)
-            return n, first
+            Core.Log(string.format("[StationData] Arrays(%s): %s", tag, table.concat(found, ", ")))
         end
-        local bbN, bb1 = ArrCountAndFirst(station, "BuildingBlocks")
-        local elN, el1 = ArrCountAndFirst(station, "Elevators")
-        local piN, pi1 = ArrCountAndFirst(station, "PlatformIDs")
-        local coN, co1 = ArrCountAndFirst(station, "ConstructionObjects")
-        local scN, sc1 = ArrCountAndFirst(station, "StationConnections")
-        local vcN, vc1 = ArrCountAndFirst(station, "VerticalConnections")
-        local mN, m1 = ArrCountAndFirst(station, "Machines")
-        local e1b = entries[1] and entries[1].bounds
-        local bStr = e1b and string.format("cx=%.0f,cy=%.0f,cz=%.0f,ex=%.0f,ey=%.0f,hasA=%s", e1b.cx, e1b.cy, e1b.cz, e1b.ex, e1b.ey, tostring(e1b.hasActor)) or "nil"
-        local flParts = {}
-        for _, fl in ipairs(floors) do
-            local sample = fl.machines[1] and Core.IsValidObj(fl.machines[1].machine) and fl.machines[1].machine:GetClass():GetFName():ToString() or "-"
-            table.insert(flParts, string.format("#%d(z=%.0f,m=%d,%s)", fl.index, fl.z, #fl.machines, sample))
+        LogNonEmptyArrays("station", station)
+        LogNonEmptyArrays("stActor", xform.actor)
+
+        if Core.IsValidObj(xform.actor) and xform.actor.K2_GetComponentsByClass then
+            local compCounts = {}
+            pcall(function()
+                local compCls = Core.FindOrLoadClass("/Script/Engine.SceneComponent")
+                if Core.IsValidObj(compCls) then
+                    local comps = xform.actor:K2_GetComponentsByClass(compCls)
+                    StationData.ForEachArray(comps, function(_, elem)
+                        local c = Core.UnwrapArrayElem(elem)
+                        if Core.IsValidObj(c) then
+                            local cn = c:GetClass():GetFName():ToString()
+                            compCounts[cn] = (compCounts[cn] or 0) + 1
+                        end
+                    end)
+                end
+            end)
+            local ccParts = {}
+            for k, v in pairs(compCounts) do table.insert(ccParts, k .. "=" .. v) end
+            Core.Log("[StationData] stActor SceneComponents: " .. table.concat(ccParts, ", "))
         end
-        Core.Log(string.format(
-            "[StationData] Diag wf=%s st=%s stActor=%s pz=%s curFl=%d e1=[%s] BB=%d(%s) Elev=%d(%s) PID=%d(%s) CO=%d(%s) SC=%d VC=%d Mach=%d(%s)",
-            wfCls, stCls, stLocStr, tostring(playerZ), currentFloorIndex, bStr, bbN, bb1, elN, el1, piN, pi1, coN, co1, scN, vcN, mN, m1
-        ))
-        Core.Log(string.format("[StationData] Floors(%d): %s", #floors, table.concat(flParts, ", ")))
     end
 
-    return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY
+    return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY, xform
 end
 
 --------------------------------------------------------------------------------
