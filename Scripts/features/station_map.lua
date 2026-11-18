@@ -1788,30 +1788,28 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 3b. Render unconnected machine item ports (semi-transparent black rounded square + thick black dashed border)
-    local transportNodes = {}
+    -- 3b. Render accessible & uncovered machine item ports right outside the machine at the external conveyor cell
+    local occupiedBoxes = {}
+    for _, rm in ipairs(RenderedMachines) do
+        table.insert(occupiedBoxes, { x = rm.x, y = rm.y, halfW = rm.halfW, halfH = rm.halfH })
+    end
     for _, me in ipairs(floorMachines) do
         local m = me.machine
         if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
-            local cat = StationData.GetMachineCategory(m)
             local cn = ""
             pcall(function() cn = m:GetClass():GetFName():ToString():lower() end)
-            if cat == "Conveyor" or cn:find("splitter", 1, true) or cn:find("balancer", 1, true)
-                or cn:find("merger", 1, true) or cn:find("underground", 1, true)
-            then
-                table.insert(transportNodes, { x = me.x, y = me.y })
-                if cn:find("underground", 1, true) then
-                    local ui2 = StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform)
-                    if ui2 and ui2.pairX and ui2.pairY then
-                        table.insert(transportNodes, { x = ui2.pairX, y = ui2.pairY })
-                    end
+            if cn:find("underground", 1, true) then
+                local ui2 = StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform)
+                if ui2 and ui2.pairX and ui2.pairY and not ui2.pairAddr then
+                    table.insert(occupiedBoxes, { x = ui2.pairX, y = ui2.pairY, halfW = 50.0, halfH = 50.0 })
                 end
             end
         end
     end
 
-    local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.44)
-    local portHalfCm = 28.0
+    local portBadgeBasePx = math.max(18.0, BASE_CELL_PX * 0.78)
+    local portHalfCm = 42.0
+    local portsByExtCell = {}
     for _, rm in ipairs(RenderedMachines) do
         local cn = ""
         pcall(function() cn = rm.machine:GetClass():GetFName():ToString():lower() end)
@@ -1821,29 +1819,48 @@ RefreshStationMapCanvas = function()
         if not isTransportOnly and Core.IsValidObj(rm.machine) then
             local ports = StationData.GetMachineItemPorts(rm.machine, rm.x, rm.y, rm.yaw, rm.cellsX, rm.cellsY, CurrentFrameXform)
             for _, p in ipairs(ports) do
-                local connected = false
-                for _, tn in ipairs(transportNodes) do
-                    if math.abs(tn.x - p.adjX) <= 68.0 and math.abs(tn.y - p.adjY) <= 68.0 then
-                        connected = true
-                        break
+                if not p.isConnectedBySim then
+                    local covered = false
+                    for _, ob in ipairs(occupiedBoxes) do
+                        if math.abs(p.adjX - ob.x) <= (ob.halfW - 4.0) and math.abs(p.adjY - ob.y) <= (ob.halfH - 4.0) then
+                            covered = true
+                            break
+                        end
                     end
-                end
-                if not connected then
-                    local pmx, pmy = WorldToBaseCanvas(p.px, p.py)
-                    RenderUnconnectedItemPort(outer, MapUI.MapCanvas, pmx, pmy, portBadgeBasePx, 22)
-                    table.insert(RenderedPorts, {
-                        idx = #RenderedPorts + 1,
-                        x = p.px,
-                        y = p.py,
-                        halfW = portHalfCm,
-                        halfH = portHalfCm,
-                        isInput = p.isInput,
-                        isOutput = p.isOutput,
-                        machineName = rm.displayName,
-                    })
+                    if not covered then
+                        local cellKey = string.format("%.0f,%.0f", p.adjX / 25.0, p.adjY / 25.0)
+                        local existing = portsByExtCell[cellKey]
+                        if not existing then
+                            existing = {
+                                x = p.adjX,
+                                y = p.adjY,
+                                isInput = p.isInput == true,
+                                isOutput = p.isOutput == true,
+                                machineName = rm.displayName,
+                            }
+                            portsByExtCell[cellKey] = existing
+                        else
+                            if p.isInput then existing.isInput = true end
+                            if p.isOutput then existing.isOutput = true end
+                        end
+                    end
                 end
             end
         end
+    end
+    for _, pe in pairs(portsByExtCell) do
+        local pmx, pmy = WorldToBaseCanvas(pe.x, pe.y)
+        RenderUnconnectedItemPort(outer, MapUI.MapCanvas, pmx, pmy, portBadgeBasePx, 22)
+        table.insert(RenderedPorts, {
+            idx = #RenderedPorts + 1,
+            x = pe.x,
+            y = pe.y,
+            halfW = portHalfCm,
+            halfH = portHalfCm,
+            isInput = pe.isInput,
+            isOutput = pe.isOutput,
+            machineName = pe.machineName,
+        })
     end
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
