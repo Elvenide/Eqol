@@ -41,11 +41,18 @@ local WALKTHROUGH_SIM_CLASSES = {
     "BPO_BeltBalancer_03_C",
 }
 
+local WALKTHROUGH_SIM_SET = {}
+for _, clsName in ipairs(WALKTHROUGH_SIM_CLASSES) do
+    WALKTHROUGH_SIM_SET[clsName] = true
+end
+
 local OrigMeshState            = {} -- compAddr -> { ... }
 local ProcessedHeightActors    = {} -- actorAddr -> true
 local ProcessedCollisionActors = {} -- actorAddr -> true
+local PatchedSimCDOs           = {} -- clsName -> true
 local LoggedKeys               = {} -- key -> true
 local PollActive               = false
+local NewObjHookRegistered     = false
 
 local function SafeName(obj)
     if not Core.IsValidObj(obj) then return "nil" end
@@ -91,8 +98,70 @@ local function ExtractArray(tarr)
     return out, count
 end
 
+local function LogFrameAndEnvOnce(simObj)
+    if LoggedKeys["frame_diag"] or not Core.IsValidObj(simObj) then return end
+    if not simObj.GetFrame then return end
+    local okF, frame = pcall(function() return simObj:GetFrame() end)
+    if not okF or not Core.IsValidObj(frame) then return end
+    LoggedKeys["frame_diag"] = true
+
+    pcall(function()
+        local parts, fns = {}, {}
+        local cur = frame:GetClass()
+        local depth = 0
+        while Core.IsValidObj(cur) and depth < 12 do
+            depth = depth + 1
+            if SafeName(cur) == "Object" then break end
+            if cur.ForEachProperty then
+                cur:ForEachProperty(function(prop)
+                    local pName = prop:GetFName():ToString()
+                    local okV, val = pcall(function() return frame[pName] end)
+                    local desc = okV and (Core.IsValidObj(val) and SafeClassName(val) or tostring(val)) or "?"
+                    parts[#parts + 1] = pName .. "=" .. desc
+                end)
+            end
+            if cur.ForEachFunction then
+                cur:ForEachFunction(function(fn) fns[#fns + 1] = SafeName(fn) end)
+            end
+            cur = cur.GetSuperStruct and cur:GetSuperStruct() or nil
+        end
+        Core.Log(string.format("[SplitterBalancerTweaks] Frame[%s]: %s | Fns=[%s]",
+            SafeClassName(frame), table.concat(parts, ", "), table.concat(fns, ", ")))
+
+        if frame.GetCollisionEnv then
+            local env = frame:GetCollisionEnv()
+            if Core.IsValidObj(env) and env.Colliders then
+                local num = env.Colliders.GetArrayNum and env.Colliders:GetArrayNum() or -1
+                local c1 = (num > 0) and env.Colliders[1] or nil
+                local cid = c1 and pcall(function() return c1.ColliderID end) and tostring(c1.ColliderID) or "?"
+                Core.Log(string.format("[SplitterBalancerTweaks] FrameEnv[%s] Colliders.Num=%s first.ColliderID=%s",
+                    SafeClassName(env), tostring(num), cid))
+            end
+        end
+    end)
+end
+
+local function EnsureSimCDODisabled(simObj)
+    if not Core.IsValidObj(simObj) then return end
+    local clsName = SafeClassName(simObj)
+    if PatchedSimCDOs[clsName] then return end
+    PatchedSimCDOs[clsName] = true
+    pcall(function()
+        local cls = simObj:GetClass()
+        if Core.IsValidObj(cls) and cls.GetDefaultObject then
+            local cdo = cls:GetDefaultObject()
+            if Core.IsValidObj(cdo) and cdo.bColliderEnabled == true then
+                cdo.bColliderEnabled = false
+                Core.Log(string.format("[SplitterBalancerTweaks] Set CDO %s.bColliderEnabled = false", clsName))
+            end
+        end
+    end)
+end
+
 local function DisableSimCollider(simObj, countsByClass)
     if not Core.IsValidObj(simObj) then return end
+    EnsureSimCDODisabled(simObj)
+    LogFrameAndEnvOnce(simObj)
     local okVal, enabled = pcall(function() return simObj.bColliderEnabled end)
     if okVal and enabled == true then
         local okSet = pcall(function() simObj.bColliderEnabled = false end)
@@ -318,9 +387,27 @@ local function StartPoll()
     ExecuteInGameThreadWithDelay(250, Tick)
 end
 
+local function RegisterMachineObjectHook()
+    if NewObjHookRegistered then return end
+    NewObjHookRegistered = true
+    pcall(NotifyOnNewObject, "/Script/MainSequence.MachineObject", function(obj)
+        if not Core.IsValidObj(obj) then return end
+        local clsName = SafeClassName(obj)
+        if WALKTHROUGH_SIM_SET[clsName] then
+            EnsureSimCDODisabled(obj)
+            pcall(function()
+                if obj.bColliderEnabled == true then
+                    obj.bColliderEnabled = false
+                end
+            end)
+        end
+    end)
+end
+
 function Feature.Init()
+    RegisterMachineObjectHook()
     StartPoll()
-    Core.Log("[SplitterBalancerTweaks] Initialized (bColliderEnabled=false + 2/3 (0.67x) Z height).")
+    Core.Log("[SplitterBalancerTweaks] Initialized (CDO+instance bColliderEnabled=false + 2/3 (0.67x) Z height).")
 end
 
 function Feature.OnClientRestart()
