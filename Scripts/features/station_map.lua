@@ -574,18 +574,29 @@ local function InspectBuildMachineCommandLayout()
                         pcall(function() pInfo.structName = st:GetFName():ToString() end)
                         if st.ForEachProperty then
                             local fMap = {}
+                            local fStructMap = {}
                             local fList = {}
                             st:ForEachProperty(function(fp)
                                 local fName = fp:GetFName():ToString()
                                 local fCls = ""
                                 pcall(function() fCls = fp:GetClass():GetFName():ToString() end)
                                 fMap[fName] = fCls
-                                table.insert(fList, fName .. ":" .. fCls)
+                                local fSub = ""
+                                if fCls == "StructProperty" and fp.GetStruct then
+                                    local okFS, fst = pcall(function() return fp:GetStruct() end)
+                                    if okFS and Core.IsValidObj(fst) then
+                                        pcall(function() fSub = fst:GetFName():ToString() end)
+                                        if fSub ~= "" then fStructMap[fName] = fSub end
+                                    end
+                                end
+                                table.insert(fList, fName .. ":" .. fCls .. (fSub ~= "" and ("(" .. fSub .. ")") or ""))
                             end)
                             pInfo.fields = fMap
+                            pInfo.fieldStructs = fStructMap
                             if not layout.firstStructFields then
                                 layout.firstStructName = pName
                                 layout.firstStructFields = fMap
+                                layout.firstStructFieldTypes = fStructMap
                             end
                             table.insert(sigParts, string.format("%s(%s:%s{%s})", pName, pCls, tostring(pInfo.structName), table.concat(fList, ",")))
                         else
@@ -717,9 +728,10 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
     local callErr = nil
 
     if #layout.params == 1 and layout.params[1].fields then
-        -- Single struct command parameter: populate only fields that exist with type-appropriate values
+        -- Single struct command parameter (BuildMachineCommand): populate fields strictly by reflected type
         local cmd = {}
         local fields = layout.params[1].fields
+        local fStructs = layout.params[1].fieldStructs or {}
         local populated = 0
         local hasBuildable = false
         local function setIfField(name, val, reqClsSub)
@@ -730,17 +742,29 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
                 if name == "Buildable" or name == "BuildBlock" then hasBuildable = true end
             end
         end
+        local glStruct = (fStructs["GridLocation"] or ""):lower()
+        local gridLocVal = (glStruct:find("intpoint", 1, true) or fields["Height"] ~= nil)
+            and { X = gx, Y = gy }
+            or { X = gx, Y = gy, Z = gz }
+        local targetPlatId = (platId and platId ~= 0) and platId or frameId
+
         setIfField("FrameID", frameId, "Int")
         setIfField("StationID", frameId, "Int")
         setIfField("Frame", targetFrame, "Object")
         setIfField("Station", targetFrame, "Object")
-        setIfField("PlatformID", platId, "Int")
+        setIfField("PlatformID", targetPlatId, "Int")
         setIfField("Platform", platform, "Object")
         setIfField("Buildable", buildable, "Object")
         setIfField("BuildBlock", buildable, "Object")
-        setIfField("GridLocation", { X = gx, Y = gy, Z = gz }, "Struct")
+        setIfField("GridLocation", gridLocVal, "Struct")
+        setIfField("Height", gz, "Int")
         setIfField("GridRotation", rotSteps, "Int")
-        setIfField("Rotation", { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 }, "Struct")
+        if fields["Rotation"] and fields["Rotation"]:find("Int", 1, true) then
+            setIfField("Rotation", rotSteps, "Int")
+        else
+            setIfField("Rotation", { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 }, "Struct")
+        end
+        setIfField("Config", 0, "Int")
         setIfField("Yaw", yawDeg or 0.0, "Float")
         setIfField("LocalQuat", quat, "Struct")
         setIfField("Quat", quat, "Struct")
@@ -748,8 +772,10 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         setIfField("Location", { X = locX, Y = locY, Z = locZ }, "Struct")
 
         if hasBuildable and populated >= 2 then
-            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(struct, fields=%d, loc=(%.0f,%.0f,%.0f))", populated, locX, locY, locZ))
+            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(platId=%d, grid=(%d,%d), h=%d, rot=%d, fields=%d)",
+                targetPlatId, gx, gy, gz, rotSteps, populated))
             local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
+            Core.Log(string.format("[StationMap] AddBuildMachineCommand returned ok=%s err=%s", tostring(okCmd), tostring(errCmd)))
             if okCmd then
                 cmdSuccess = true
             else
@@ -1733,6 +1759,7 @@ RefreshStationMapCanvas = function()
         end
     end
     local seenUndergroundPairs = {}
+    local extraOccupiedBoxes = {}
 
     for _, me in ipairs(floorMachines) do
         local m = me.machine
@@ -1797,7 +1824,8 @@ RefreshStationMapCanvas = function()
             CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
 
             -- Underground belt enhancements: direction arrow on tile + dashed pair line + second endpoint tile
-            local uInfo = StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform)
+            local clsLow = clsKey and clsKey:lower() or ""
+            local uInfo = (clsLow:find("underground", 1, true) ~= nil) and StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform) or nil
             if uInfo then
                 local arrowCol = GetTierArrowColor(sprite and sprite.tier or 1)
                 RenderDirectionChevron(outer, MapUI.MapCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
@@ -1819,6 +1847,7 @@ RefreshStationMapCanvas = function()
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
                         CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
                         RenderDirectionChevron(outer, MapUI.MapCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                        table.insert(extraOccupiedBoxes, { x = uInfo.pairX, y = uInfo.pairY, halfW = 50.0, halfH = 50.0 })
                     end
                 end
             end
@@ -1913,26 +1942,15 @@ RefreshStationMapCanvas = function()
     for _, rm in ipairs(RenderedMachines) do
         table.insert(occupiedBoxes, { x = rm.x, y = rm.y, halfW = rm.halfW, halfH = rm.halfH })
     end
-    for _, me in ipairs(floorMachines) do
-        local m = me.machine
-        if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
-            local cn = ""
-            pcall(function() cn = m:GetClass():GetFName():ToString():lower() end)
-            if cn:find("underground", 1, true) then
-                local ui2 = StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform)
-                if ui2 and ui2.pairX and ui2.pairY and not ui2.pairAddr then
-                    table.insert(occupiedBoxes, { x = ui2.pairX, y = ui2.pairY, halfW = 50.0, halfH = 50.0 })
-                end
-            end
-        end
+    for _, eb in ipairs(extraOccupiedBoxes) do
+        table.insert(occupiedBoxes, eb)
     end
 
     local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
     local portHalfCm = 32.0
     local portsByKey = {}
     for _, rm in ipairs(RenderedMachines) do
-        local cn = ""
-        pcall(function() cn = rm.machine:GetClass():GetFName():ToString():lower() end)
+        local cn = (rm.actorClsPath or ""):lower()
         local isTransportOnly = (rm.cat == "Conveyor")
             or cn:find("splitter", 1, true) or cn:find("balancer", 1, true)
             or cn:find("merger", 1, true) or cn:find("underground", 1, true)
@@ -3068,7 +3086,8 @@ local function OpenStationMap()
     end
 
     local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, function()
-        ExecuteInGameThreadAfterFrames(1, CommitPendingGhosts)
+        Core.Log(string.format("[StationMap] ApplyBtn pressed (pending=%d)", #PendingGhosts))
+        ExecuteInGameThreadWithDelay(10, CommitPendingGhosts)
     end)
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
@@ -3154,7 +3173,9 @@ local function OpenStationMap()
 
     CurrentStation = station
     CurrentWalkFrame = walkFrame
+    local t0 = os.clock()
     local floors, curIdx, _, gox, goy, xform = StationData.BuildStationFloorMap(station, walkFrame, px, py, pz)
+    local t1 = os.clock()
     CurrentFrameXform = xform
     CurrentFloors = floors
     SelectedFloorIdx = curIdx
@@ -3173,6 +3194,12 @@ local function OpenStationMap()
 
     RebuildFloorButtons()
     RefreshStationMapCanvas()
+    local t2 = os.clock()
+    Core.Log(string.format("[StationMap] OpenTiming build=%.0fms canvas=%.0fms total=%.0fms floor=%d machines=%d walls=%d ports=%d",
+        (t1 - t0) * 1000.0, (t2 - t1) * 1000.0, (t2 - t0) * 1000.0,
+        SelectedFloorIdx, #RenderedMachines,
+        (CurrentFloors[SelectedFloorIdx] and CurrentFloors[SelectedFloorIdx].walls and #CurrentFloors[SelectedFloorIdx].walls) or 0,
+        #RenderedPorts))
     EnsureInputPoll()
 
     -- Re-fit once after UMG finishes layout pass on frame 2, and pre-inspect BuildMachineCommand signature

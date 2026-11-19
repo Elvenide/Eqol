@@ -207,7 +207,11 @@ local CachedMachinesByFrame = {} -- frameAddr -> { time = ..., list = {} }
 local CachedPlayersSnapshot = { time = -999, list = {} }
 local CachedFootprintsByClass = {} -- clsAddr -> { cellsX = n, cellsY = n }
 local CachedBlockBoundsByCls = {}  -- clsAddr -> { ex = n, ey = n, ez = n, offLx = n, offLy = n }
-local CachedBlockWallsByCls = {}   -- clsAddr -> list of { ox, oy, oz, bx, by, bz }
+local CachedStationWallsByKey = {} -- stationKey -> { count = n, walls = { ... } }
+local CachedWallAnchors = {}       -- addr -> { obj, addr, clsPath }
+local CachedWallPropNames = {}     -- "clsPath:offset" -> propName
+local CachedMachineCatByCls = {}   -- clsAddr -> string
+local CachedMachineDispByCls = {}  -- clsAddr -> string
 local CachedIconTexByCls = {}      -- clsAddr -> Texture2D or false
 
 local StationDiagLoggedKey = nil
@@ -1105,243 +1109,219 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     end
 
     -- Extract structural module walls (including interior walls with doorways) from station CollisionEnv
-    local wallDiagTotal, wallDiagKept, wallDiagScale, wallDiagBox = 0, 0, 1.0, 0
-    local colFieldsStr = ""
+    -- FCharacterCollider layout (28 bytes): +0x00 Min(3xi32), +0x0C Max(3xi32), +0x18 ColliderID(i32)
+    local wallDiagTotal, wallDiagKept, wallDiagScale = 0, 0, 1.0
+    local wallDiagStatus = "none"
     local wallSamples = {}
     if Core.IsValidObj(station) and #floors > 0 then
-        local machineIdSet = {}
-        for _, m in ipairs(allMachines) do
-            if Core.IsValidObj(m) then
-                pcall(function()
-                    local mid = tonumber(m.ID)
-                    if mid and mid > 0 then machineIdSet[mid] = true end
-                end)
-            end
-        end
+        local stWallKey = tostring(station:GetAddress())
+        local cachedWalls = CachedStationWallsByKey[stWallKey]
 
-        local function readColliderMinMax(c)
-            local st = Core.UnwrapStruct(c) or c
-            if not st then return nil end
-            local ok, x1, y1, z1, x2, y2, z2 = pcall(function()
-                local minV, maxV = st.Min, st.Max
-                if not (minV and maxV) then
-                    local sub = st.Bounds or st.Box or st.AABB or st.ColliderBox
-                    if sub then minV, maxV = sub.Min, sub.Max end
-                end
-                if minV and maxV then
-                    local ax, ay, az = Core.GetFPVector(minV)
-                    local bx, by, bz = Core.GetFPVector(maxV)
-                    return ax, ay, az, bx, by, bz
-                end
-                return nil
-            end)
-            if ok and x1 and x2 then
-                return x1, y1, z1, x2, y2, z2
-            end
-            return nil
-        end
-
-        pcall(function()
-            local env = nil
-            if station.GetCollisionEnv then
-                env = station:GetCollisionEnv()
-            end
-            if not Core.IsValidObj(env) then
-                env = station.CollisionEnv
-            end
-            if not Core.IsValidObj(env) or not env.Colliders then return end
-            local cols = env.Colliders
-            local num = cols.GetArrayNum and (tonumber(cols:GetArrayNum()) or 0) or 0
-            wallDiagTotal = num
-            if num <= 0 then return end
-
-            pcall(function() colFieldsStr = InspectStructFieldNames(cols[1], 12) end)
-
-            local rawBoxes = {}
-            local maxAbs = 0.0
-            for i = 1, num do
-                local c = cols[i]
-                if c then
-                    local cid = nil
-                    pcall(function() cid = tonumber(c.ColliderID) end)
-                    if not (cid and machineIdSet[cid]) then
-                        local x1, y1, z1, x2, y2, z2 = readColliderMinMax(c)
-                        if x1 and x2 and x1 < 900000000 and x2 > x1 and y2 > y1 and z2 > z1 then
-                            local aMax = math.max(math.abs(x1), math.abs(x2), math.abs(y1), math.abs(y2))
-                            if aMax > maxAbs then maxAbs = aMax end
-                            table.insert(rawBoxes, { x1 = x1, y1 = y1, z1 = z1, x2 = x2, y2 = y2, z2 = z2, cid = cid or 0 })
-                        end
-                    end
-                end
-            end
-
-            local scale = 1.0
-            if maxAbs > 100000.0 then
-                scale = 0.1
-            elseif maxAbs > 0.0 and maxAbs < 260.0 then
-                scale = 50.0
-            end
-            wallDiagScale = scale
-
-            for _, rb in ipairs(rawBoxes) do
-                local minX, maxX = rb.x1 * scale, rb.x2 * scale
-                local minY, maxY = rb.y1 * scale, rb.y2 * scale
-                local minZ, maxZ = rb.z1 * scale, rb.z2 * scale
-                if stationInverted then
-                    minY, maxY = -maxY, -minY
-                    minZ, maxZ = -maxZ, -minZ
-                end
-                local dx = maxX - minX
-                local dy = maxY - minY
-                local dz = maxZ - minZ
-                -- Keep vertical standing walls & pillars; skip flat floor/ceiling slabs and full-deck envelopes
-                if dz >= 70.0 and math.max(dx, dy) >= 20.0 and not (dx >= 1200.0 and dy >= 1200.0) then
-                    local wb = {
-                        minX = minX, maxX = maxX,
-                        minY = minY, maxY = maxY,
-                        minZ = minZ, maxZ = maxZ,
-                        cx = (minX + maxX) * 0.5,
-                        cy = (minY + maxY) * 0.5,
-                        ex = dx * 0.5,
-                        ey = dy * 0.5,
-                    }
-                    local matchedAny = false
-                    for _, fl in ipairs(floors) do
-                        if minZ <= (fl.z + 200.0) and maxZ >= (fl.z + 50.0) then
-                            table.insert(fl.walls, wb)
-                            matchedAny = true
-                        end
-                    end
-                    if matchedAny then
-                        wallDiagKept = wallDiagKept + 1
-                        if #wallSamples < 6 then
-                            table.insert(wallSamples, string.format("(%.0f..%.0f,%.0f..%.0f,z=%.0f..%.0f)",
-                                minX, maxX, minY, maxY, minZ, maxZ))
-                        end
-                    end
-                end
-            end
-        end)
-
-        -- Fallback: if CollisionEnv collider Min/Max aren't reflected UPROPERTYs, extract wall BoxComponents / StaticMesh walls per module class
-        if wallDiagKept == 0 then
-            local boxCls = Core.FindOrLoadClass("/Script/Engine.BoxComponent")
-            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
-            for _, pe in ipairs(entries) do
-                local p = pe.platform
-                local lb = pe.bounds
-                local act = Core.IsValidObj(p) and StationData.GetObjectActor(p) or nil
-                if Core.IsValidObj(act) and lb and lb.hasActor then
-                    local clsAddr = nil
+        if not cachedWalls then
+            local machineIdSet = {}
+            for _, m in ipairs(allMachines) do
+                if Core.IsValidObj(m) then
                     pcall(function()
-                        local pc = p:GetClass()
-                        if Core.IsValidObj(pc) then clsAddr = pc:GetAddress() end
+                        local mid = tonumber(m.ID)
+                        if mid and mid > 0 then machineIdSet[mid] = true end
                     end)
-                    local localWalls = clsAddr and CachedBlockWallsByCls[clsAddr] or nil
-                    if localWalls == nil then
-                        localWalls = {}
-                        pcall(function()
-                            if Core.IsValidObj(boxCls) and act.K2_GetComponentsByClass then
-                                local bRaw = act:K2_GetComponentsByClass(boxCls)
-                                StationData.ForEachArray(bRaw, function(_, elem)
-                                    local c = Core.UnwrapArrayElem(elem)
-                                    if Core.IsValidObj(c) and c.BoxExtent and c.RelativeLocation then
-                                        local rs = c.RelativeScale3D
-                                        local rl = c.RelativeLocation
-                                        local rr = c.RelativeRotation
-                                        local sx = math.abs(rs and (tonumber(rs.X) or 1.0) or 1.0)
-                                        local sy = math.abs(rs and (tonumber(rs.Y) or 1.0) or 1.0)
-                                        local sz = math.abs(rs and (tonumber(rs.Z) or 1.0) or 1.0)
-                                        local bx = math.abs((tonumber(c.BoxExtent.X) or 0.0) * sx)
-                                        local by = math.abs((tonumber(c.BoxExtent.Y) or 0.0) * sy)
-                                        local bz = math.abs((tonumber(c.BoxExtent.Z) or 0.0) * sz)
-                                        local cyaw = rr and (tonumber(rr.Yaw) or 0.0) or 0.0
-                                        local rot90 = (math.floor(cyaw / 90.0 + 0.5) % 2) ~= 0
-                                        if rot90 then bx, by = by, bx end
-                                        local ox = tonumber(rl.X) or 0.0
-                                        local oy = tonumber(rl.Y) or 0.0
-                                        local oz = tonumber(rl.Z) or 0.0
-                                        if bz >= 60.0 and math.min(bx, by) <= 140.0 and math.max(bx, by) >= 60.0
-                                            and (oz - bz) <= 220.0 and (oz + bz) >= 40.0
-                                            and math.abs(ox) <= 1700.0 and math.abs(oy) <= 1700.0
-                                        then
-                                            table.insert(localWalls, { ox = ox, oy = oy, oz = oz, bx = bx, by = by, bz = bz })
-                                        end
-                                    end
-                                end)
-                            end
-                            if #localWalls == 0 and Core.IsValidObj(smCls) and act.K2_GetComponentsByClass then
-                                local sRaw = act:K2_GetComponentsByClass(smCls)
-                                StationData.ForEachArray(sRaw, function(_, elem)
-                                    local c = Core.UnwrapArrayElem(elem)
-                                    if Core.IsValidObj(c) and c.bHiddenInGame ~= true and c.StaticMesh and c.StaticMesh.ExtendedBounds then
-                                        local eb = c.StaticMesh.ExtendedBounds
-                                        if eb.BoxExtent and eb.Origin then
-                                            local rs = c.RelativeScale3D
-                                            local rl = c.RelativeLocation
-                                            local rr = c.RelativeRotation
-                                            local sx = math.abs(rs and (tonumber(rs.X) or 1.0) or 1.0)
-                                            local sy = math.abs(rs and (tonumber(rs.Y) or 1.0) or 1.0)
-                                            local sz = math.abs(rs and (tonumber(rs.Z) or 1.0) or 1.0)
-                                            local bx = math.abs((tonumber(eb.BoxExtent.X) or 0.0) * sx)
-                                            local by = math.abs((tonumber(eb.BoxExtent.Y) or 0.0) * sy)
-                                            local bz = math.abs((tonumber(eb.BoxExtent.Z) or 0.0) * sz)
-                                            local cyaw = rr and (tonumber(rr.Yaw) or 0.0) or 0.0
-                                            local radC = math.rad(cyaw)
-                                            local cC, sC = math.cos(radC), math.sin(radC)
-                                            local eox = (tonumber(eb.Origin.X) or 0.0) * sx
-                                            local eoy = (tonumber(eb.Origin.Y) or 0.0) * sy
-                                            local eoz = (tonumber(eb.Origin.Z) or 0.0) * sz
-                                            local ox = (rl and (tonumber(rl.X) or 0.0) or 0.0) + eox * cC - eoy * sC
-                                            local oy = (rl and (tonumber(rl.Y) or 0.0) or 0.0) + eox * sC + eoy * cC
-                                            local oz = (rl and (tonumber(rl.Z) or 0.0) or 0.0) + eoz
-                                            local rot90 = (math.floor(cyaw / 90.0 + 0.5) % 2) ~= 0
-                                            if rot90 then bx, by = by, bx end
-                                            if bz >= 80.0 and math.min(bx, by) <= 110.0 and math.max(bx, by) >= 80.0
-                                                and (oz - bz) <= 220.0 and (oz + bz) >= 40.0
-                                                and math.abs(ox) <= 1700.0 and math.abs(oy) <= 1700.0
-                                            then
-                                                table.insert(localWalls, { ox = ox, oy = oy, oz = oz, bx = bx, by = by, bz = bz })
-                                            end
-                                        end
-                                    end
-                                end)
-                            end
-                        end)
-                        if clsAddr then
-                            CachedBlockWallsByCls[clsAddr] = localWalls
-                        end
-                    end
+                end
+            end
 
-                    if #localWalls > 0 then
-                        local radM = math.rad(lb.yaw or 0.0)
-                        local cM, sM = math.cos(radM), math.sin(radM)
-                        local mRot90 = (math.floor((lb.yaw or 0.0) / 90.0 + 0.5) % 2) ~= 0
-                        for _, lw in ipairs(localWalls) do
-                            local wcx = lb.cx + lw.ox * cM - lw.oy * sM
-                            local wcy = lb.cy + lw.ox * sM + lw.oy * cM
-                            local wex = mRot90 and lw.by or lw.bx
-                            local wey = mRot90 and lw.bx or lw.by
-                            local wzMin = lb.cz + (lw.oz - lw.bz)
-                            local wzMax = lb.cz + (lw.oz + lw.bz)
-                            local wb = {
-                                minX = wcx - wex, maxX = wcx + wex,
-                                minY = wcy - wey, maxY = wcy + wey,
-                                minZ = wzMin, maxZ = wzMax,
-                                cx = wcx, cy = wcy, ex = wex, ey = wey,
-                            }
-                            for _, fl in ipairs(floors) do
-                                if wzMin <= (fl.z + 200.0) and wzMax >= (fl.z + 50.0) then
-                                    table.insert(fl.walls, wb)
-                                    wallDiagBox = wallDiagBox + 1
+            local extractedWalls = {}
+            pcall(function()
+                local env = nil
+                if station.GetCollisionEnv then env = station:GetCollisionEnv() end
+                if not Core.IsValidObj(env) then env = station.CollisionEnv end
+                if not Core.IsValidObj(env) or not env.Colliders then
+                    wallDiagStatus = "no_env"
+                    return
+                end
+                local cols = env.Colliders
+                local num = cols.GetArrayNum and (tonumber(cols:GetArrayNum()) or 0) or 0
+                wallDiagTotal = num
+                if num <= 0 then
+                    wallDiagStatus = "empty"
+                    return
+                end
+
+                local dataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
+                if type(dataAddr) ~= "number" or dataAddr == 0 then
+                    wallDiagStatus = "no_data_addr"
+                    return
+                end
+                if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" then
+                    wallDiagStatus = "no_custom_prop"
+                    return
+                end
+
+                local COLLIDER_STRIDE = 28
+                local maxByteAddr = dataAddr + num * COLLIDER_STRIDE
+                local function getClsPath(obj)
+                    local okC, cls = pcall(function() return obj:GetClass() end)
+                    if not okC or not Core.IsValidObj(cls) then return nil end
+                    local okF, full = pcall(function() return cls:GetFullName() end)
+                    if not okF or type(full) ~= "string" then return nil end
+                    return full:match("^%S+ (.+)$") or full
+                end
+                local function recordAnchor(obj)
+                    if not Core.IsValidObj(obj) then return nil end
+                    local addr = obj:GetAddress()
+                    if type(addr) ~= "number" then return nil end
+                    if CachedWallAnchors[addr] then return CachedWallAnchors[addr] end
+                    local cp = getClsPath(obj)
+                    if cp then
+                        CachedWallAnchors[addr] = { obj = obj, addr = addr, clsPath = cp }
+                        return CachedWallAnchors[addr]
+                    end
+                    return nil
+                end
+                local function fitsRange(entry)
+                    if not entry or not Core.IsValidObj(entry.obj) then return false end
+                    local dMin = dataAddr - entry.addr
+                    local dMax = maxByteAddr - entry.addr
+                    return dMin >= 0 and dMax >= 0 and dMax <= 0x7FFFFFFF
+                end
+
+                local anchor = nil
+                for _, cand in ipairs({ env, station }) do
+                    local e = recordAnchor(cand)
+                    if fitsRange(e) then anchor = e break end
+                end
+                if not anchor then
+                    for _, e in pairs(CachedWallAnchors) do
+                        if fitsRange(e) then anchor = e break end
+                    end
+                end
+                if not anchor then
+                    for _, searchCls in ipairs({ "DMSObject", "Actor", "Object" }) do
+                        local okA, list = pcall(FindAllOf, searchCls)
+                        if okA and list then
+                            for _, obj in ipairs(list) do
+                                if Core.IsValidObj(obj) then
+                                    local a = obj:GetAddress()
+                                    if type(a) == "number" and (dataAddr - a) >= 0 and (maxByteAddr - a) <= 0x7FFFFFFF then
+                                        local e = recordAnchor(obj)
+                                        if fitsRange(e) then anchor = e break end
+                                    end
                                 end
                             end
-                            if #wallSamples < 6 then
-                                table.insert(wallSamples, string.format("B(%.0f..%.0f,%.0f..%.0f)",
-                                    wb.minX, wb.maxX, wb.minY, wb.maxY))
+                        end
+                        if anchor then break end
+                    end
+                end
+                if not anchor then
+                    wallDiagStatus = "no_anchor"
+                    return
+                end
+
+                local function readIntAt(absAddr)
+                    local off = absAddr - anchor.addr
+                    local key = anchor.clsPath .. ":" .. tostring(off)
+                    local pName = CachedWallPropNames[key]
+                    if not pName then
+                        pName = string.format("EqolW_%X_%X", anchor.addr, off)
+                        local okReg = pcall(RegisterCustomProperty, {
+                            Name = pName,
+                            Type = PropertyTypes.IntProperty,
+                            BelongsToClass = anchor.clsPath,
+                            OffsetInternal = off,
+                        })
+                        if not okReg then return nil end
+                        CachedWallPropNames[key] = pName
+                    end
+                    local okV, v = pcall(function() return anchor.obj[pName] end)
+                    return (okV and type(v) == "number") and v or nil
+                end
+
+                -- Verify stride/offset alignment on element 1 against reflected ColliderID
+                local refCid1 = nil
+                pcall(function() refCid1 = tonumber(cols[1].ColliderID) end)
+                local rawCid1 = readIntAt(dataAddr + 0x18)
+                if refCid1 ~= nil and rawCid1 ~= refCid1 then
+                    wallDiagStatus = string.format("cid_mismatch(%s!=%s)", tostring(rawCid1), tostring(refCid1))
+                    return
+                end
+
+                local rawBoxes = {}
+                local maxAbs = 0.0
+                for i = 1, num do
+                    local c = cols[i]
+                    local cid = nil
+                    if c then pcall(function() cid = tonumber(c.ColliderID) end) end
+                    if not (cid and machineIdSet[cid]) then
+                        local elemAddr = dataAddr + (i - 1) * COLLIDER_STRIDE
+                        local z1 = readIntAt(elemAddr + 0x08)
+                        local z2 = readIntAt(elemAddr + 0x14)
+                        if z1 and z2 and z2 > z1 and (z2 - z1) >= 70 then
+                            local x1 = readIntAt(elemAddr + 0x00)
+                            local y1 = readIntAt(elemAddr + 0x04)
+                            local x2 = readIntAt(elemAddr + 0x0C)
+                            local y2 = readIntAt(elemAddr + 0x10)
+                            if x1 and y1 and x2 and y2 and x1 < 900000000 and x2 > x1 and y2 > y1 then
+                                local aMax = math.max(math.abs(x1), math.abs(x2), math.abs(y1), math.abs(y2))
+                                if aMax > maxAbs then maxAbs = aMax end
+                                table.insert(rawBoxes, { x1 = x1, y1 = y1, z1 = z1, x2 = x2, y2 = y2, z2 = z2 })
                             end
                         end
                     end
+                end
+
+                local scale = 1.0
+                if maxAbs > 100000.0 then
+                    scale = 0.1
+                elseif maxAbs > 0.0 and maxAbs < 260.0 then
+                    scale = 50.0
+                end
+                wallDiagScale = scale
+                wallDiagStatus = "ok"
+
+                for _, rb in ipairs(rawBoxes) do
+                    local minX, maxX = rb.x1 * scale, rb.x2 * scale
+                    local minY, maxY = rb.y1 * scale, rb.y2 * scale
+                    local minZ, maxZ = rb.z1 * scale, rb.z2 * scale
+                    if stationInverted then
+                        minY, maxY = -maxY, -minY
+                        minZ, maxZ = -maxZ, -minZ
+                    end
+                    local dx = maxX - minX
+                    local dy = maxY - minY
+                    local dz = maxZ - minZ
+                    if dz >= 70.0 and math.max(dx, dy) >= 20.0 and not (dx >= 1200.0 and dy >= 1200.0) then
+                        table.insert(extractedWalls, {
+                            minX = minX, maxX = maxX,
+                            minY = minY, maxY = maxY,
+                            minZ = minZ, maxZ = maxZ,
+                            cx = (minX + maxX) * 0.5,
+                            cy = (minY + maxY) * 0.5,
+                            ex = dx * 0.5,
+                            ey = dy * 0.5,
+                        })
+                    end
+                end
+            end)
+
+            cachedWalls = { total = wallDiagTotal, scale = wallDiagScale, status = wallDiagStatus, walls = extractedWalls }
+            CachedStationWallsByKey[stWallKey] = cachedWalls
+        else
+            wallDiagTotal = cachedWalls.total or 0
+            wallDiagScale = cachedWalls.scale or 1.0
+            wallDiagStatus = "cached"
+        end
+
+        for _, wb in ipairs(cachedWalls.walls) do
+            local matchedAny = false
+            for _, fl in ipairs(floors) do
+                if wb.minZ <= (fl.z + 200.0) and wb.maxZ >= (fl.z + 50.0) then
+                    table.insert(fl.walls, wb)
+                    matchedAny = true
+                end
+            end
+            if matchedAny then
+                wallDiagKept = wallDiagKept + 1
+                if #wallSamples < 6 then
+                    table.insert(wallSamples, string.format("(%.0f..%.0f,%.0f..%.0f,z=%.0f..%.0f)",
+                        wb.minX, wb.maxX, wb.minY, wb.maxY, wb.minZ, wb.maxZ))
                 end
             end
         end
@@ -1389,8 +1369,9 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevCols=%d elevStops=[%s] floors(%d): %s",
             playerLx, playerLy, playerLz, currentFloorIndex, #elevStopLists, elevStr, #floors, table.concat(flParts, ", ")))
         Core.Log(string.format("[StationData] PlatsDiag count=%d items=[%s]", #platDiagParts, table.concat(platDiagParts, "; ")))
-        Core.Log(string.format("[StationData] WallColliders total=%d colFields=[%s] walls=%d boxWalls=%d scale=%.2f fl1Walls=%d sample=[%s]",
-            wallDiagTotal, colFieldsStr, wallDiagKept, wallDiagBox, wallDiagScale, floors[1] and #floors[1].walls or 0, table.concat(wallSamples, "; ")))
+        Core.Log(string.format("[StationData] WallColliders total=%d status=%s walls=%d scale=%.2f fl1Walls=%d fl6Walls=%d sample=[%s]",
+            wallDiagTotal, wallDiagStatus, wallDiagKept, wallDiagScale,
+            floors[1] and #floors[1].walls or 0, floors[6] and #floors[6].walls or 0, table.concat(wallSamples, "; ")))
 
         local clsCounts = {}
         for _, m in ipairs(allMachines) do
@@ -2614,23 +2595,32 @@ end
 
 function StationData.GetMachineCategory(machine)
     if not Core.IsValidObj(machine) then return "Other" end
+    local clsAddr = nil
+    pcall(function()
+        local c = machine:GetClass()
+        if Core.IsValidObj(c) then clsAddr = c:GetAddress() end
+    end)
+    if clsAddr and CachedMachineCatByCls[clsAddr] then
+        return CachedMachineCatByCls[clsAddr]
+    end
 
+    local cat = "Other"
     local asmCls = GetClassCached("AssemblerObject", PATHS.AssemblerObjectClass)
     if Core.IsValidObj(asmCls) and machine:IsA(asmCls) then
-        return "Assembler"
+        cat = "Assembler"
+    else
+        local contCls = GetClassCached("ContainerObject", PATHS.ContainerObjectClass)
+        if Core.IsValidObj(contCls) and machine:IsA(contCls) then
+            cat = "Container"
+        else
+            local convCls = GetClassCached("ConveyorBeltObject", PATHS.ConveyorBeltObjectClass)
+            if Core.IsValidObj(convCls) and machine:IsA(convCls) then
+                cat = "Conveyor"
+            end
+        end
     end
-
-    local contCls = GetClassCached("ContainerObject", PATHS.ContainerObjectClass)
-    if Core.IsValidObj(contCls) and machine:IsA(contCls) then
-        return "Container"
-    end
-
-    local convCls = GetClassCached("ConveyorBeltObject", PATHS.ConveyorBeltObjectClass)
-    if Core.IsValidObj(convCls) and machine:IsA(convCls) then
-        return "Conveyor"
-    end
-
-    return "Other"
+    if clsAddr then CachedMachineCatByCls[clsAddr] = cat end
+    return cat
 end
 
 function StationData.GetContainerInventory(container)
@@ -2714,16 +2704,29 @@ end
 
 function StationData.GetMachineDisplayName(machine)
     if not Core.IsValidObj(machine) then return "Machine" end
+    local clsAddr = nil
+    pcall(function()
+        local c = machine:GetClass()
+        if Core.IsValidObj(c) then clsAddr = c:GetAddress() end
+    end)
+    if clsAddr and CachedMachineDispByCls[clsAddr] then
+        return CachedMachineDispByCls[clsAddr]
+    end
+
+    local name = "Machine"
     local okB, b = pcall(function() return machine.Buildable end)
     if okB and Core.IsValidObj(b) then
         local okN, n = pcall(function() return b.DisplayName:ToString() end)
-        if okN and n and n ~= "" then return n end
+        if okN and n and n ~= "" then name = n end
     end
-    local okCls, cls = pcall(function() return machine:GetClass():GetFName():ToString() end)
-    if okCls and cls then
-        return cls:gsub("^BP_", ""):gsub("Object_C$", ""):gsub("_C$", "")
+    if name == "Machine" then
+        local okCls, cls = pcall(function() return machine:GetClass():GetFName():ToString() end)
+        if okCls and cls then
+            name = cls:gsub("^BP_", ""):gsub("Object_C$", ""):gsub("_C$", "")
+        end
     end
-    return "Machine"
+    if clsAddr then CachedMachineDispByCls[clsAddr] = name end
+    return name
 end
 
 -- Returns unrotated footprint in 100cm grid cells (cellsX, cellsY) for a machine or buildable.
@@ -2837,7 +2840,9 @@ function StationData.InvalidateCaches()
     CachedMachinesByFrame = {}
     CachedFootprintsByClass = {}
     CachedBlockBoundsByCls = {}
-    CachedBlockWallsByCls = {}
+    CachedStationWallsByKey = {}
+    CachedMachineCatByCls = {}
+    CachedMachineDispByCls = {}
     CachedIconTexByCls = {}
     CachedBeltTexByCls = {}
     CachedBuildablesByCls = nil
