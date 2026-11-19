@@ -1112,65 +1112,28 @@ local function CaptureMachineConfig(m)
         end
     end)
 
-    -- 3b. Disabled ports (Assemblers, Refineries, etc. - supports bitmask, TArray, TSet, and bounded IsPortEnabled)
+    -- 3b. Disabled ports: read PortStates (TArray<bool> on UMachineObject - works for Splitters, Balancers, Assemblers, Refineries!)
+    -- NOTE: Do NOT run Core.UnwrapArrayElem on bool elements (it treats false as falsy -> nil). Check val == false directly!
     pcall(function()
         local dis = {}
         local seen = {}
-        local dp = m.DisabledPorts
-        if dp ~= nil then
-            if type(dp) == "number" then
-                if dp ~= 0 then
-                    for bit = 0, 15 do
-                        if ((math.floor(dp / (2 ^ bit)) % 2) == 1) then
-                            table.insert(dis, bit)
-                            seen[bit] = true
-                        end
-                    end
-                end
-            else
-                if dp.ForEach then
-                    pcall(function()
-                        dp:ForEach(function(_, elem)
-                            local raw = Core.UnwrapArrayElem and Core.UnwrapArrayElem(elem) or elem
-                            local idx = tonumber(raw)
-                            if idx ~= nil and not seen[idx] then
-                                table.insert(dis, idx)
-                                seen[idx] = true
-                            end
-                        end)
-                    end)
-                end
-                if #dis == 0 then
-                    local len = dp.GetArrayNum and dp:GetArrayNum() or #dp
-                    if type(len) == "number" and len > 0 then
-                        for i = 1, len do
-                            local okE, val = pcall(function() return dp[i] end)
-                            local raw = Core.UnwrapArrayElem and Core.UnwrapArrayElem(val) or val
-                            local idx = okE and tonumber(raw) or nil
-                            if idx ~= nil and not seen[idx] then
-                                table.insert(dis, idx)
-                                seen[idx] = true
-                            end
-                        end
+        local ps = m.PortStates
+        if ps ~= nil then
+            local pLen = ps.GetArrayNum and ps:GetArrayNum() or #ps
+            if type(pLen) == "number" and pLen > 0 then
+                for i = 1, math.min(pLen, 16) do
+                    local okE, val = pcall(function() return ps[i] end)
+                    if okE and val == false and not seen[i - 1] then
+                        table.insert(dis, i - 1)
+                        seen[i - 1] = true
                     end
                 end
             end
         end
-        if #dis == 0 and m.IsPortEnabled then
-            local maxPorts = 0
-            pcall(function()
-                if m.PortStates then
-                    maxPorts = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
-                end
-            end)
-            if type(maxPorts) ~= "number" or maxPorts <= 0 then
-                -- Fallback: probe PortStates via known machine port counts only if PortStates reflection wasn't readable
-                local lowCls = clsKey:lower()
-                if lowCls:find("assembler", 1, true) then maxPorts = 4
-                elseif lowCls:find("refinery", 1, true) then maxPorts = 6 end
-            end
-            if type(maxPorts) == "number" and maxPorts > 0 then
-                for portIdx = 0, math.min(maxPorts - 1, 15) do
+        if #dis == 0 and m.IsPortEnabled and m.PortStates then
+            local pLen = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
+            if type(pLen) == "number" and pLen > 0 then
+                for portIdx = 0, math.min(pLen - 1, 15) do
                     local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
                     if okP and en == false and not seen[portIdx] then
                         table.insert(dis, portIdx)
@@ -1301,10 +1264,6 @@ local function CaptureMachineConfig(m)
             cfg.disabledPorts and #cfg.disabledPorts or 0,
             cfg.logisticFilters and #cfg.logisticFilters or 0,
             table.concat(props, ",")))
-        local lowCls = clsKey:lower()
-        if lowCls:find("splitter", 1, true) or lowCls:find("balancer", 1, true) then
-            DumpObjectAllProperties("CopySplitterDump", m)
-        end
     end
 
     return hasAny and cfg or nil
@@ -1435,24 +1394,24 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
         end
     end
 
-    -- 2. Splitter / Belt Balancer priorities & Config/Config2
+    -- 2. Splitter / Belt Balancer priorities (verified from live Splitter log: Config=0 is OutputPriority, Config=1 is InputPriority, Config2=portIndex)
     local hasPrio = (cfg.priorityInput ~= nil and cfg.priorityInput >= 0) or (cfg.priorityOutput ~= nil and cfg.priorityOutput >= 0)
     if hasPrio then
-        if cfg.priorityInput ~= nil and cfg.priorityInput >= 0 then
+        if cfg.priorityOutput ~= nil and cfg.priorityOutput >= 0 then
             if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
                 receiverId = receiverId,
                 config = 0,
-                config2 = cfg.priorityInput,
+                config2 = cfg.priorityOutput,
                 playerObjId = playerObjId,
             }) then
                 applied = true
             end
         end
-        if cfg.priorityOutput ~= nil and cfg.priorityOutput >= 0 then
+        if cfg.priorityInput ~= nil and cfg.priorityInput >= 0 then
             if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
                 receiverId = receiverId,
                 config = 1,
-                config2 = cfg.priorityOutput,
+                config2 = cfg.priorityInput,
                 playerObjId = playerObjId,
             }) then
                 applied = true
@@ -1507,33 +1466,25 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
             local portInputCls = Core.FindOrLoadClass("/Script/MainSequence.MachinePortInput")
             for _, portIdx in ipairs(capPorts) do
                 local shouldToggle = true
-                if capM.IsPortEnabled then
-                    local okP, en = pcall(function() return capM:IsPortEnabled(portIdx) end)
-                    if okP and en == false then shouldToggle = false end
-                end
+                pcall(function()
+                    if capM.PortStates then
+                        local cur = capM.PortStates[portIdx + 1]
+                        if cur == false then shouldToggle = false end
+                    elseif capM.IsPortEnabled then
+                        local en = capM:IsPortEnabled(portIdx)
+                        if en == false then shouldToggle = false end
+                    end
+                end)
                 if shouldToggle then
-                    local okNew, okMut, okAdd = false, false, false
                     if Core.IsValidObj(portInputCls) then
-                        local cmdObj
-                        okNew, cmdObj = pcall(StaticConstructObject, portInputCls, curPC)
+                        local okNew, cmdObj = pcall(StaticConstructObject, portInputCls, curPC)
                         if okNew and Core.IsValidObj(cmdObj) then
-                            okMut = pcall(function() cmdObj:TogglePortEnabled(portIdx) end)
+                            local okMut = pcall(function() cmdObj:TogglePortEnabled(portIdx) end)
                             if okMut then
-                                okAdd = pcall(function() curPC:AddInputCommand(capRecvId, cmdObj) end)
+                                pcall(function() curPC:AddInputCommand(capRecvId, cmdObj) end)
                             end
                         end
                     end
-                    Core.Log(string.format("[StationMap] ApplyDisabledPort id=%d port=%d okNew=%s okMut=%s okAdd=%s",
-                        capRecvId, portIdx, tostring(okNew), tostring(okMut), tostring(okAdd)))
-                    local cIdx = portIdx
-                    ExecuteInGameThreadWithDelay(150, function()
-                        if not Core.IsValidObj(capM) then return end
-                        pcall(function()
-                            if capM.IsPortEnabled and capM:IsPortEnabled(cIdx) == true and capM.SetPortEnabled then
-                                capM:SetPortEnabled(cIdx, false)
-                            end
-                        end)
-                    end)
                 end
             end
         end)
@@ -3616,9 +3567,12 @@ local function CopySelectedMachines()
         })
     end
 
+    -- Deselect original machines once copied so pressing X after a misplaced paste won't mark originals for deletion
+    SelectedMachines = {}
+    SelectedGhosts = {}
     InteractionMode = "Paste"
     PendingRotationDeg = 0
-    UpdateStatusBanner()
+    RefreshSelectionLayer()
     RefreshDynamicOverlay()
 end
 
@@ -3891,8 +3845,14 @@ local function HandleMapLeftClick(mx, my, isShift)
             UpdateStatusBanner("Insufficient materials to paste group")
             return
         end
+        -- Select the newly pasted ghost group so pressing X immediately undoes a misplaced paste
+        SelectedMachines = {}
+        SelectedGhosts = {}
         for _, g in ipairs(staged) do
             table.insert(PendingGhosts, g)
+            if g.ghostId then
+                SelectedGhosts[g.ghostId] = g
+            end
         end
         UpdateActionBar()
         RefreshSelectionLayer()
@@ -5143,50 +5103,6 @@ function Feature.Init()
 end
 
 function Feature.RegisterHooks()
-    Core.TryRegisterHook(
-        "DMSPlayerController_AddInputCommand_Diag",
-        "/Script/MainSequence.DMSPlayerController:AddInputCommand",
-        function(Context, RecvIdParam, CmdObjParam)
-            pcall(function()
-                local cmd = CmdObjParam and CmdObjParam.get and CmdObjParam:get() or CmdObjParam
-                if Core.IsValidObj(cmd) then
-                    local cls = cmd:GetClass():GetFName():ToString()
-                    local low = cls:lower()
-                    if not low:find("movement", 1, true) and not low:find("view", 1, true)
-                        and not low:find("hotbar", 1, true) and not low:find("interact", 1, true)
-                    then
-                        local rid = RecvIdParam and RecvIdParam.get and RecvIdParam:get() or RecvIdParam
-                        local ridNum = tonumber(rid) or 0
-                        DumpObjectAllProperties("RecvInputCmd(recv=" .. tostring(rid) .. ")", cmd)
-                        -- If target is a Splitter or Belt Balancer, dump ALL its properties before and 150ms after!
-                        if ridNum > 0 then
-                            for _, sCls in ipairs({ "BP_SplitterObject_C", "BP_SplitterObject_2_C", "BP_SplitterObject_3_C", "BPO_BeltBalancer_01_C", "BPO_BeltBalancer_02_C", "BPO_BeltBalancer_03_C" }) do
-                                local okF, list = pcall(FindAllOf, sCls)
-                                if okF and list then
-                                    for _, obj in ipairs(list) do
-                                        if Core.IsValidObj(obj) then
-                                            local okId, oid = pcall(function() return tonumber(obj.ID) end)
-                                            if okId and oid == ridNum then
-                                                DumpObjectAllProperties("SplitterBefore", obj)
-                                                local capObj = obj
-                                                ExecuteInGameThreadWithDelay(150, function()
-                                                    if Core.IsValidObj(capObj) then
-                                                        DumpObjectAllProperties("SplitterAfter", capObj)
-                                                    end
-                                                end)
-                                                return
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-    )
-
     Core.TryRegisterHook(
         "DMSPlayerController_AddBuildMachineCommand_Diag",
         "/Script/MainSequence.DMSPlayerController:AddBuildMachineCommand",

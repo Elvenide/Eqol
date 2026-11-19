@@ -1,0 +1,184 @@
+# Main Sequence Modding Knowledge Base (`learning.md`)
+
+A living developer reference documenting verified *Main Sequence* internals, native RPCs, struct layouts, UE4SS quirks, crash triggers, and performance patterns discovered while building **Eqol**.
+
+> **Maintainer Rule**: Check this document before implementing or debugging *Main Sequence* features, and update it (along with the Table of Contents) whenever you discover a new verified behavior, stub, or pitfall.
+
+---
+
+## Table of Contents
+
+1. [Simulation Architecture & Coordinate Systems](#1-simulation-architecture--coordinate-systems)
+2. [Building & Disassembling Machines](#2-building--disassembling-machines)
+3. [Machine Configuration & `UInputCommand` System](#3-machine-configuration--uinputcommand-system)
+4. [Underground Belts](#4-underground-belts)
+5. [Station Geometry, Floors & Interior Walls](#5-station-geometry-floors--interior-walls)
+6. [Known Crashes, Empty Stubs & UE4SS Pitfalls](#6-known-crashes-empty-stubs--ue4ss-pitfalls)
+7. [UMG & Slate Performance Best Practices](#7-umg--slate-performance-best-practices)
+8. [HUD, Cursor & Input Patterns](#8-hud-cursor--input-patterns)
+9. [Binary Inspection Notes](#9-binary-inspection-notes)
+
+---
+
+## 1. Simulation Architecture & Coordinate Systems
+
+- **Deterministic Simulation (`DMSWorld`)**:
+  - *Main Sequence* runs a deterministic fixed-point simulation (`UDMSWorld` via `WorldSubsystem:GetDMSWorld()`) separate from Unreal Actors.
+  - Simulation objects (`UStationObject`, `UMachineObject`, `USplitterObject`, `UAssemblerObject`, `UConveyorBeltObject`, `UUndergroundBeltObject`, etc.) own an integer `ID` and optionally spawn a visual `Actor` (`m.Actor`).
+- **Fixed-Point Math (`PVector`, `PQuat`, `PFloat` / `PNum`)**:
+  - Unreal strips the `F` prefix in reflected `UScriptStruct:GetFName()`, so `FPVector` reports as `"PVector"` and `FPQuat` reports as `"PQuat"`.
+  - Each axis (`X`, `Y`, `Z`, `W`) is a nested struct with an `Int32` field `.Value` encoded in **Q16.16 fixed-point** (`real_value = Value / 65536.0`, `Value = math.floor(real_value * 65536.0 + 0.5)`).
+  - `ChunkLocation` is `FIntVector` (reflected name `"IntVector"`): plain integers `{ X, Y, Z }`.
+- **Units & Grid Scale**:
+  - **1 Station Grid Cell** = `100 cm` (`1.0 m`) visually on the station floor.
+  - **`Location` (`PVector`) on machines** is in **meters** (`stationLocalCm / 100.0`).
+  - **`GridTransform`** (`{ GridLocation = FIntPoint{X, Y}, Height = Int32, GridRotation = Int32 }`) uses **`50 cm` half-cell units** (`gridDiv = 50.0`, `heightDiv = 50.0`), relative to the **Station origin** (`UStationObject`), NOT relative to individual station block modules.
+    - Example: Floor 6 at `localZ = 4000 cm` has `Location.Z = 40.0` and `GridTransform.Height = 80` (`4000 / 50 = 80`).
+    - `GridRotation` is `0..3` in `90°` steps (`((math.floor(yawDeg / 90 + 0.5) % 4) + 4) % 4`).
+
+---
+
+## 2. Building & Disassembling Machines
+
+### Building: Use `AddBuildCommand` (NOT `AddBuildMachineCommand`!)
+- **`DMSPlayerController:AddBuildMachineCommand` IS AN EMPTY NO-OP STUB**:
+  - Disassembly of `execAddBuildMachineCommand` (`0x144286200`) proved it pops the `BuildMachineCommand` struct off the Blueprint stack and immediately returns without calling anything. Calling it returns `ok=true` from Lua while doing nothing.
+- **`DMSPlayerController:AddBuildCommand(FBuildCommand)` IS THE REAL BUILD ENTRY POINT**:
+  - Called by `UBuilder::ConfirmBuild` (`0x144319BF0`) at all 7 native build sites.
+  - Exact `FBuildCommand` struct fields:
+    - `Buildable` (`ObjectProperty`): `UBuildable*` (e.g. `DAT_Assembler`, `DAT_ConveyorBelt`).
+    - `Location` (`StructProperty:PVector`): Q16.16 fixed-point meters `{ X={Value=...}, Y={Value=...}, Z={Value=...} }`.
+    - `Quat` (`StructProperty:PQuat`): Q16.16 fixed-point quaternion `{ X={Value=...}, Y={Value=...}, Z={Value=...}, W={Value=...} }`.
+    - `ChunkLocation` (`StructProperty:IntVector`): integer chunk coords from `station.ChunkLocation`.
+    - `SolarSystemID` (`IntProperty`): from `station.SolarSystemID`.
+    - `AttachTargetID` (`IntProperty`): **`station.ID`** (the `UStationObject.ID`, NOT the sub-module block ID).
+    - `GridTransform` (`StructProperty:GridTransform`): `{ GridLocation = { X = gx, Y = gy }, Height = gz, GridRotation = rotSteps }`.
+    - `Config` (`IntProperty`): `0` for normal machines; **`lengthInCells + 1`** for underground belts (see [Underground Belts](#4-underground-belts)).
+    - `MachineConfigData` (`ArrayProperty`): omit to leave default-initialized empty `TArray`.
+  - Material consumption and placement validation are handled natively by the simulation.
+
+### Disassembling: `AddDisassembleCommand`
+- **`DMSPlayerController:AddDisassembleCommand(DisassembleTarget: IntProperty, bMassDisassemble: BoolProperty)`**:
+  - Pass `(machine.ID, false)` to disassemble a machine natively and automatically refund its build cost to the player's inventory.
+
+---
+
+## 3. Machine Configuration & `UInputCommand` System
+
+All deterministic machine configuration changes are submitted via **`DMSPlayerController:AddInputCommand`**, which takes **TWO** arguments:
+```lua
+pc:AddInputCommand(receiverMachineId, inputCommandObj)
+```
+> **Pitfall**: Calling `pc:AddInputCommand(cmdObj)` with 1 argument silently fails inside `pcall` due to parameter mismatch!
+
+### Verified `UInputCommand` Factories & Methods
+
+| Purpose | Class & Method | Call Pattern | Notes |
+| --- | --- | --- | --- |
+| **Assembler / Refinery Recipe** | `SetRecipeInput:CreateInputSetRecipe(InRecipe)` | Static on CDO `Default__SetRecipeInput` | Returns `USetRecipeInput*`. |
+| **Splitter / Balancer Filters** | `SetItemInput:CreateInputSetItem(InItemStack, InConfig)` | Static on CDO `Default__SetItemInput` | `InItemStack = { Item = itemObj, Count = 1 }`, `InConfig = 0-based port index`. Stored on machine in `m.Filters`. |
+| **Splitter / Balancer Priorities** | `SetConfigInput:CreateInputSetConfig2(InConfig, InConfig2, InPlayerObjectID)` | Static on CDO `Default__SetConfigInput` | **Verified live**: `InConfig = 0` sets **`PriorityOutputIndex = InConfig2`**; `InConfig = 1` sets **`PriorityInputIndex = InConfig2`**. |
+| **Disable / Enable Machine Ports** | `MachinePortInput:TogglePortEnabled(InPortIndex)` | **Void instance method!** | Construct fresh instance via `StaticConstructObject(MachinePortInputCls, pc)`, call `cmd:TogglePortEnabled(portIdx)` (sets `PortIndex` and `CommandType = 0x11`), then `pc:AddInputCommand(receiverId, cmd)`. **Do NOT call on CDO** (returns `nil`). |
+| **Working / Paused State** | `SetWorkingInput:CreateInputSetWorking(bInWorking)` | Static on CDO `Default__SetWorkingInput` | Returns `USetWorkingInput*`. |
+| **Logistic Filters** | `LogisticFilterInput:CreateInputLogisticFilter(InIndex, InItemStack, InAction, bInRemove)` | Static on CDO `Default__LogisticFilterInput` | Used for container/dock logistic filters. |
+
+### Reading Disabled Ports (`m.PortStates`)
+- `UMachineObject` stores port enabled states in **`m.PortStates`** (`TArray<bool>`), available on Splitters, Belt Balancers, Assemblers, Refineries, etc.
+- `UAssemblerObject:IsPortEnabled(PortIndex)` (`execIsPortEnabled` at `0x144214470`) simply bounds-checks `PortIndex < PortStates.ArrayNum` and returns `PortStates[PortIndex]`.
+- **Two Critical Pitfalls**:
+  1. **Never pass `PortStates[i]` through `Core.UnwrapArrayElem`**: `Core.UnwrapArrayElem` returns `nil` when a boolean value is `false`! Read `local val = m.PortStates[i]` directly and test `if val == false then ... end`.
+  2. **Never use the class CDO's `IsPortEnabled` as a default reference**: `PortStates` is empty on the CDO, so `cdo:IsPortEnabled(i)` always returns `false`.
+  3. **Timing**: When applying both a recipe and disabled ports to a newly built machine, delay `TogglePortEnabled` by ~`200ms` after `SetRecipeInput` so the machine's ports are initialized first.
+
+---
+
+## 4. Underground Belts
+
+- **Single Simulation Object**: An underground belt pair is **ONE single `BP_UndergroundBeltObject_C`** simulation object and actor!
+  - Both visual endpoints (`S_Underground_Belt_01` at local `(0, 0)` and `S_Underground_Belt_02` at local `(0, -dist)`) are mesh components on the same actor.
+- **Building with Exact Distance**:
+  - Submit **ONE** `AddBuildCommand` at the entrance position with `Config = math.floor(centerToCenterDistCm / 100.0 + 0.5) + 1`.
+  - Example: A gap of `2` empty cells between entrance and exit has a center-to-center distance of `3` cells (`300 cm`), so `Config = 3 + 1 = 4`. Sending `Config = 3` builds a gap of only `1` cell.
+  - Submitting two `AddBuildCommand`s (one per end) will spawn two separate underground belt pairs.
+
+---
+
+## 5. Station Geometry, Floors & Interior Walls
+
+- **Interior Walls & Doorways**:
+  - Read directly from `station:GetCollisionEnv().Colliders` via UE4SS `RegisterCustomProperty`.
+  - Each entry is a **28-byte `FCharacterCollider`**:
+    - `+0x00`: `FPVector Min` (3× Q16.16 int32 = 12 bytes)
+    - `+0x0C`: `FPVector Max` (3× Q16.16 int32 = 12 bytes)
+    - `+0x18`: `ColliderID` (int32 = 4 bytes)
+  - Scale factor to cm: `100.0 / 65536.0`.
+  - Merge collinear wall segments before rendering, and draw as a 2-pass continuous shape (expanded border pass at `Z=5`, opaque fill pass at `Z=6`) so adjacent wall segments merge seamlessly without internal seams.
+- **Walk-Through Collision Patching** (used by `splitter_balancer_tweaks.lua`):
+  - Setting `bColliderEnabled = false` on splitter/balancer simulation objects disables character collision while keeping `MachineBounds` / building placement intact.
+
+---
+
+## 6. Known Crashes, Empty Stubs & UE4SS Pitfalls
+
+### Guaranteed Crash Triggers (NEVER CALL THESE!)
+- **UE4SS `0x18` Access Violation Crashes**:
+  - `actor:GetActorRightVector()`
+  - `comp:IsVisible()`
+  - `comp.StaticMesh:GetFName()`
+  - `comp:K2_GetComponentLocation()` inside `GetPlatformWorldBounds`
+  - Reading `machine.InputMachines` or `machine.OutputMachines` directly in hot loops
+- **Other Fatal / Freeze Pitfalls**:
+  - **Reading `.Z` on `FIntPoint`**: Throws in UE4SS (`FIntPoint` only has `X` and `Y`).
+  - **Calling `ExecuteInGameThread` / `ExecuteInGameThreadAfterFrames` synchronously inside a `WBP_Button_C` click hook**: Causes hangs/freezes. Always defer heavy button actions with `ExecuteInGameThreadWithDelay(10, fn)`.
+  - **Setting `CurrentFloors[idx].machines = nil`**: Previously triggered a legacy world-coordinate fallback that generated 100k grid lines and froze the game.
+  - **Wiping `CachedFloorMap = nil` inside `InvalidateMachineCache()`**: Forces a ~470ms full platform + 853-wall-collider rebuild on the next map open. Only clear `CachedMachinesByFrame = {}` when refreshing machines.
+  - **Calling `DestroyStationMap()` from `WBP_WindowBase_C`'s `CloseWindow` delegate**: Destroys the cached window when clicking the `X` button; call `CloseStationMap()` instead and re-add `ActiveMapWin:AddToViewport(50)` on reopen if needed.
+
+### Empty / Dead Stubs
+- `DMSPlayerController:AddBuildMachineCommand` — Completely empty no-op stub (use `AddBuildCommand`).
+
+---
+
+## 7. UMG & Slate Performance Best Practices
+
+- **Cache UMG Classes (`StaticConstructObject`)**:
+  - Calling `Core.CreateRawWidget` (which calls `StaticFindObject` on every call) thousands of times is very slow. Cache `UClass*` pointers (`CachedBorderCls`, `CachedWidgetClasses[path]`) and construct directly via `StaticConstructObject(cls, outer)`.
+- **Minimize Widget Count Per Entity**:
+  - Slate's per-frame layout/paint cost scales directly with total UMG widget count.
+  - Example: Reducing item port badges from `13` `UBorder` widgets (12 dashes + fill) to `2` `UBorder` widgets cut Floor 1 port widgets from `4,654` to `716` (6.5× fewer!).
+  - Example: Drawing conveyors directly onto `MachineCanvas` with `4` `UBorder`s instead of a `CanvasPanel` + `6` borders cut conveyor widget count nearly in half.
+- **Separate Static vs. Dynamic Canvas Layers**:
+  - Keep static geometry (`MapCanvas` at `Z=0`: grid lines, module fills/outlines, walls) separate from dynamic geometry (`MachineCanvas` at `Z=1`: machines, conveyors, ports, player markers) and selection/ghosts (`SelectionCanvas` at `Z=2`, `GhostPreviewCanvas` at `Z=3`).
+  - Track widgets per machine (`RenderedMachineWidgets[mAddr]`) and per underground pair (`undergroundPairWidgets[pKey]`) so deletions and `Apply Changes` only touch changed machines without clearing or redrawing the whole floor.
+- **O(1) Ghost Group Dragging**:
+  - Place `GhostPreviewCanvas` inside `bgPanZoom` (base-canvas space). Build the ghost widgets **once** per clipboard/rotation signature, and on mouse move update only `GhostPreviewSlot:SetPosition({ X = bx, Y = by })` — 0 widget allocations per frame even for 200+ ghosts.
+- **Viewport-Driven Lazy Streaming (Never Unload)**:
+  - Start zoomed in around the player's position and only construct widgets for walls/machines that intersect the padded visible viewport (`~35%` / 6-cell margin), streaming within an `8–10ms/frame` budget. Once created, keep them permanently on the canvas so panning has zero pop-out or visual flicker.
+
+---
+
+## 8. HUD, Cursor & Input Patterns
+
+- **Custom Cursor Hotspot**:
+  - *Main Sequence*'s custom white arrow cursor has its platform/Slate mouse coordinate (`AbsoluteToLocal(geom, GetMousePositionOnPlatform())`) aligned near the **bottom-left** of the cursor graphic. Shifting `ly = ly - 15.0` (with `0px` X offset) aligns hover tooltips, clicks, and box-select with the exact **top-left tip**.
+- **In-Place HUD Version Text**:
+  - The bottom-right version string (e.g. `0.1.0.109s`) is a standard `UTextBlock` discoverable via `FindAllOf("TextBlock")` matching `^[vV]?%d+%.%d+%.%d+`.
+  - Editing it in-place with `tb:SetText(...)` and `tb.Slot:SetAutoSize(true)` preserves the exact vanilla font, size, color, and styling.
+- **Modifier Keybinds**:
+  - Use `RegisterKeyBind(Key.C, { ModifierKey.CONTROL }, ...)` for `Ctrl+C` (with `IsInputKeyDown("LeftControl"/"RightControl")` fallback).
+- **Widget Caching**:
+  - Hide reusable `WBP_WindowBase_C` windows with `SetVisibility(1)` (`Collapsed`) instead of destroying them for ~3ms reopens.
+
+---
+
+## 9. Binary Inspection Notes
+
+When reflection alone is ambiguous, `MainSequence-Win64-Shipping.exe` (PE64, `ImageBase = 0x140000000`) can be inspected directly:
+- **UE Reflection Table (`.rdata` around `0x7300000..0x73E0000`)**: Contains ASCII and UTF-16 `UClass` / `UScriptStruct` / `UFunction` / `FProperty` names and `FNativeFunctionLookup` tables pairing function name pointers with `exec*` native thunk VAs.
+- **Verified Native Addresses (v0.1.0.109s)**:
+  - `execAddBuildMachineCommand`: `0x144286200` (empty no-op stub)
+  - `execAddBuildCommand`: `0x144286080` -> `ADMSPlayerController::AddBuildCommand`: `0x1442A31B0`
+  - `UBuilder::ConfirmBuild`: `0x144319BF0` (calls `0x1442A31B0` at 7 sites)
+  - `execTogglePortEnabled`: `0x144255D20` (void instance method setting `+0x40 = InPortIndex`, `+0x28 = 0x11`)
+  - `execCreateInputSetConfig2`: `0x1442549C0` (`CommandType = 0x15`, `+0x40 = InConfig`, `+0x44 = InConfig2`, `+0x48 = InPlayerObjectID`)
+  - `execIsPortEnabled`: `0x144214470` (reads `PortStates` `TArray<bool>` at `+0x250`, `ArrayNum` at `+0x258`)
