@@ -150,8 +150,12 @@ local LastHadDynamicOverlay = false
 
 -- Selection, Ghosts, Build & Clipboard State
 local SelectedMachines = {}  -- mAddr -> entry
-local Clipboard = {}         -- { { buildable, dx, dy, yaw, recipe, cellsX, cellsY, actorClsPath, name }, ... }
-local PendingGhosts = {}     -- { { buildable, x, y, z, yaw, cellsX, cellsY, actorClsPath, recipe, name }, ... }
+local Clipboard = {}         -- { { buildable, dx, dy, yaw, recipe, machineConfig, cellsX, cellsY, actorClsPath, name }, ... }
+local ClipboardGen = 0
+local GhostPreviewSig = nil
+local InputCmdSigCache = {}
+local MachineConfigDiagLogged = {}
+local PendingGhosts = {}     -- { { buildable, x, y, z, yaw, cellsX, cellsY, actorClsPath, recipe, machineConfig, name }, ... }
 local InteractionMode = "Select" -- "Select" | "Place" | "Paste"
 local PendingBuildable = nil
 local PendingRotationDeg = 0
@@ -944,7 +948,317 @@ local function CheckMaterialsForPendingList(pc, list)
     return true, nil
 end
 
-local function IssueRemoteBuildMachine(pc, station, platform, platBounds, buildable, locX, locY, locZ, wx, wy, wz, yawDeg, recipe)
+local function CaptureMachineConfig(m)
+    if not Core.IsValidObj(m) then return nil end
+    local cfg = {}
+    local hasAny = false
+
+    local clsKey = ""
+    pcall(function() clsKey = m:GetClass():GetFName():ToString() end)
+
+    -- 1. Recipe (Assemblers, Refineries, Furnaces, etc.)
+    pcall(function()
+        local r = m.Recipe
+        if Core.IsValidObj(r) then
+            cfg.recipe = r
+            hasAny = true
+        end
+    end)
+
+    -- 2. Splitter / Belt Balancer priorities & generic numeric configs
+    pcall(function()
+        if m.PriorityInputIndex ~= nil and type(m.PriorityInputIndex) == "number" then
+            cfg.priorityInput = m.PriorityInputIndex
+            if cfg.priorityInput >= 0 then hasAny = true end
+        end
+    end)
+    pcall(function()
+        if m.PriorityOutputIndex ~= nil and type(m.PriorityOutputIndex) == "number" then
+            cfg.priorityOutput = m.PriorityOutputIndex
+            if cfg.priorityOutput >= 0 then hasAny = true end
+        end
+    end)
+    pcall(function()
+        if m.Config ~= nil and type(m.Config) == "number" then
+            cfg.config = m.Config
+            if cfg.config ~= 0 then hasAny = true end
+        end
+    end)
+    pcall(function()
+        if m.Config2 ~= nil and type(m.Config2) == "number" then
+            cfg.config2 = m.Config2
+            if cfg.config2 ~= 0 then hasAny = true end
+        end
+    end)
+
+    -- 3. Working / Paused state
+    pcall(function()
+        if type(m.bWorking) == "boolean" then
+            cfg.bWorking = m.bWorking
+            if not m.bWorking then hasAny = true end
+        end
+    end)
+
+    -- 4. Single item filter (if present)
+    pcall(function()
+        local fi = m.FilterItem
+        if not Core.IsValidObj(fi) then fi = m.ItemFilter end
+        if Core.IsValidObj(fi) then
+            cfg.filterItem = fi
+            hasAny = true
+        end
+    end)
+
+    -- 5. LogisticFilters array (Splitters, Belt Balancers, etc. - never touches inventory)
+    pcall(function()
+        local lf = m.LogisticFilters
+        if lf then
+            local len = lf.GetArrayNum and lf:GetArrayNum() or #lf
+            if type(len) == "number" and len > 0 then
+                cfg.logisticFilters = {}
+                for i = 1, len do
+                    local okE, elem = pcall(function() return lf[i] end)
+                    if okE and elem ~= nil then
+                        local entry = { idx = i - 1 }
+                        pcall(function()
+                            if Core.IsValidObj(elem.Item) then entry.item = elem.Item
+                            elseif Core.IsValidObj(elem.FilterItem) then entry.item = elem.FilterItem end
+                        end)
+                        pcall(function()
+                            if elem.PortIndex ~= nil then entry.portIndex = tonumber(elem.PortIndex)
+                            elseif elem.Port ~= nil then entry.portIndex = tonumber(elem.Port) end
+                        end)
+                        pcall(function()
+                            if elem.Action ~= nil then entry.action = tonumber(elem.Action)
+                            elseif elem.FilterAction ~= nil then entry.action = tonumber(elem.FilterAction) end
+                        end)
+                        pcall(function()
+                            if elem.Amount ~= nil then entry.amount = tonumber(elem.Amount)
+                            elseif elem.Count ~= nil then entry.amount = tonumber(elem.Count)
+                            elseif elem.Limit ~= nil then entry.amount = tonumber(elem.Limit) end
+                        end)
+                        entry.raw = elem
+                        table.insert(cfg.logisticFilters, entry)
+                        hasAny = true
+                    end
+                end
+            end
+        end
+    end)
+
+    -- One-time diagnostic per machine class to log reflected config fields (excluding inventory)
+    if clsKey ~= "" and not MachineConfigDiagLogged[clsKey] then
+        MachineConfigDiagLogged[clsKey] = true
+        local props = {}
+        pcall(function()
+            local c = m:GetClass()
+            local d = 0
+            while Core.IsValidObj(c) and d < 4 do
+                d = d + 1
+                if c.ForEachProperty then
+                    c:ForEachProperty(function(p)
+                        local pn = p:GetFName():ToString()
+                        local low = pn:lower()
+                        if (low:find("recipe", 1, true) or low:find("filter", 1, true) or low:find("priority", 1, true)
+                            or low:find("config", 1, true) or low:find("working", 1, true) or low:find("mode", 1, true))
+                            and not low:find("inventory", 1, true)
+                        then
+                            table.insert(props, pn)
+                        end
+                    end)
+                end
+                c = c.GetSuperStruct and c:GetSuperStruct() or nil
+            end
+        end)
+        Core.Log(string.format("[StationMap] CopyConfigDiag cls=%s hasAny=%s recipe=%s pIn=%s pOut=%s cfg=%s cfg2=%s lf=%d props=[%s]",
+            clsKey, tostring(hasAny),
+            Core.IsValidObj(cfg.recipe) and cfg.recipe:GetFName():ToString() or "nil",
+            tostring(cfg.priorityInput), tostring(cfg.priorityOutput),
+            tostring(cfg.config), tostring(cfg.config2),
+            cfg.logisticFilters and #cfg.logisticFilters or 0,
+            table.concat(props, ",")))
+    end
+
+    return hasAny and cfg or nil
+end
+
+local function GetPlayerObjectID(pc)
+    local pid = 0
+    if not Core.IsValidObj(pc) then return 0 end
+    pcall(function()
+        if pc.PlayerObjectID ~= nil then
+            pid = tonumber(pc.PlayerObjectID) or 0
+        elseif Core.IsValidObj(pc.PlayerObject) and pc.PlayerObject.ID ~= nil then
+            pid = tonumber(pc.PlayerObject.ID) or 0
+        end
+    end)
+    return pid
+end
+
+local function InvokeCreateInputCommand(pc, className, funcName, valMap)
+    if not Core.IsValidObj(pc) or not pc.AddInputCommand then return false end
+    local key = className .. ":" .. funcName
+    local sig = InputCmdSigCache[key]
+    if sig == nil then
+        local ufunc = StaticFindObject("/Script/MainSequence." .. className .. ":" .. funcName)
+        local cdo = StaticFindObject("/Script/MainSequence.Default__" .. className)
+        if not Core.IsValidObj(ufunc) or not Core.IsValidObj(cdo) then
+            InputCmdSigCache[key] = false
+            Core.Log("[StationMap] InputCmd not found: " .. key)
+            return false
+        end
+        sig = { cdo = cdo, params = {} }
+        local pNames = {}
+        pcall(function()
+            ufunc:ForEachProperty(function(prop)
+                local pn = prop:GetFName():ToString()
+                local pcName = ""
+                pcall(function() pcName = prop:GetClass():GetFName():ToString() end)
+                if pn ~= "ReturnValue" then
+                    table.insert(sig.params, { name = pn, cls = pcName })
+                    table.insert(pNames, pn .. ":" .. pcName)
+                end
+            end)
+        end)
+        InputCmdSigCache[key] = sig
+        Core.Log(string.format("[StationMap] InputCmdSig %s(%s)", key, table.concat(pNames, ", ")))
+    end
+    if not sig or not Core.IsValidObj(sig.cdo) then return false end
+
+    local args = {}
+    for _, p in ipairs(sig.params) do
+        local low = p.name:lower()
+        local cls = p.cls or ""
+        local v = nil
+        if low:find("receiver", 1, true) or low:find("machineid", 1, true) or low:find("target", 1, true) then
+            v = valMap.receiverId
+        elseif low:find("player", 1, true) then
+            v = valMap.playerObjId or 0
+        elseif low:find("recipe", 1, true) then
+            v = valMap.recipe
+        elseif low:find("config2", 1, true) then
+            v = valMap.config2
+        elseif low:find("config", 1, true) then
+            v = valMap.config
+        elseif low:find("working", 1, true) then
+            v = valMap.bWorking
+        elseif low:find("port", 1, true) then
+            v = valMap.portIndex
+        elseif low:find("remove", 1, true) then
+            v = valMap.bRemove == true
+        elseif low:find("action", 1, true) then
+            v = valMap.action or 0
+        elseif low:find("filter", 1, true) and cls:find("Struct", 1, true) then
+            v = valMap.filterStruct
+        elseif low:find("item", 1, true) or low:find("filter", 1, true) then
+            v = valMap.item
+        elseif low:find("amount", 1, true) or low:find("count", 1, true) or low:find("limit", 1, true) then
+            v = valMap.amount or 0
+        elseif cls:find("Bool", 1, true) then
+            v = false
+        elseif cls:find("Int", 1, true) then
+            v = 0
+        end
+        table.insert(args, v)
+    end
+
+    local okCall, cmdObj = pcall(function()
+        return sig.cdo[funcName](sig.cdo, table.unpack(args))
+    end)
+    if okCall and Core.IsValidObj(cmdObj) then
+        local okAdd = pcall(function() pc:AddInputCommand(cmdObj) end)
+        return okAdd
+    end
+    return false
+end
+
+local function ApplyMachineConfig(pc, targetMachine, cfg)
+    if not Core.IsValidObj(pc) or not Core.IsValidObj(targetMachine) or not cfg then return false end
+    local receiverId = 0
+    pcall(function() if targetMachine.ID ~= nil then receiverId = tonumber(targetMachine.ID) or 0 end end)
+    if receiverId == 0 then return false end
+
+    local playerObjId = GetPlayerObjectID(pc)
+    local applied = false
+
+    -- 1. Recipe (Assemblers, Refineries, etc.)
+    if Core.IsValidObj(cfg.recipe) then
+        if InvokeCreateInputCommand(pc, "SetRecipeInput", "CreateInputSetRecipe", {
+            receiverId = receiverId,
+            recipe = cfg.recipe,
+            playerObjId = playerObjId,
+        }) then
+            applied = true
+        end
+    end
+
+    -- 2. Splitter / Belt Balancer priorities & Config/Config2
+    local cfg1 = (cfg.priorityInput ~= nil) and cfg.priorityInput or cfg.config
+    local cfg2 = (cfg.priorityOutput ~= nil) and cfg.priorityOutput or cfg.config2
+    if cfg1 ~= nil and cfg1 ~= 0 and cfg1 ~= -1 then
+        if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig", {
+            receiverId = receiverId,
+            config = cfg1,
+            playerObjId = playerObjId,
+        }) then
+            applied = true
+        end
+    end
+    if cfg2 ~= nil and cfg2 ~= 0 and cfg2 ~= -1 then
+        if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
+            receiverId = receiverId,
+            config2 = cfg2,
+            config = cfg2,
+            playerObjId = playerObjId,
+        }) then
+            applied = true
+        end
+    end
+
+    -- 3. Single item filter
+    if Core.IsValidObj(cfg.filterItem) then
+        if InvokeCreateInputCommand(pc, "SetItemInput", "CreateInputSetItem", {
+            receiverId = receiverId,
+            item = cfg.filterItem,
+            playerObjId = playerObjId,
+        }) then
+            applied = true
+        end
+    end
+
+    -- 4. Logistic filters (Splitters / Belt Balancers / etc.)
+    if cfg.logisticFilters and #cfg.logisticFilters > 0 then
+        for _, lf in ipairs(cfg.logisticFilters) do
+            if InvokeCreateInputCommand(pc, "LogisticFilterInput", "CreateInputLogisticFilter", {
+                receiverId = receiverId,
+                portIndex = lf.portIndex or lf.idx or 0,
+                item = lf.item,
+                action = lf.action or 0,
+                amount = lf.amount or 0,
+                filterStruct = lf.raw,
+                bRemove = false,
+                playerObjId = playerObjId,
+            }) then
+                applied = true
+            end
+        end
+    end
+
+    -- 5. Working / Paused state (only send if paused)
+    if cfg.bWorking == false then
+        if InvokeCreateInputCommand(pc, "SetWorkingInput", "CreateInputSetWorking", {
+            receiverId = receiverId,
+            bWorking = false,
+            playerObjId = playerObjId,
+        }) then
+            applied = true
+        end
+    end
+
+    return applied
+end
+
+local function IssueRemoteBuildMachine(pc, station, platform, platBounds, buildable, locX, locY, locZ, wx, wy, wz, yawDeg, recipe, machineConfig)
     if not (Core.IsValidObj(pc) and Core.IsValidObj(buildable)) then
         return false, "Invalid controller or buildable"
     end
@@ -1036,7 +1350,7 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
                 Height = gz,
                 GridRotation = rotSteps,
             },
-            Config = 0,
+            Config = (machineConfig and machineConfig.config) or 0,
         }
         Core.Log(string.format("[StationMap] Calling AddBuildCommand(attachId=%d, sys=%d, chunk=(%.0f,%.0f,%.0f), loc=(%.2f,%.2f,%.2f), grid=(%d,%d), h=%d, rot=%d)",
             frameId, solarSysId, chunkX, chunkY, chunkZ, locX / 100.0, locY / 100.0, locZ / 100.0, gx, gy, gz, rotSteps))
@@ -1054,28 +1368,6 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
     if not cmdSuccess then
         Core.Log("[StationMap] IssueRemoteBuildMachine failed: " .. tostring(callErr))
         return false, callErr or "Build command failed (see UE4SS.log)"
-    end
-
-    if Core.IsValidObj(recipe) then
-        ExecuteInGameThreadWithDelay(250, function()
-            StationData.InvalidateCaches()
-            local machines = StationData.GetAllStationMachines(CurrentStation, { platform }, CurrentWalkFrame)
-            local bestM, bestDist = nil, 150.0
-            for _, m in ipairs(machines) do
-                if StationData.GetMachineCategory(m) == "Assembler" then
-                    local mx, my = StationData.GetMachineWorldPosAndYaw(m, platBounds)
-                    local d = math.sqrt((mx - wx) ^ 2 + (my - wy) ^ 2)
-                    if d < bestDist then
-                        bestDist = d
-                        bestM = m
-                    end
-                end
-            end
-            if Core.IsValidObj(bestM) then
-                pcall(function() bestM:SetRecipe(recipe) end)
-                pcall(function() pc:SetRecipe(bestM, recipe) end)
-            end
-        end)
     end
 
     return true, nil
@@ -1556,55 +1848,74 @@ RefreshDynamicOverlay = function()
     end
 
     -- 2. Cursor ghost previews (Place mode or repeatable Factorio-style Paste mode)
-    if (InteractionMode == "Place" or InteractionMode == "Paste")
+    -- Rendered ONCE into MapUI.GhostPreviewCanvas (inside bgPanZoom) and moved in O(1) via SetPosition on mouse move!
+    local showGhostPreview = (InteractionMode == "Place" or InteractionMode == "Paste")
         and MouseState.lastCursorMx and MouseState.lastCursorMy
         and MouseState.lastCursorMx >= 0 and MouseState.lastCursorMx <= ViewTransform.canvasW
         and MouseState.lastCursorMy >= 0 and MouseState.lastCursorMy <= ViewTransform.canvasH
-    then
+        and Core.IsValidObj(MapUI.GhostPreviewCanvas) and Core.IsValidObj(MapUI.GhostPreviewSlot)
+
+    if showGhostPreview then
         local wx, wy = CanvasToWorld(MouseState.lastCursorMx, MouseState.lastCursorMy)
-        local itemsToPreview = {}
+        local sig = nil
+        local anchorSx, anchorSy = wx, wy
+        local anchorValid = true
+
         if InteractionMode == "Place" and Core.IsValidObj(PendingBuildable) then
             local cx, cy = StationData.GetMachineFootprintCells(nil, PendingBuildable)
-            local clsKey = select(1, GetMachineClassKey(nil, PendingBuildable))
-            local sprite = RequestMachineSprite(clsKey, nil, "Other", PendingBuildable)
-            table.insert(itemsToPreview, {
-                buildable = PendingBuildable,
-                wx = wx, wy = wy,
-                yaw = PendingRotationDeg,
-                cellsX = cx, cellsY = cy,
-                sprite = sprite,
-            })
-        elseif InteractionMode == "Paste" and #Clipboard > 0 then
-            local rad = math.rad(PendingRotationDeg)
-            local cosA, sinA = math.cos(rad), math.sin(rad)
-            for _, item in ipairs(Clipboard) do
-                local rdx = item.dx * cosA - item.dy * sinA
-                local rdy = item.dx * sinA + item.dy * cosA
-                table.insert(itemsToPreview, {
-                    buildable = item.buildable,
-                    wx = wx + rdx, wy = wy + rdy,
-                    yaw = (item.yaw or 0.0) + PendingRotationDeg,
-                    cellsX = item.cellsX or 1,
-                    cellsY = item.cellsY or 1,
-                    sprite = item.sprite,
-                })
+            sig = string.format("Place:%s:%d", tostring(PendingBuildable:GetAddress()), PendingRotationDeg)
+            anchorSx, anchorSy = SnapWorldToMachineGrid(wx, wy, cx, cy, PendingRotationDeg)
+            anchorValid = IsPointOverAnyFloorModule(anchorSx, anchorSy, floor)
+                and (not IsFootprintBlockedByWall(anchorSx, anchorSy, cx, cy, PendingRotationDeg, floor))
+            if GhostPreviewSig ~= sig then
+                GhostPreviewSig = sig
+                ClearCanvasChildren(MapUI.GhostPreviewCanvas)
+                local clsKey = select(1, GetMachineClassKey(nil, PendingBuildable))
+                local sprite = RequestMachineSprite(clsKey, nil, "Other", PendingBuildable)
+                local rx, ry = GetRotatedCellDims(cx, cy, PendingRotationDeg)
+                local pxW = rx * BASE_CELL_PX
+                local pxH = ry * BASE_CELL_PX
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, 0.0, 0.0, pxW, pxH, PendingRotationDeg, "Other", sprite, true, true, 55, false)
+                RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, 0.0, 0.0, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
             end
+        elseif InteractionMode == "Paste" and #Clipboard > 0 then
+            sig = string.format("Paste:%d:%d", ClipboardGen, PendingRotationDeg)
+            anchorSx = SnapAxisToCellGrid(wx, ViewTransform.gridOriginX, 1)
+            anchorSy = SnapAxisToCellGrid(wy, ViewTransform.gridOriginY, 1)
+            if GhostPreviewSig ~= sig then
+                GhostPreviewSig = sig
+                ClearCanvasChildren(MapUI.GhostPreviewCanvas)
+                local rad = math.rad(PendingRotationDeg)
+                local cosA, sinA = math.cos(rad), math.sin(rad)
+                for _, item in ipairs(Clipboard) do
+                    local rdx = item.dx * cosA - item.dy * sinA
+                    local rdy = item.dx * sinA + item.dy * cosA
+                    local fYaw = (item.yaw or 0.0) + PendingRotationDeg
+                    local rx, ry = GetRotatedCellDims(item.cellsX or 1, item.cellsY or 1, fYaw)
+                    local pxW = rx * BASE_CELL_PX
+                    local pxH = ry * BASE_CELL_PX
+                    local offBx = rdx * BASE_PX_PER_CM
+                    local offBy = rdy * BASE_PX_PER_CM
+                    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, fYaw, "Other", item.sprite, true, true, 55, false)
+                    RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
+                end
+            end
+        else
+            showGhostPreview = false
         end
 
-        for _, gp in ipairs(itemsToPreview) do
-            local sx, sy = SnapWorldToMachineGrid(gp.wx, gp.wy, gp.cellsX, gp.cellsY, gp.yaw)
-            local gmx, gmy = WorldToCanvas(sx, sy)
-            local onMod = IsPointOverAnyFloorModule(sx, sy, floor)
-            local inWall = IsFootprintBlockedByWall(sx, sy, gp.cellsX, gp.cellsY, gp.yaw, floor)
-            local hasMat = PlayerHasBuildableMaterials(pc, gp.buildable, 1)
-            local valid = onMod and (not inWall) and hasMat
-            local rx, ry = GetRotatedCellDims(gp.cellsX, gp.cellsY, gp.yaw)
-            local pxW = rx * cellPx
-            local pxH = ry * cellPx
-
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.OverlayCanvas, gmx, gmy, pxW, pxH, gp.yaw, "Other", gp.sprite, true, valid, 55, false)
-            RenderBorderOutline(outer, MapUI.OverlayCanvas, gmx, gmy, pxW, pxH, 2.0, valid and COLORS.GhostBorderOk or COLORS.GhostBorderBad, 56)
+        if showGhostPreview then
+            local bx, by = WorldToBaseCanvas(anchorSx, anchorSy)
+            pcall(function()
+                MapUI.GhostPreviewSlot:SetPosition({ X = bx, Y = by })
+                MapUI.GhostPreviewCanvas:SetRenderOpacity(anchorValid and 0.90 or 0.40)
+                MapUI.GhostPreviewCanvas:SetVisibility(4)
+            end)
         end
+    end
+
+    if not showGhostPreview and Core.IsValidObj(MapUI.GhostPreviewCanvas) then
+        pcall(function() MapUI.GhostPreviewCanvas:SetVisibility(1) end)
     end
 
     -- 3. Hover tooltips: unconnected item port or conveyor carried item
@@ -1924,12 +2235,11 @@ RefreshStationMapCanvas = function(machinesOnly)
 
     MachineRenderGen = MachineRenderGen + 1
     local myMachineGen = MachineRenderGen
-    local deferredConveyors = {}
     local deferredPorts = {}
 
-    -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX (station-local coords only)
+    -- 3. Collect & stream ALL placed machines + ports progressively across frames (time-budgeted ~6ms/frame)
+    -- so large floors (e.g. 500+ machines) open instantaneously with zero freeze.
     local floorMachines = floor.machines or {}
-
     local presentAddrs = {}
     for _, me in ipairs(floorMachines) do
         if Core.IsValidObj(me.machine) then
@@ -1937,10 +2247,65 @@ RefreshStationMapCanvas = function(machinesOnly)
         end
     end
     local seenUndergroundPairs = {}
+    local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
+    local portHalfCm = 32.0
+    local portsByKey = {}
 
-    for _, me in ipairs(floorMachines) do
-        local m = me.machine
-        if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
+    -- Stream deferred minor grid lines and walls on static MapCanvas independently of machine refreshes
+    if #deferredGridLines > 0 or #deferredWalls > 0 then
+        local gIdx = 1
+        local wIdx = 1
+        local wallBorderPad = 11.0
+        local function pumpStaticBatch()
+            if myCanvasGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
+                return
+            end
+            local budgetEnd = os.clock() + 0.005
+            local addedGrid = false
+            local gCount = 0
+            while gIdx <= #deferredGridLines and (gCount < 8 or os.clock() < budgetEnd) and gCount < 48 do
+                local dg = deferredGridLines[gIdx]
+                local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
+                if line and s then
+                    table.insert(RenderedGridLines, {
+                        border = line,
+                        slot = s,
+                        isVertical = dg.isVertical,
+                        spanOther = dg.spanOther,
+                        isMajor4 = false,
+                        isMajor8 = false,
+                    })
+                    addedGrid = true
+                end
+                gIdx = gIdx + 1
+                gCount = gCount + 1
+            end
+            if addedGrid and gIdx > #deferredGridLines then
+                LastGridTier = nil
+                UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
+            end
+            local wCount = 0
+            while wIdx <= #deferredWalls and (wCount < 6 or os.clock() < budgetEnd) and wCount < 32 do
+                local dw = deferredWalls[wIdx]
+                AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
+                AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
+                wIdx = wIdx + 1
+                wCount = wCount + 1
+            end
+            if gIdx <= #deferredGridLines or wIdx <= #deferredWalls then
+                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+            end
+        end
+        ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+    end
+
+    -- Stream ALL machines (non-conveyors, conveyors, icons, underground links) and port badges within a 6ms/frame budget
+    if #floorMachines > 0 then
+        local mIdx = 1
+        local pIdx = 1
+        local function processOneMachine(me)
+            local m = me.machine
+            if not (Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m)) then return end
             local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
             local mx, my = WorldToBaseCanvas(mwx, mwy)
             local cat = StationData.GetMachineCategory(m)
@@ -1996,7 +2361,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             table.insert(RenderedMachines, recEntry)
             if cat == "Conveyor" then
                 table.insert(RenderedConveyors, recEntry)
-                table.insert(deferredConveyors, { x = mwx, y = mwy, mx = mx, my = my, pxW = pxW, pxH = pxH, myaw = myaw, sprite = sprite })
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, "Conveyor", sprite, false, true, 10, false)
             else
                 CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
             end
@@ -2021,7 +2386,6 @@ RefreshStationMapCanvas = function(machinesOnly)
                         local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
                         RenderDirectionChevron(outer, mCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
                     end
-                    -- Render second endpoint tile if the paired end wasn't already listed as a separate simulation object
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
                         CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
                         RenderDirectionChevron(outer, mCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
@@ -2111,124 +2475,58 @@ RefreshStationMapCanvas = function(machinesOnly)
                     end)
                 end
             end
-        end
-    end
 
-    -- 3b. Collect ALL machine item ports (2/3 inside machine, 1/3 outside, always displayed even when overlapping belts/objects)
-    local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
-    local portHalfCm = 32.0
-    local portsByKey = {}
-    for _, rm in ipairs(RenderedMachines) do
-        local cn = (rm.actorClsPath or ""):lower()
-        local isTransportOnly = (rm.cat == "Conveyor")
-            or cn:find("splitter", 1, true) or cn:find("balancer", 1, true)
-            or cn:find("merger", 1, true) or cn:find("underground", 1, true)
-        if not isTransportOnly and Core.IsValidObj(rm.machine) then
-            local ports = StationData.GetMachineItemPorts(rm.machine, rm.x, rm.y, rm.yaw, rm.cellsX, rm.cellsY, CurrentFrameXform)
-            for _, p in ipairs(ports) do
-                local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
-                local existing = portsByKey[cellKey]
-                if not existing then
-                    existing = {
-                        x = p.px,
-                        y = p.py,
-                        isInput = p.isInput == true,
-                        isOutput = p.isOutput == true,
-                        machineName = rm.displayName,
-                    }
-                    portsByKey[cellKey] = existing
-                else
-                    if p.isInput then existing.isInput = true end
-                    if p.isOutput then existing.isOutput = true end
+            -- Collect item ports for this machine (always displayed even when overlapping belts/objects)
+            local isTransportOnly = (cat == "Conveyor")
+                or clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true)
+                or clsLow:find("merger", 1, true) or clsLow:find("underground", 1, true)
+            if not isTransportOnly then
+                local ports = StationData.GetMachineItemPorts(m, mwx, mwy, myaw, cellsX, cellsY, CurrentFrameXform)
+                for _, p in ipairs(ports) do
+                    local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
+                    local existing = portsByKey[cellKey]
+                    if not existing then
+                        local pmx, pmy = WorldToBaseCanvas(p.px, p.py)
+                        existing = {
+                            idx = #RenderedPorts + 1,
+                            x = p.px,
+                            y = p.py,
+                            halfW = portHalfCm,
+                            halfH = portHalfCm,
+                            isInput = p.isInput == true,
+                            isOutput = p.isOutput == true,
+                            machineName = recEntry.displayName,
+                        }
+                        portsByKey[cellKey] = existing
+                        table.insert(RenderedPorts, existing)
+                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy })
+                    else
+                        if p.isInput then existing.isInput = true end
+                        if p.isOutput then existing.isOutput = true end
+                    end
                 end
             end
         end
-    end
-    for _, pe in pairs(portsByKey) do
-        local pmx, pmy = WorldToBaseCanvas(pe.x, pe.y)
-        table.insert(deferredPorts, { pmx = pmx, pmy = pmy })
-        table.insert(RenderedPorts, {
-            idx = #RenderedPorts + 1,
-            x = pe.x,
-            y = pe.y,
-            halfW = portHalfCm,
-            halfH = portHalfCm,
-            isInput = pe.isInput,
-            isOutput = pe.isOutput,
-            machineName = pe.machineName,
-        })
-    end
 
-    -- Stream deferred minor grid lines and walls on static MapCanvas independently of machine refreshes
-    if #deferredGridLines > 0 or #deferredWalls > 0 then
-        local gIdx = 1
-        local wIdx = 1
-        local GRID_PER_FRAME = 48
-        local WALLS_PER_FRAME = 32
-        local wallBorderPad = 11.0
-        local function pumpStaticBatch()
-            if myCanvasGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
-                return
-            end
-            local gEnd = math.min(#deferredGridLines, gIdx + GRID_PER_FRAME - 1)
-            local addedGrid = false
-            while gIdx <= gEnd do
-                local dg = deferredGridLines[gIdx]
-                local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
-                if line and s then
-                    table.insert(RenderedGridLines, {
-                        border = line,
-                        slot = s,
-                        isVertical = dg.isVertical,
-                        spanOther = dg.spanOther,
-                        isMajor4 = false,
-                        isMajor8 = false,
-                    })
-                    addedGrid = true
-                end
-                gIdx = gIdx + 1
-            end
-            if addedGrid and gIdx > #deferredGridLines then
-                LastGridTier = nil
-                UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
-            end
-            local wEnd = math.min(#deferredWalls, wIdx + WALLS_PER_FRAME - 1)
-            while wIdx <= wEnd do
-                local dw = deferredWalls[wIdx]
-                AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
-                AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
-                wIdx = wIdx + 1
-            end
-            if gIdx <= #deferredGridLines or wIdx <= #deferredWalls then
-                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
-            end
-        end
-        ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
-    end
-
-    -- Stream deferred conveyor tiles and port badges on dynamic MachineCanvas
-    if #deferredConveyors > 0 or #deferredPorts > 0 then
-        local cIdx = 1
-        local pIdx = 1
-        local CONV_PER_FRAME = 24
-        local PORTS_PER_FRAME = 12
         local function pumpMachineBatch()
             if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(mCanvas) then
                 return
             end
-            local cEnd = math.min(#deferredConveyors, cIdx + CONV_PER_FRAME - 1)
-            while cIdx <= cEnd do
-                local dc = deferredConveyors[cIdx]
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
-                cIdx = cIdx + 1
+            local budgetEnd = os.clock() + 0.006
+            local mCount = 0
+            while mIdx <= #floorMachines and (mCount < 2 or os.clock() < budgetEnd) and mCount < 28 do
+                processOneMachine(floorMachines[mIdx])
+                mIdx = mIdx + 1
+                mCount = mCount + 1
             end
-            local pEnd = math.min(#deferredPorts, pIdx + PORTS_PER_FRAME - 1)
-            while pIdx <= pEnd do
+            local pCount = 0
+            while pIdx <= #deferredPorts and (pCount < 4 or os.clock() < budgetEnd) and pCount < 20 do
                 local dp = deferredPorts[pIdx]
                 RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
                 pIdx = pIdx + 1
+                pCount = pCount + 1
             end
-            if cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
+            if mIdx <= #floorMachines or pIdx <= #deferredPorts then
                 ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             end
         end
@@ -2367,15 +2665,19 @@ local function CopySelectedMachines()
     local anchorX = SnapAxisToCellGrid(cx, ViewTransform.gridOriginX, 1)
     local anchorY = SnapAxisToCellGrid(cy, ViewTransform.gridOriginY, 1)
 
+    ClipboardGen = ClipboardGen + 1
+    GhostPreviewSig = nil
     for _, e in ipairs(list) do
         local cellsX = e.cellsX or 1
         local cellsY = e.cellsY or 1
+        local mCfg = CaptureMachineConfig(e.machine)
         table.insert(Clipboard, {
             buildable = e.buildable,
             dx = e.x - anchorX,
             dy = e.y - anchorY,
             yaw = e.yaw or 0.0,
             recipe = e.recipe,
+            machineConfig = mCfg,
             cellsX = cellsX,
             cellsY = cellsY,
             actorClsPath = e.actorClsPath,
@@ -2409,61 +2711,146 @@ local function CommitPendingGhosts()
     end
 
     ApplyInProgress = true
-    local builtCount = 0
-    local remaining = {}
-    local lastErr = nil
-
-    Core.Log(string.format("[StationMap] ApplyChanges starting for %d pending ghost(s)", #PendingGhosts))
-    for _, g in ipairs(PendingGhosts) do
-        local targetFloor = CurrentFloors[g.floorIdx] or CurrentFloors[SelectedFloorIdx]
-        local plat, pb = FindPlatformAtWorldXY(g.x, g.y, targetFloor)
-        local wx, wy, wz = StationData.StationLocalToWorld(CurrentFrameXform, g.x, g.y, g.z)
-        local ok, err = IssueRemoteBuildMachine(pc, CurrentStation, plat, pb, g.buildable, g.x, g.y, g.z, wx, wy, wz, g.yaw, g.recipe)
-        if ok then
-            builtCount = builtCount + 1
-        else
-            lastErr = err
-            table.insert(remaining, g)
-        end
-    end
-    ApplyInProgress = false
-
-    PendingGhosts = remaining
+    local queue = PendingGhosts
+    PendingGhosts = {}
     UpdateActionBar()
 
-    if builtCount > 0 then
-        UpdateStatusBanner(string.format("Applied %d placement(s)%s", builtCount, (#remaining > 0 and (" (" .. #remaining .. " failed)") or "")))
-        ExecuteInGameThreadWithDelay(300, function()
-            StationData.InvalidateMachineCache()
-            if Core.IsValidObj(CurrentStation) then
-                local pc2 = Core.GetLocalPlayerController()
-                local px2, py2, pz2 = nil, nil, nil
-                if Core.IsValidObj(pc2) then
-                    local pawn2 = pc2.Pawn
-                    if Core.IsValidObj(pawn2) then
-                        local okL, loc2 = pcall(function() return pawn2:K2_GetActorLocation() end)
-                        if okL and loc2 and type(loc2.X) == "number" then
-                            px2, py2, pz2 = loc2.X, loc2.Y or 0, loc2.Z or 0
+    local totalCount = #queue
+    local qIdx = 1
+    local builtCount = 0
+    local remaining = {}
+    local builtWithConfig = {}
+    local lastErr = nil
+    local BUILD_PER_FRAME = 4
+
+    Core.Log(string.format("[StationMap] ApplyChanges starting incrementally for %d pending ghost(s)", totalCount))
+    UpdateStatusBanner(string.format("Applying changes: 0 / %d...", totalCount))
+
+    local function finishApply()
+        ApplyInProgress = false
+        for _, rem in ipairs(remaining) do
+            table.insert(PendingGhosts, rem)
+        end
+        UpdateActionBar()
+
+        if builtCount > 0 then
+            UpdateStatusBanner(string.format("Applied %d placement(s)%s", builtCount, (#remaining > 0 and (" (" .. #remaining .. " failed)") or "")))
+            ExecuteInGameThreadWithDelay(350, function()
+                StationData.InvalidateMachineCache()
+                if Core.IsValidObj(CurrentStation) then
+                    local pc2 = Core.GetLocalPlayerController()
+                    local px2, py2, pz2 = nil, nil, nil
+                    if Core.IsValidObj(pc2) then
+                        local pawn2 = pc2.Pawn
+                        if Core.IsValidObj(pawn2) then
+                            local okL, loc2 = pcall(function() return pawn2:K2_GetActorLocation() end)
+                            if okL and loc2 and type(loc2.X) == "number" then
+                                px2, py2, pz2 = loc2.X, loc2.Y or 0, loc2.Z or 0
+                            end
                         end
                     end
+                    local newFloors, _, _, gox2, goy2, xform2 = StationData.BuildStationFloorMap(CurrentStation, CurrentWalkFrame, px2, py2, pz2)
+                    if newFloors and #newFloors > 0 then
+                        CurrentFloors = newFloors
+                        CurrentFrameXform = xform2
+                        if SelectedFloorIdx > #CurrentFloors then SelectedFloorIdx = #CurrentFloors end
+                        ViewTransform.gridOriginX = gox2 or ViewTransform.gridOriginX
+                        ViewTransform.gridOriginY = goy2 or ViewTransform.gridOriginY
+                    end
+
+                    -- Apply copied machine configs (recipes, splitter/balancer priorities & filters, etc. - never inventory)
+                    if #builtWithConfig > 0 and Core.IsValidObj(pc2) then
+                        local cfgIdx = 1
+                        local cfgApplied = 0
+                        local function pumpConfigBatch()
+                            local endIdx = math.min(#builtWithConfig, cfgIdx + 5)
+                            while cfgIdx <= endIdx do
+                                local item = builtWithConfig[cfgIdx]
+                                local fl = CurrentFloors[item.floorIdx] or CurrentFloors[SelectedFloorIdx]
+                                local bestM, bestD2 = nil, 45.0 * 45.0
+                                if fl and fl.machines then
+                                    for _, me in ipairs(fl.machines) do
+                                        if Core.IsValidObj(me.machine) then
+                                            local dx = (me.x or 0) - item.x
+                                            local dy = (me.y or 0) - item.y
+                                            local d2 = dx * dx + dy * dy
+                                            if d2 < bestD2 then
+                                                bestD2 = d2
+                                                bestM = me.machine
+                                            end
+                                        end
+                                    end
+                                end
+                                if Core.IsValidObj(bestM) then
+                                    if ApplyMachineConfig(pc2, bestM, item.machineConfig) then
+                                        cfgApplied = cfgApplied + 1
+                                    end
+                                end
+                                cfgIdx = cfgIdx + 1
+                            end
+                            if cfgIdx <= #builtWithConfig then
+                                ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
+                            else
+                                Core.Log(string.format("[StationMap] Applied machine configs to %d / %d configured machine(s)", cfgApplied, #builtWithConfig))
+                                if IsMapOpen() then
+                                    ExecuteInGameThreadWithDelay(150, function()
+                                        if IsMapOpen() then RefreshStationMapCanvas(true) end
+                                    end)
+                                end
+                            end
+                        end
+                        ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
+                    end
                 end
-                local newFloors, _, _, gox2, goy2, xform2 = StationData.BuildStationFloorMap(CurrentStation, CurrentWalkFrame, px2, py2, pz2)
-                if newFloors and #newFloors > 0 then
-                    CurrentFloors = newFloors
-                    CurrentFrameXform = xform2
-                    if SelectedFloorIdx > #CurrentFloors then SelectedFloorIdx = #CurrentFloors end
-                    ViewTransform.gridOriginX = gox2 or ViewTransform.gridOriginX
-                    ViewTransform.gridOriginY = goy2 or ViewTransform.gridOriginY
+                if IsMapOpen() then
+                    RefreshStationMapCanvas(true) -- Only refresh machines/ports; keep grid lines, modules, and walls intact
                 end
-            end
-            if IsMapOpen() then
-                RefreshStationMapCanvas(true) -- Only refresh machines/ports; keep grid lines, modules, and walls intact
-            end
-        end)
-    elseif lastErr then
-        UpdateStatusBanner("Apply failed: " .. tostring(lastErr))
-        RefreshSelectionLayer()
+            end)
+        elseif lastErr then
+            UpdateStatusBanner("Apply failed: " .. tostring(lastErr))
+            RefreshSelectionLayer()
+        end
     end
+
+    local function pumpBuildBatch()
+        local curPC = Core.GetLocalPlayerController()
+        if not Core.IsValidObj(curPC) or not Core.IsValidObj(CurrentStation) then
+            for i = qIdx, totalCount do table.insert(remaining, queue[i]) end
+            finishApply()
+            return
+        end
+        local endIdx = math.min(totalCount, qIdx + BUILD_PER_FRAME - 1)
+        while qIdx <= endIdx do
+            local g = queue[qIdx]
+            local targetFloor = CurrentFloors[g.floorIdx] or CurrentFloors[SelectedFloorIdx]
+            local plat, pb = FindPlatformAtWorldXY(g.x, g.y, targetFloor)
+            local wx, wy, wz = StationData.StationLocalToWorld(CurrentFrameXform, g.x, g.y, g.z)
+            local ok, err = IssueRemoteBuildMachine(curPC, CurrentStation, plat, pb, g.buildable, g.x, g.y, g.z, wx, wy, wz, g.yaw, g.recipe, g.machineConfig)
+            if ok then
+                builtCount = builtCount + 1
+                if g.machineConfig then
+                    table.insert(builtWithConfig, {
+                        floorIdx = g.floorIdx or SelectedFloorIdx,
+                        x = g.x, y = g.y, z = g.z,
+                        machineConfig = g.machineConfig,
+                    })
+                end
+            else
+                lastErr = err
+                table.insert(remaining, g)
+            end
+            qIdx = qIdx + 1
+        end
+
+        if qIdx <= totalCount then
+            UpdateStatusBanner(string.format("Applying changes: %d / %d...", builtCount, totalCount))
+            ExecuteInGameThreadAfterFrames(1, pumpBuildBatch)
+        else
+            finishApply()
+        end
+    end
+
+    ExecuteInGameThreadAfterFrames(1, pumpBuildBatch)
 end
 
 local function HandleMapLeftClick(mx, my, isShift)
@@ -2505,6 +2892,8 @@ local function HandleMapLeftClick(mx, my, isShift)
 
     if InteractionMode == "Paste" and #Clipboard > 0 then
         local pc = Core.GetLocalPlayerController()
+        local anchorSx = SnapAxisToCellGrid(wx, ViewTransform.gridOriginX, 1)
+        local anchorSy = SnapAxisToCellGrid(wy, ViewTransform.gridOriginY, 1)
         local rad = math.rad(PendingRotationDeg)
         local cosA, sinA = math.cos(rad), math.sin(rad)
         local staged = {}
@@ -2513,7 +2902,7 @@ local function HandleMapLeftClick(mx, my, isShift)
                 local rdx = item.dx * cosA - item.dy * sinA
                 local rdy = item.dx * sinA + item.dy * cosA
                 local finalYaw = (item.yaw or 0.0) + PendingRotationDeg
-                local sx, sy = SnapWorldToMachineGrid(wx + rdx, wy + rdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
+                local sx, sy = SnapWorldToMachineGrid(anchorSx + rdx, anchorSy + rdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
                 if IsPointOverAnyFloorModule(sx, sy, floor) and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor) then
                     table.insert(staged, {
                         buildable = item.buildable,
@@ -2525,6 +2914,7 @@ local function HandleMapLeftClick(mx, my, isShift)
                         actorClsPath = item.actorClsPath,
                         sprite = item.sprite,
                         recipe = item.recipe,
+                        machineConfig = item.machineConfig,
                     })
                 end
             end
@@ -3025,6 +3415,7 @@ end
 local function DestroyStationMap()
     CanvasRenderGen = CanvasRenderGen + 1
     MachineRenderGen = MachineRenderGen + 1
+    GhostPreviewSig = nil
     MapWinVisible = false
     MapWinInViewport = false
     InteractionMode = "Select"
@@ -3153,6 +3544,8 @@ local function OpenStationMap()
     local mapCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local machineCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local selectionCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local ghostPreviewCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local ghostPreviewSlot = nil
     local wheelScrollBox = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
     local wheelSpacer = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
     local iconPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
@@ -3207,6 +3600,18 @@ local function OpenStationMap()
             scSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
             scSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
             scSlot:SetZOrder(2)
+        end
+        if Core.IsValidObj(ghostPreviewCanvas) then
+            ghostPreviewCanvas:SetClipping(0)
+            ghostPreviewCanvas:SetVisibility(1) -- Collapsed until Place/Paste active
+            ghostPreviewSlot = bgPanZoom:AddChildToCanvas(ghostPreviewCanvas)
+            if Core.IsValidObj(ghostPreviewSlot) then
+                ghostPreviewSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.0, Y = 0.0 } })
+                ghostPreviewSlot:SetAlignment({ X = 0.0, Y = 0.0 })
+                ghostPreviewSlot:SetSize({ X = 0.0, Y = 0.0 })
+                ghostPreviewSlot:SetPosition({ X = 0.0, Y = 0.0 })
+                ghostPreviewSlot:SetZOrder(3)
+            end
         end
         local bpSlot = mapOverlay:AddChildToOverlay(bgPanZoom)
         if Core.IsValidObj(bpSlot) then
@@ -3450,6 +3855,8 @@ local function OpenStationMap()
         MapCanvas = mapCanvas,
         MachineCanvas = machineCanvas,
         SelectionCanvas = selectionCanvas,
+        GhostPreviewCanvas = ghostPreviewCanvas,
+        GhostPreviewSlot = ghostPreviewSlot,
         WheelScrollBox = wheelScrollBox,
         IconPanZoom = iconPanZoom,
         IconCanvas = iconCanvas,
