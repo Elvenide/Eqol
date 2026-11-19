@@ -81,13 +81,11 @@ local MapWinVisible = false
 local MapWinInViewport = false
 local MapUI = nil
 local CachedBorderCls = nil
-local EqolIssuingBuildCmd = false
 local CanvasRenderGen = 0
-local ViewportPending = nil -- { gen, outer, pc, portBadgePx, walls = {}, conveyors = {}, ports = {}, pumping = false }
-local PumpVisibleTiles = nil
 local BuildGridDivisor = 50.0
-local BuildHeightDivisor = 100.0
+local BuildHeightDivisor = 50.0
 local GridCalibrated = false
+local PrewarmScheduledForWorld = nil
 
 local ALIGN_CENTER = { X = 0.5, Y = 0.5 }
 local function AddBorderFast(outer, canvas, x, y, w, h, col, zOrder)
@@ -298,9 +296,6 @@ local function ApplyViewTransform()
         end
     end
     UpdateGridAppearanceForZoom(zoomRatio)
-    if PumpVisibleTiles then
-        PumpVisibleTiles(28)
-    end
 end
 
 local function CanvasToWorld(mx, my)
@@ -968,9 +963,7 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         if hasBuildable and populated >= 2 then
             Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(platId=%d [stationId=%d,subId=%d], grid=(%d,%d), h=%d, rot=%d, fields=%d)",
                 targetPlatId, frameId, platId, gx, gy, gz, rotSteps, populated))
-            EqolIssuingBuildCmd = true
             local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
-            EqolIssuingBuildCmd = false
             Core.Log(string.format("[StationMap] AddBuildMachineCommand returned ok=%s err=%s", tostring(okCmd), tostring(errCmd)))
             if okCmd then
                 cmdSuccess = true
@@ -1878,22 +1871,27 @@ RefreshStationMapCanvas = function()
         RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
     end
 
-    -- 2b. Queue structural module walls for viewport-culled 2-pass continuous rendering
-    CanvasRenderGen = CanvasRenderGen + 1
-    local myRenderGen = CanvasRenderGen
-    local pendingWalls = {}
+    -- 2b. Render structural module walls & interior partitions as a continuous 2-pass silhouette:
+    --     Pass 1 (Z=5): expanded 5.5px outer border matching ModuleBorder thickness
+    --     Pass 2 (Z=6): opaque high-contrast interior fill fusing all corners/T-junctions with zero internal seams
     if floor.walls and #floor.walls > 0 then
+        local wallBorderPad = 11.0 -- 5.5px border on each side
         for _, w in ipairs(floor.walls) do
             local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
             local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
             local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            table.insert(pendingWalls, {
-                minX = w.minX, maxX = w.maxX, minY = w.minY, maxY = w.maxY,
-                wx = wx, wy = wy, ww = ww, wh = wh,
-            })
+            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + wallBorderPad, wh + wallBorderPad, COLORS.WallBorder, 5)
+        end
+        for _, w in ipairs(floor.walls) do
+            local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
+            local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
+            local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
+            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + 1.0, wh + 1.0, COLORS.WallFill, 6)
         end
     end
 
+    CanvasRenderGen = CanvasRenderGen + 1
+    local myRenderGen = CanvasRenderGen
     local deferredConveyors = {}
     local deferredPorts = {}
 
@@ -2116,7 +2114,7 @@ RefreshStationMapCanvas = function()
     end
     for _, pe in pairs(portsByKey) do
         local pmx, pmy = WorldToBaseCanvas(pe.x, pe.y)
-        table.insert(deferredPorts, { x = pe.x, y = pe.y, pmx = pmx, pmy = pmy })
+        table.insert(deferredPorts, { pmx = pmx, pmy = pmy })
         table.insert(RenderedPorts, {
             idx = #RenderedPorts + 1,
             x = pe.x,
@@ -2129,106 +2127,34 @@ RefreshStationMapCanvas = function()
         })
     end
 
-    -- Viewport-culled lazy materializer: only construct UMG widgets for walls, conveyors, and ports visible on screen
-    ViewportPending = {
-        gen = myRenderGen,
-        outer = outer,
-        pc = pc,
-        portBadgePx = portBadgeBasePx,
-        walls = pendingWalls,
-        conveyors = deferredConveyors,
-        ports = deferredPorts,
-        pumping = false,
-    }
-
-    PumpVisibleTiles = function(budget)
-        local vp = ViewportPending
-        if not vp or vp.gen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
-            return
-        end
-        local halfW = (ViewTransform.canvasW * 0.5) / math.max(0.01, ViewTransform.scale) + 500.0
-        local halfH = (ViewTransform.canvasH * 0.5) / math.max(0.01, ViewTransform.scale) + 500.0
-        local vMinX, vMaxX = ViewTransform.cx - halfW, ViewTransform.cx + halfW
-        local vMinY, vMaxY = ViewTransform.cy - halfH, ViewTransform.cy + halfH
-
-        local spent = 0
-        local maxBudget = budget or 36
-        local hasMoreVisible = false
-        local wallBorderPad = 11.0
-
-        -- 1. Visible walls (2-pass seamless borders & fills)
-        local i = 1
-        while i <= #vp.walls do
-            local w = vp.walls[i]
-            if w.maxX >= vMinX and w.minX <= vMaxX and w.maxY >= vMinY and w.minY <= vMaxY then
-                if spent < maxBudget then
-                    AddBorderFast(vp.outer, MapUI.MapCanvas, w.wx, w.wy, w.ww + wallBorderPad, w.wh + wallBorderPad, COLORS.WallBorder, 5)
-                    AddBorderFast(vp.outer, MapUI.MapCanvas, w.wx, w.wy, w.ww + 1.0, w.wh + 1.0, COLORS.WallFill, 6)
-                    spent = spent + 2
-                    local last = #vp.walls
-                    vp.walls[i] = vp.walls[last]
-                    vp.walls[last] = nil
-                else
-                    hasMoreVisible = true
-                    break
-                end
-            else
-                i = i + 1
+    -- Stream deferred conveyor tiles and port badges progressively across frames to avoid open-map lag spikes
+    if #deferredConveyors > 0 or #deferredPorts > 0 then
+        local cIdx = 1
+        local pIdx = 1
+        local CONV_PER_FRAME = 24
+        local PORTS_PER_FRAME = 12
+        local function pumpDeferredBatch()
+            if myRenderGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
+                return
+            end
+            local cEnd = math.min(#deferredConveyors, cIdx + CONV_PER_FRAME - 1)
+            while cIdx <= cEnd do
+                local dc = deferredConveyors[cIdx]
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
+                cIdx = cIdx + 1
+            end
+            local pEnd = math.min(#deferredPorts, pIdx + PORTS_PER_FRAME - 1)
+            while pIdx <= pEnd do
+                local dp = deferredPorts[pIdx]
+                RenderUnconnectedItemPort(outer, MapUI.MapCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
+                pIdx = pIdx + 1
+            end
+            if cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
+                ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
             end
         end
-
-        -- 2. Visible conveyors
-        i = 1
-        while i <= #vp.conveyors do
-            local dc = vp.conveyors[i]
-            if dc.x >= vMinX and dc.x <= vMaxX and dc.y >= vMinY and dc.y <= vMaxY then
-                if spent < maxBudget then
-                    CreateMachineVisualWidget(MapUI.Window, vp.pc, vp.outer, MapUI.MapCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
-                    spent = spent + 3
-                    local last = #vp.conveyors
-                    vp.conveyors[i] = vp.conveyors[last]
-                    vp.conveyors[last] = nil
-                else
-                    hasMoreVisible = true
-                    break
-                end
-            else
-                i = i + 1
-            end
-        end
-
-        -- 3. Visible ports
-        i = 1
-        while i <= #vp.ports do
-            local dp = vp.ports[i]
-            if dp.x >= vMinX and dp.x <= vMaxX and dp.y >= vMinY and dp.y <= vMaxY then
-                if spent < maxBudget then
-                    RenderUnconnectedItemPort(vp.outer, MapUI.MapCanvas, dp.pmx, dp.pmy, vp.portBadgePx, 22)
-                    spent = spent + 4
-                    local last = #vp.ports
-                    vp.ports[i] = vp.ports[last]
-                    vp.ports[last] = nil
-                else
-                    hasMoreVisible = true
-                    break
-                end
-            else
-                i = i + 1
-            end
-        end
-
-        if hasMoreVisible and not vp.pumping then
-            vp.pumping = true
-            ExecuteInGameThreadAfterFrames(1, function()
-                if ViewportPending == vp then
-                    vp.pumping = false
-                    PumpVisibleTiles(32)
-                end
-            end)
-        end
+        ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
     end
-
-    PumpVisibleTiles(42)
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
     local allPlayers = StationData.GetAllPlayersInfo(pc)
@@ -3019,7 +2945,6 @@ end
 
 local function DestroyStationMap()
     CanvasRenderGen = CanvasRenderGen + 1
-    ViewportPending = nil
     MapWinVisible = false
     MapWinInViewport = false
     InteractionMode = "Select"
@@ -3609,7 +3534,6 @@ function Feature.RegisterHooks()
         "DMSPlayerController_AddBuildMachineCommand_Diag",
         "/Script/MainSequence.DMSPlayerController:AddBuildMachineCommand",
         function(Context, CmdParam)
-            if EqolIssuingBuildCmd then return end
             pcall(function()
                 local st = Core.UnwrapStruct(CmdParam) or (CmdParam and CmdParam.get and CmdParam:get()) or CmdParam
                 if st then
@@ -3618,8 +3542,22 @@ function Feature.RegisterHooks()
                         gx, gy = tostring(st.GridLocation.X), tostring(st.GridLocation.Y)
                     end
                     local bName = Core.IsValidObj(st.Buildable) and st.Buildable:GetFName():ToString() or "nil"
-                    Core.Log(string.format("[StationMap] GameBuildCmd: platId=%s grid=(%s,%s) h=%s rot=%s cfg=%s bld=%s",
+                    Core.Log(string.format("[StationMap] RecvBuildCmd: platId=%s grid=(%s,%s) h=%s rot=%s cfg=%s bld=%s",
                         tostring(st.PlatformID), gx, gy, tostring(st.Height), tostring(st.Rotation), tostring(st.Config), bName))
+                end
+            end)
+        end
+    )
+
+    Core.TryRegisterHook(
+        "DMSPlayerController_SetBuildError_Diag",
+        "/Script/MainSequence.DMSPlayerController:SetBuildError",
+        function(Context, ErrParam)
+            pcall(function()
+                local eVal = Core.UnwrapArrayElem(ErrParam)
+                local eStr = (eVal and eVal.ToString and eVal:ToString()) or tostring(eVal)
+                if eStr and eStr ~= "" then
+                    Core.Log("[StationMap] BuildError: " .. eStr)
                 end
             end)
         end
@@ -3661,23 +3599,45 @@ function Feature.RegisterHooks()
     )
 end
 
+local function ScheduleStationPrewarm()
+    local curWorld = GetCurrentWorldAddr()
+    if not curWorld or PrewarmScheduledForWorld == curWorld then return end
+    PrewarmScheduledForWorld = curWorld
+    ExecuteInGameThreadWithDelay(2500, function()
+        if GetCurrentWorldAddr() ~= curWorld or IsMapOpen() then return end
+        local pc = Core.GetLocalPlayerController()
+        if not Core.IsValidObj(pc) then return end
+        local inStation, walkFrame, station = StationData.IsPlayerInStation(pc)
+        if inStation and Core.IsValidObj(station) then
+            local t0 = os.clock()
+            StationData.BuildStationFloorMap(station, walkFrame, nil, nil, nil)
+            InspectBuildMachineCommandLayout()
+            Core.Log(string.format("[StationMap] Prewarmed station caches in %.0fms", (os.clock() - t0) * 1000.0))
+        end
+    end)
+end
+
 function Feature.OnClientRestart()
     local curWorld = GetCurrentWorldAddr()
     if curWorld == nil or curWorld ~= LastWorldAddr then
         LastWorldAddr = curWorld
+        PrewarmScheduledForWorld = nil
         if Core.IsValidObj(ActiveMapWin) then DestroyStationMap() end
         ResetSpriteCache()
         PendingGhosts = {}
         Clipboard = {}
     end
+    ScheduleStationPrewarm()
 end
 
 function Feature.OnMapLoad()
     LastWorldAddr = GetCurrentWorldAddr()
+    PrewarmScheduledForWorld = nil
     if Core.IsValidObj(ActiveMapWin) then DestroyStationMap() end
     ResetSpriteCache()
     PendingGhosts = {}
     Clipboard = {}
+    ScheduleStationPrewarm()
 end
 
 function Feature.PruneCaches()
