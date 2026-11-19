@@ -82,6 +82,7 @@ local MapWinInViewport = false
 local MapUI = nil
 local CachedBorderCls = nil
 local CanvasRenderGen = 0
+local MachineRenderGen = 0
 local BuildGridDivisor = 50.0
 local BuildHeightDivisor = 50.0
 local GridCalibrated = false
@@ -573,8 +574,52 @@ end
 --------------------------------------------------------------------------------
 
 local CachedBuildCmdLayout = nil
+local CachedAddBuildCmdLayout = nil
 local BuildCmdSigLogged = false
 local ApplyInProgress = false
+
+local function InspectAddBuildCommandLayout()
+    if CachedAddBuildCmdLayout ~= nil then
+        return CachedAddBuildCmdLayout or nil
+    end
+    local ufunc = StaticFindObject("/Script/MainSequence.DMSPlayerController:AddBuildCommand")
+    if not Core.IsValidObj(ufunc) then
+        CachedAddBuildCmdLayout = false
+        return nil
+    end
+    local info = { fields = {}, fieldStructs = {} }
+    local parts = {}
+    pcall(function()
+        ufunc:ForEachProperty(function(p)
+            local pn = p:GetFName():ToString()
+            local pc2 = ""
+            pcall(function() pc2 = p:GetClass():GetFName():ToString() end)
+            if pn ~= "ReturnValue" and pc2 == "StructProperty" and p.GetStruct then
+                local okS, st = pcall(function() return p:GetStruct() end)
+                if okS and Core.IsValidObj(st) and st.ForEachProperty then
+                    st:ForEachProperty(function(fp)
+                        local fn = fp:GetFName():ToString()
+                        local fc = ""
+                        pcall(function() fc = fp:GetClass():GetFName():ToString() end)
+                        info.fields[fn] = fc
+                        local sub = ""
+                        if fc == "StructProperty" and fp.GetStruct then
+                            local okFS, fst = pcall(function() return fp:GetStruct() end)
+                            if okFS and Core.IsValidObj(fst) then
+                                pcall(function() sub = fst:GetFName():ToString() end)
+                                if sub ~= "" then info.fieldStructs[fn] = sub end
+                            end
+                        end
+                        table.insert(parts, fn .. ":" .. fc .. (sub ~= "" and ("(" .. sub .. ")") or ""))
+                    end)
+                end
+            end
+        end)
+    end)
+    Core.Log("[StationMap] AddBuildCmdInner: [" .. table.concat(parts, ", ") .. "]")
+    CachedAddBuildCmdLayout = info
+    return info
+end
 
 local function InspectBuildMachineCommandLayout()
     if CachedBuildCmdLayout ~= nil then
@@ -948,7 +993,61 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
     local cmdSuccess = false
     local callErr = nil
 
-    if #layout.params == 1 and layout.params[1].fields then
+    -- Primary path: DMSPlayerController:AddBuildCommand(BuildCommand) matching station machine GridTransform/Location/ChunkLocation
+    local addBuildLayout = InspectAddBuildCommandLayout()
+    if addBuildLayout and addBuildLayout.fields and addBuildLayout.fields["Buildable"] and pc.AddBuildCommand then
+        local fs = addBuildLayout.fieldStructs or {}
+        local function makeFP(v) return { Value = math.floor(v * 65536.0 + 0.5) } end
+        local function makeVec(sName, x, y, z)
+            local low = (sName or ""):lower()
+            if low:find("fp", 1, true) or low:find("fixed", 1, true) then
+                return { X = makeFP(x), Y = makeFP(y), Z = makeFP(z) }
+            end
+            return { X = x, Y = y, Z = z }
+        end
+        local function makeQuat(sName, x, y, z, w)
+            local low = (sName or ""):lower()
+            if low:find("fp", 1, true) or low:find("fixed", 1, true) then
+                return { X = makeFP(x), Y = makeFP(y), Z = makeFP(z), W = makeFP(w) }
+            end
+            return { X = x, Y = y, Z = z, W = w }
+        end
+
+        local solarSysId = 0
+        local chunkX, chunkY, chunkZ = 0.0, 0.0, 0.0
+        pcall(function()
+            if targetFrame.SolarSystemID ~= nil then solarSysId = tonumber(targetFrame.SolarSystemID) or 0 end
+            if targetFrame.ChunkLocation then
+                chunkX, chunkY, chunkZ = Core.GetFPVector(targetFrame.ChunkLocation)
+            end
+        end)
+
+        local bCmd = {
+            Buildable = buildable,
+            Location = makeVec(fs["Location"], locX / 100.0, locY / 100.0, locZ / 100.0),
+            Quat = makeQuat(fs["Quat"], quat.X, quat.Y, quat.Z, quat.W),
+            ChunkLocation = makeVec(fs["ChunkLocation"], chunkX, chunkY, chunkZ),
+            SolarSystemID = solarSysId,
+            AttachTargetID = frameId,
+            GridTransform = {
+                GridLocation = { X = gx, Y = gy },
+                Height = gz,
+                GridRotation = rotSteps,
+            },
+            Config = 0,
+        }
+        Core.Log(string.format("[StationMap] Calling AddBuildCommand(attachId=%d, sys=%d, chunk=(%.0f,%.0f,%.0f), grid=(%d,%d), h=%d, rot=%d)",
+            frameId, solarSysId, chunkX, chunkY, chunkZ, gx, gy, gz, rotSteps))
+        local okCmd, errCmd = pcall(function() pc:AddBuildCommand(bCmd) end)
+        Core.Log(string.format("[StationMap] AddBuildCommand returned ok=%s err=%s", tostring(okCmd), tostring(errCmd)))
+        if okCmd then
+            cmdSuccess = true
+        else
+            callErr = tostring(errCmd)
+        end
+    end
+
+    if not cmdSuccess and #layout.params == 1 and layout.params[1].fields then
         -- Single struct command parameter (BuildMachineCommand): populate fields strictly by reflected type
         local cmd = {}
         local fields = layout.params[1].fields
@@ -1763,23 +1862,32 @@ local function RefreshSelectionLayer()
     UpdateStatusBanner()
 end
 
-RefreshStationMapCanvas = function()
+RefreshStationMapCanvas = function(machinesOnly)
     if not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then return end
 
-    MeasureMapCanvasSize()
-    if not ViewTransform.hasFitted then
-        FitViewTransformToFloor()
+    local mCanvas = Core.IsValidObj(MapUI.MachineCanvas) and MapUI.MachineCanvas or MapUI.MapCanvas
+    if mCanvas == MapUI.MapCanvas then
+        machinesOnly = false
     end
 
-    ClearCanvasChildren(MapUI.MapCanvas)
+    if not machinesOnly then
+        MeasureMapCanvasSize()
+        if not ViewTransform.hasFitted then
+            FitViewTransformToFloor()
+        end
+        ClearCanvasChildren(MapUI.MapCanvas)
+        RenderedGridLines = {}
+        LastGridTier = nil
+        LastGridZoomRatio = nil
+    end
+
+    ClearCanvasChildren(mCanvas)
     ClearCanvasChildren(MapUI.SelectionCanvas)
     ClearCanvasChildren(MapUI.IconCanvas)
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
-    RenderedGridLines = {}
-    LastGridTier = nil
-    LastGridZoomRatio = nil
+    LastHoveredPortIdx = nil
     FloorIconButtons = {}
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -1794,140 +1902,147 @@ RefreshStationMapCanvas = function()
     local pc = MapUI.PC
     local cellPx = BASE_CELL_PX
 
-    -- Compute generous world bounds covering ALL station modules AND all floor machines so grid never cuts off
-    local bMinX, bMaxX, bMinY, bMaxY = math.huge, -math.huge, math.huge, -math.huge
-    for _, pe in ipairs(floor.platforms) do
-        local b = pe.bounds
-        if b.cx - b.ex < bMinX then bMinX = b.cx - b.ex end
-        if b.cx + b.ex > bMaxX then bMaxX = b.cx + b.ex end
-        if b.cy - b.ey < bMinY then bMinY = b.cy - b.ey end
-        if b.cy + b.ey > bMaxY then bMaxY = b.cy + b.ey end
-    end
-    if floor.machines then
-        for _, me in ipairs(floor.machines) do
-            if me.x - 400.0 < bMinX then bMinX = me.x - 400.0 end
-            if me.x + 400.0 > bMaxX then bMaxX = me.x + 400.0 end
-            if me.y - 400.0 < bMinY then bMinY = me.y - 400.0 end
-            if me.y + 400.0 > bMaxY then bMaxY = me.y + 400.0 end
-        end
-    end
-    local padCm = 400.0
-    local minCol = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM)
-    local maxCol = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM)
-    local minRow = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM)
-    local maxRow = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM)
-    -- Expand narrow axis symmetrically so tall or wide stations still show a balanced square field
-    if (maxCol - minCol) < 48 then
-        local extra = math.ceil((48 - (maxCol - minCol)) * 0.5)
-        minCol = minCol - extra
-        maxCol = maxCol + extra
-    end
-    if (maxRow - minRow) < 40 then
-        local extra = math.ceil((40 - (maxRow - minRow)) * 0.5)
-        minRow = minRow - extra
-        maxRow = maxRow + extra
-    end
-    -- Align grid range to multiples of 8 so 4x4 and 8x8 zoom-out squares stay symmetrical
-    minCol = math.floor(minCol / 8) * 8
-    maxCol = math.ceil(maxCol / 8) * 8
-    minRow = math.floor(minRow / 8) * 8
-    maxRow = math.ceil(maxRow / 8) * 8
-
-    local totalCols = maxCol - minCol
-    local totalRows = maxRow - minRow
-    local maxDim = math.max(totalCols, totalRows)
-    local stepCells = 1
-    if maxDim > 480 then
-        stepCells = 4
-    elseif maxDim > 240 then
-        stepCells = 2
-    end
-
-    local gridMinX = ViewTransform.gridOriginX + minCol * CELL_CM
-    local gridMaxX = ViewTransform.gridOriginX + maxCol * CELL_CM
-    local gridMinY = ViewTransform.gridOriginY + minRow * CELL_CM
-    local gridMaxY = ViewTransform.gridOriginY + maxRow * CELL_CM
-
-    local bGridMinX, bGridMinY = WorldToBaseCanvas(gridMinX, gridMinY)
-    local bGridMaxX, bGridMaxY = WorldToBaseCanvas(gridMaxX, gridMaxY)
-    local gridSpanW = math.max(100.0, bGridMaxX - bGridMinX)
-    local gridSpanH = math.max(100.0, bGridMaxY - bGridMinY)
-    local gridMidX = (bGridMinX + bGridMaxX) * 0.5
-    local gridMidY = (bGridMinY + bGridMaxY) * 0.5
-
     local deferredGridLines = {}
-    local function addGridAxisLines(startIdx, endIdx, isVertical, spanOther, midOther)
-        local maxLines = 260
-        local drawn = 0
-        local originAxis = isVertical and ViewTransform.gridOriginX or ViewTransform.gridOriginY
-        for idx = startIdx, endIdx, stepCells do
-            drawn = drawn + 1
-            if drawn > maxLines then break end
-            local wPos = originAxis + idx * CELL_CM
-            local bx, by = WorldToBaseCanvas(isVertical and wPos or 0.0, isVertical and 0.0 or wPos)
-            local posX = isVertical and bx or midOther
-            local posY = isVertical and midOther or by
-            local isMajor4 = ((idx % 4) == 0)
-            local isMajor8 = ((idx % 8) == 0)
-            local initThick = isMajor4 and 2.2 or 1.4
-            if isMajor4 then
-                local line, s = AddBorderFast(
-                    outer, MapUI.MapCanvas, posX, posY,
-                    isVertical and initThick or spanOther,
-                    isVertical and spanOther or initThick,
-                    COLORS.GridMajor, 3
-                )
-                if line and s then
-                    table.insert(RenderedGridLines, {
-                        border = line,
-                        slot = s,
+    local deferredWalls = {}
+    local myCanvasGen = CanvasRenderGen
+
+    if not machinesOnly then
+        CanvasRenderGen = CanvasRenderGen + 1
+        myCanvasGen = CanvasRenderGen
+
+        -- Compute generous world bounds covering ALL station modules AND all floor machines so grid never cuts off
+        local bMinX, bMaxX, bMinY, bMaxY = math.huge, -math.huge, math.huge, -math.huge
+        for _, pe in ipairs(floor.platforms) do
+            local b = pe.bounds
+            if b.cx - b.ex < bMinX then bMinX = b.cx - b.ex end
+            if b.cx + b.ex > bMaxX then bMaxX = b.cx + b.ex end
+            if b.cy - b.ey < bMinY then bMinY = b.cy - b.ey end
+            if b.cy + b.ey > bMaxY then bMaxY = b.cy + b.ey end
+        end
+        if floor.machines then
+            for _, me in ipairs(floor.machines) do
+                if me.x - 400.0 < bMinX then bMinX = me.x - 400.0 end
+                if me.x + 400.0 > bMaxX then bMaxX = me.x + 400.0 end
+                if me.y - 400.0 < bMinY then bMinY = me.y - 400.0 end
+                if me.y + 400.0 > bMaxY then bMaxY = me.y + 400.0 end
+            end
+        end
+        local padCm = 400.0
+        local minCol = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM)
+        local maxCol = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM)
+        local minRow = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM)
+        local maxRow = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM)
+        -- Expand narrow axis symmetrically so tall or wide stations still show a balanced square field
+        if (maxCol - minCol) < 48 then
+            local extra = math.ceil((48 - (maxCol - minCol)) * 0.5)
+            minCol = minCol - extra
+            maxCol = maxCol + extra
+        end
+        if (maxRow - minRow) < 40 then
+            local extra = math.ceil((40 - (maxRow - minRow)) * 0.5)
+            minRow = minRow - extra
+            maxRow = maxRow + extra
+        end
+        -- Align grid range to multiples of 8 so 4x4 and 8x8 zoom-out squares stay symmetrical
+        minCol = math.floor(minCol / 8) * 8
+        maxCol = math.ceil(maxCol / 8) * 8
+        minRow = math.floor(minRow / 8) * 8
+        maxRow = math.ceil(maxRow / 8) * 8
+
+        local totalCols = maxCol - minCol
+        local totalRows = maxRow - minRow
+        local maxDim = math.max(totalCols, totalRows)
+        local stepCells = 1
+        if maxDim > 480 then
+            stepCells = 4
+        elseif maxDim > 240 then
+            stepCells = 2
+        end
+
+        local gridMinX = ViewTransform.gridOriginX + minCol * CELL_CM
+        local gridMaxX = ViewTransform.gridOriginX + maxCol * CELL_CM
+        local gridMinY = ViewTransform.gridOriginY + minRow * CELL_CM
+        local gridMaxY = ViewTransform.gridOriginY + maxRow * CELL_CM
+
+        local bGridMinX, bGridMinY = WorldToBaseCanvas(gridMinX, gridMinY)
+        local bGridMaxX, bGridMaxY = WorldToBaseCanvas(gridMaxX, gridMaxY)
+        local gridSpanW = math.max(100.0, bGridMaxX - bGridMinX)
+        local gridSpanH = math.max(100.0, bGridMaxY - bGridMinY)
+        local gridMidX = (bGridMinX + bGridMaxX) * 0.5
+        local gridMidY = (bGridMinY + bGridMaxY) * 0.5
+
+        local function addGridAxisLines(startIdx, endIdx, isVertical, spanOther, midOther)
+            local maxLines = 260
+            local drawn = 0
+            local originAxis = isVertical and ViewTransform.gridOriginX or ViewTransform.gridOriginY
+            for idx = startIdx, endIdx, stepCells do
+                drawn = drawn + 1
+                if drawn > maxLines then break end
+                local wPos = originAxis + idx * CELL_CM
+                local bx, by = WorldToBaseCanvas(isVertical and wPos or 0.0, isVertical and 0.0 or wPos)
+                local posX = isVertical and bx or midOther
+                local posY = isVertical and midOther or by
+                local isMajor4 = ((idx % 4) == 0)
+                local isMajor8 = ((idx % 8) == 0)
+                local initThick = isMajor4 and 2.2 or 1.4
+                if isMajor4 then
+                    local line, s = AddBorderFast(
+                        outer, MapUI.MapCanvas, posX, posY,
+                        isVertical and initThick or spanOther,
+                        isVertical and spanOther or initThick,
+                        COLORS.GridMajor, 3
+                    )
+                    if line and s then
+                        table.insert(RenderedGridLines, {
+                            border = line,
+                            slot = s,
+                            isVertical = isVertical,
+                            spanOther = spanOther,
+                            isMajor4 = true,
+                            isMajor8 = isMajor8,
+                        })
+                    end
+                else
+                    table.insert(deferredGridLines, {
+                        posX = posX, posY = posY,
+                        w = isVertical and initThick or spanOther,
+                        h = isVertical and spanOther or initThick,
                         isVertical = isVertical,
                         spanOther = spanOther,
-                        isMajor4 = true,
-                        isMajor8 = isMajor8,
                     })
                 end
-            else
-                table.insert(deferredGridLines, {
-                    posX = posX, posY = posY,
-                    w = isVertical and initThick or spanOther,
-                    h = isVertical and spanOther or initThick,
-                    isVertical = isVertical,
-                    spanOther = spanOther,
-                })
+            end
+        end
+
+        -- 1. Full static square cell grid lines (Z=3, above ModuleFill so grid is visible across module tiles)
+        addGridAxisLines(minCol, maxCol, true, gridSpanH, gridMidY)
+        addGridAxisLines(minRow, maxRow, false, gridSpanW, gridMidX)
+        UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
+
+        -- 2. Render station modules (interior fill + crisp 4-edge module borders)
+        for _, pe in ipairs(floor.platforms) do
+            local b = pe.bounds
+            local mx, my = WorldToBaseCanvas(b.cx, b.cy)
+            local mw = math.max(12.0, b.ex * 2.0 * BASE_PX_PER_CM)
+            local mh = math.max(12.0, b.ey * 2.0 * BASE_PX_PER_CM)
+
+            AddBorderFast(outer, MapUI.MapCanvas, mx, my, mw, mh, COLORS.ModuleFill, 2)
+            RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
+        end
+
+        -- 2b. Queue structural module walls for fast chunked 2-pass continuous rendering (Z=5 border, Z=6 opaque fill)
+        if floor.walls and #floor.walls > 0 then
+            for _, w in ipairs(floor.walls) do
+                local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
+                local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
+                local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
+                table.insert(deferredWalls, { wx = wx, wy = wy, ww = ww, wh = wh })
             end
         end
     end
 
-    -- 1. Full static square cell grid lines (Z=3, above ModuleFill so grid is visible across module tiles)
-    addGridAxisLines(minCol, maxCol, true, gridSpanH, gridMidY)
-    addGridAxisLines(minRow, maxRow, false, gridSpanW, gridMidX)
-    UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
-
-    -- 2. Render station modules (interior fill + crisp 4-edge module borders)
-    for _, pe in ipairs(floor.platforms) do
-        local b = pe.bounds
-        local mx, my = WorldToBaseCanvas(b.cx, b.cy)
-        local mw = math.max(12.0, b.ex * 2.0 * BASE_PX_PER_CM)
-        local mh = math.max(12.0, b.ey * 2.0 * BASE_PX_PER_CM)
-
-        AddBorderFast(outer, MapUI.MapCanvas, mx, my, mw, mh, COLORS.ModuleFill, 2)
-        RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
-    end
-
-    -- 2b. Queue structural module walls for fast chunked 2-pass continuous rendering (Z=5 border, Z=6 opaque fill)
-    CanvasRenderGen = CanvasRenderGen + 1
-    local myRenderGen = CanvasRenderGen
-    local deferredWalls = {}
-    if floor.walls and #floor.walls > 0 then
-        for _, w in ipairs(floor.walls) do
-            local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
-            local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
-            local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            table.insert(deferredWalls, { wx = wx, wy = wy, ww = ww, wh = wh })
-        end
-    end
-
+    MachineRenderGen = MachineRenderGen + 1
+    local myMachineGen = MachineRenderGen
     local deferredConveyors = {}
     local deferredPorts = {}
 
@@ -2002,7 +2117,7 @@ RefreshStationMapCanvas = function()
                 table.insert(RenderedConveyors, recEntry)
                 table.insert(deferredConveyors, { x = mwx, y = mwy, mx = mx, my = my, pxW = pxW, pxH = pxH, myaw = myaw, sprite = sprite })
             else
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
             end
 
             -- Underground belt enhancements: direction arrow on tile + dashed pair line + second endpoint tile
@@ -2010,7 +2125,7 @@ RefreshStationMapCanvas = function()
             local uInfo = (clsLow:find("underground", 1, true) ~= nil) and StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform) or nil
             if uInfo then
                 local arrowCol = GetTierArrowColor(sprite and sprite.tier or 1)
-                RenderDirectionChevron(outer, MapUI.MapCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                RenderDirectionChevron(outer, mCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
                 if uInfo.pairX and uInfo.pairY then
                     local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
@@ -2021,14 +2136,14 @@ RefreshStationMapCanvas = function()
                         if uInfo.isInput == false then
                             x1, y1, x2, y2 = omx, omy, mx, my
                         end
-                        RenderDashedLine(outer, MapUI.MapCanvas, x1, y1, x2, y2, lineCol, 2.6, 10.0, 6.0, 17)
+                        RenderDashedLine(outer, mCanvas, x1, y1, x2, y2, lineCol, 2.6, 10.0, 6.0, 17)
                         local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
-                        RenderDirectionChevron(outer, MapUI.MapCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
+                        RenderDirectionChevron(outer, mCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
                     end
                     -- Render second endpoint tile if the paired end wasn't already listed as a separate simulation object
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
-                        CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
-                        RenderDirectionChevron(outer, MapUI.MapCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                        CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
+                        RenderDirectionChevron(outer, mCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
                     end
                 end
             end
@@ -2163,19 +2278,15 @@ RefreshStationMapCanvas = function()
         })
     end
 
-    -- Stream deferred minor grid lines, walls, conveyor tiles, and port badges progressively across frames
-    if #deferredGridLines > 0 or #deferredWalls > 0 or #deferredConveyors > 0 or #deferredPorts > 0 then
+    -- Stream deferred minor grid lines and walls on static MapCanvas independently of machine refreshes
+    if #deferredGridLines > 0 or #deferredWalls > 0 then
         local gIdx = 1
         local wIdx = 1
-        local cIdx = 1
-        local pIdx = 1
         local GRID_PER_FRAME = 48
         local WALLS_PER_FRAME = 32
-        local CONV_PER_FRAME = 24
-        local PORTS_PER_FRAME = 12
         local wallBorderPad = 11.0
-        local function pumpDeferredBatch()
-            if myRenderGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
+        local function pumpStaticBatch()
+            if myCanvasGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
                 return
             end
             local gEnd = math.min(#deferredGridLines, gIdx + GRID_PER_FRAME - 1)
@@ -2207,23 +2318,40 @@ RefreshStationMapCanvas = function()
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
                 wIdx = wIdx + 1
             end
+            if gIdx <= #deferredGridLines or wIdx <= #deferredWalls then
+                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+            end
+        end
+        ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+    end
+
+    -- Stream deferred conveyor tiles and port badges on dynamic MachineCanvas
+    if #deferredConveyors > 0 or #deferredPorts > 0 then
+        local cIdx = 1
+        local pIdx = 1
+        local CONV_PER_FRAME = 24
+        local PORTS_PER_FRAME = 12
+        local function pumpMachineBatch()
+            if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(mCanvas) then
+                return
+            end
             local cEnd = math.min(#deferredConveyors, cIdx + CONV_PER_FRAME - 1)
             while cIdx <= cEnd do
                 local dc = deferredConveyors[cIdx]
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
                 cIdx = cIdx + 1
             end
             local pEnd = math.min(#deferredPorts, pIdx + PORTS_PER_FRAME - 1)
             while pIdx <= pEnd do
                 local dp = deferredPorts[pIdx]
-                RenderUnconnectedItemPort(outer, MapUI.MapCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
+                RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
                 pIdx = pIdx + 1
             end
-            if gIdx <= #deferredGridLines or wIdx <= #deferredWalls or cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
-                ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
+            if cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
+                ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             end
         end
-        ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
+        ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
     end
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
@@ -2240,12 +2368,12 @@ RefreshStationMapCanvas = function()
                         pDot:SetVisibility(3)
                         pDot:SetBrushColor(col)
                     end)
-                    local pSlot = MapUI.MapCanvas:AddChildToCanvas(pDot)
+                    local pSlot = mCanvas:AddChildToCanvas(pDot)
                     SetCanvasSlot(pSlot, pmx, pmy, 12.0, 12.0, 0.5, 0.5, 45)
                 end
                 local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
                 if Core.IsValidObj(nameTxt) then
-                    local nSlot = MapUI.MapCanvas:AddChildToCanvas(nameTxt)
+                    local nSlot = mCanvas:AddChildToCanvas(nameTxt)
                     SetCanvasSlot(nSlot, pmx, pmy - 16.0, 140.0, 20.0, 0.5, 1.0, 46)
                     pcall(function()
                         nameTxt:SetVisibility(3)
@@ -2448,7 +2576,7 @@ local function CommitPendingGhosts()
                 end
             end
             if IsMapOpen() then
-                RefreshStationMapCanvas()
+                RefreshStationMapCanvas(true) -- Only refresh machines/ports; keep grid lines, modules, and walls intact
             end
         end)
     elseif lastErr then
@@ -3015,6 +3143,7 @@ end
 
 local function DestroyStationMap()
     CanvasRenderGen = CanvasRenderGen + 1
+    MachineRenderGen = MachineRenderGen + 1
     MapWinVisible = false
     MapWinInViewport = false
     InteractionMode = "Select"
@@ -3141,6 +3270,7 @@ local function OpenStationMap()
     local mapOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
     local bgPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local mapCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local machineCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local selectionCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local wheelScrollBox = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
     local wheelSpacer = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
@@ -3181,11 +3311,21 @@ local function OpenStationMap()
             mcSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
             mcSlot:SetZOrder(0)
         end
+        if Core.IsValidObj(machineCanvas) then
+            machineCanvas:SetClipping(0)
+            machineCanvas:SetVisibility(4)
+            local machSlot = bgPanZoom:AddChildToCanvas(machineCanvas)
+            if Core.IsValidObj(machSlot) then
+                machSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+                machSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                machSlot:SetZOrder(1)
+            end
+        end
         local scSlot = bgPanZoom:AddChildToCanvas(selectionCanvas)
         if Core.IsValidObj(scSlot) then
             scSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
             scSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-            scSlot:SetZOrder(1)
+            scSlot:SetZOrder(2)
         end
         local bpSlot = mapOverlay:AddChildToOverlay(bgPanZoom)
         if Core.IsValidObj(bpSlot) then
@@ -3427,6 +3567,7 @@ local function OpenStationMap()
         MapBg = mapBg,
         BgPanZoom = bgPanZoom,
         MapCanvas = mapCanvas,
+        MachineCanvas = machineCanvas,
         SelectionCanvas = selectionCanvas,
         WheelScrollBox = wheelScrollBox,
         IconPanZoom = iconPanZoom,
@@ -3594,7 +3735,7 @@ function Feature.Init()
     EnsureMapKeybinds()
     StationData.OnIconVisibilityChanged(function()
         if IsMapOpen() then
-            pcall(RefreshStationMapCanvas)
+            pcall(RefreshStationMapCanvas, true)
         end
     end)
 end
@@ -3697,10 +3838,15 @@ local function ScheduleStationPrewarm()
         if inStation and Core.IsValidObj(station) then
             local t0 = os.clock()
             local floors = StationData.BuildStationFloorMap(station, walkFrame, nil, nil, nil)
-            if floors and #floors > 0 and #CurrentFloors == 0 then
-                CurrentFloors = floors
+            if floors and #floors > 0 then
+                if #CurrentFloors == 0 then CurrentFloors = floors end
+                local firstM = floors[1] and floors[1].machines and floors[1].machines[1] and floors[1].machines[1].machine
+                if Core.IsValidObj(firstM) then
+                    StationData.PrewarmBuildables(firstM)
+                end
             end
             InspectBuildMachineCommandLayout()
+            InspectAddBuildCommandLayout()
             Core.Log(string.format("[StationMap] Prewarmed station caches in %.0fms", (os.clock() - t0) * 1000.0))
         end
     end)

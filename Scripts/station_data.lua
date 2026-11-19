@@ -933,7 +933,7 @@ end
 function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, playerZ)
     local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
     local now = os.clock()
-    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 30.0 then
+    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 300.0 then
         local cFloors = CachedFloorMap.floors
         local cXform = CachedFloorMap.xform
         local curIdx = 1
@@ -2935,6 +2935,12 @@ function StationData.GetMachineFootprintCells(machine, buildableOpt)
         CachedFootprintsByClass[clsKey] = { cellsX = cx, cellsY = cy }
     end
     return cx, cy
+end
+
+function StationData.PrewarmBuildables(sampleMachine)
+    if Core.IsValidObj(sampleMachine) then
+        pcall(FindBuildableForMachineClass, sampleMachine)
+    end
 end
 
 function StationData.InvalidateMachineCache()
