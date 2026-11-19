@@ -83,6 +83,11 @@ local MapUI = nil
 local CachedBorderCls = nil
 local EqolIssuingBuildCmd = false
 local CanvasRenderGen = 0
+local ViewportPending = nil -- { gen, outer, pc, portBadgePx, walls = {}, conveyors = {}, ports = {}, pumping = false }
+local PumpVisibleTiles = nil
+local BuildGridDivisor = 50.0
+local BuildHeightDivisor = 100.0
+local GridCalibrated = false
 
 local ALIGN_CENTER = { X = 0.5, Y = 0.5 }
 local function AddBorderFast(outer, canvas, x, y, w, h, col, zOrder)
@@ -293,6 +298,9 @@ local function ApplyViewTransform()
         end
     end
     UpdateGridAppearanceForZoom(zoomRatio)
+    if PumpVisibleTiles then
+        PumpVisibleTiles(28)
+    end
 end
 
 local function CanvasToWorld(mx, my)
@@ -732,6 +740,72 @@ local function InspectBuildMachineCommandLayout()
                     end
                     c = c.GetSuperStruct and c:GetSuperStruct() or nil
                 end
+                -- Inspect m.GridTransform struct fields & calibrate BuildGridDivisor / BuildHeightDivisor
+                pcall(function()
+                    local gt = m.GridTransform
+                    if gt then
+                        local gtParts = {}
+                        local gtSt = Core.UnwrapStruct(gt) or gt
+                        local gtStructObj = nil
+                        pcall(function()
+                            local mc = m:GetClass()
+                            local md = 0
+                            while Core.IsValidObj(mc) and md < 6 and not gtStructObj do
+                                md = md + 1
+                                if mc.ForEachProperty then
+                                    mc:ForEachProperty(function(mp)
+                                        if not gtStructObj and mp:GetFName():ToString() == "GridTransform" and mp.GetStruct then
+                                            local okS, st = pcall(function() return mp:GetStruct() end)
+                                            if okS and Core.IsValidObj(st) then gtStructObj = st end
+                                        end
+                                    end)
+                                end
+                                mc = mc.GetSuperStruct and mc:GetSuperStruct() or nil
+                            end
+                        end)
+                        local function inspectGtField(fn)
+                            local okF, fv = pcall(function() return gtSt[fn] end)
+                            if not okF or fv == nil then return end
+                            if type(fv) == "number" or type(fv) == "boolean" then
+                                table.insert(gtParts, fn .. "=" .. tostring(fv))
+                                local fl = fn:lower()
+                                if (fl == "height" or fl == "z") and math.abs(sampleM.z or 0) >= 100.0 and math.abs(fv) > 0.01 then
+                                    BuildHeightDivisor = math.abs((sampleM.z or 0) / fv)
+                                    GridCalibrated = true
+                                end
+                            elseif type(fv) == "userdata" then
+                                local okXY, gx0, gy0, gz0 = pcall(function()
+                                    if fv.X ~= nil and fv.Y ~= nil then
+                                        local ax, ay, az = Core.GetFPVector(fv)
+                                        return ax, ay, az
+                                    end
+                                    return nil
+                                end)
+                                if okXY and gx0 ~= nil then
+                                    table.insert(gtParts, string.format("%s=(%.1f,%.1f,%.1f)", fn, gx0, gy0, gz0 or 0))
+                                    if math.abs(sampleM.x or 0) >= 100.0 and math.abs(gx0) > 0.01 then
+                                        BuildGridDivisor = math.abs((sampleM.x or 0) / gx0)
+                                        GridCalibrated = true
+                                    elseif math.abs(sampleM.y or 0) >= 100.0 and math.abs(gy0) > 0.01 then
+                                        BuildGridDivisor = math.abs((sampleM.y or 0) / gy0)
+                                        GridCalibrated = true
+                                    end
+                                end
+                            end
+                        end
+                        if Core.IsValidObj(gtStructObj) and gtStructObj.ForEachProperty then
+                            gtStructObj:ForEachProperty(function(fp)
+                                inspectGtField(fp:GetFName():ToString())
+                            end)
+                        else
+                            for _, fn in ipairs({ "Location", "GridLocation", "Position", "Height", "Z", "Rotation", "Yaw", "PlatformID" }) do
+                                inspectGtField(fn)
+                            end
+                        end
+                        Core.Log(string.format("[StationMap] RefGridTransform: [%s] -> gridDiv=%.1f heightDiv=%.1f",
+                            table.concat(gtParts, ", "), BuildGridDivisor, BuildHeightDivisor))
+                    end
+                end)
             end
         end)
         Core.Log("[StationMap] RefMachineProps: " .. table.concat(refParts, ", "))
@@ -838,9 +912,9 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
     if Core.IsValidObj(platform) then
         pcall(function() if platform.ID ~= nil then platId = tonumber(platform.ID) or 0 end end)
     end
-    local gx = math.floor(locX / 50.0 + 0.5)
-    local gy = math.floor(locY / 50.0 + 0.5)
-    local gz = math.floor(locZ / 50.0 + 0.5)
+    local gx = math.floor(locX / BuildGridDivisor + 0.5)
+    local gy = math.floor(locY / BuildGridDivisor + 0.5)
+    local gz = math.floor(locZ / BuildHeightDivisor + 0.5)
     local rotSteps = ((math.floor((yawDeg or 0.0) / 90.0 + 0.5) % 4) + 4) % 4
 
     local cmdSuccess = false
@@ -1804,27 +1878,22 @@ RefreshStationMapCanvas = function()
         RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
     end
 
-    -- 2b. Render structural module walls & interior partitions as a continuous 2-pass silhouette:
-    --     Pass 1 (Z=5): expanded 5.5px outer border matching ModuleBorder thickness
-    --     Pass 2 (Z=6): opaque high-contrast interior fill fusing all corners/T-junctions with zero internal seams
+    -- 2b. Queue structural module walls for viewport-culled 2-pass continuous rendering
+    CanvasRenderGen = CanvasRenderGen + 1
+    local myRenderGen = CanvasRenderGen
+    local pendingWalls = {}
     if floor.walls and #floor.walls > 0 then
-        local wallBorderPad = 11.0 -- 5.5px border on each side
         for _, w in ipairs(floor.walls) do
             local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
             local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
             local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + wallBorderPad, wh + wallBorderPad, COLORS.WallBorder, 5)
-        end
-        for _, w in ipairs(floor.walls) do
-            local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
-            local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
-            local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + 1.0, wh + 1.0, COLORS.WallFill, 6)
+            table.insert(pendingWalls, {
+                minX = w.minX, maxX = w.maxX, minY = w.minY, maxY = w.maxY,
+                wx = wx, wy = wy, ww = ww, wh = wh,
+            })
         end
     end
 
-    CanvasRenderGen = CanvasRenderGen + 1
-    local myRenderGen = CanvasRenderGen
     local deferredConveyors = {}
     local deferredPorts = {}
 
@@ -1897,7 +1966,7 @@ RefreshStationMapCanvas = function()
             table.insert(RenderedMachines, recEntry)
             if cat == "Conveyor" then
                 table.insert(RenderedConveyors, recEntry)
-                table.insert(deferredConveyors, { mx = mx, my = my, pxW = pxW, pxH = pxH, myaw = myaw, sprite = sprite })
+                table.insert(deferredConveyors, { x = mwx, y = mwy, mx = mx, my = my, pxW = pxW, pxH = pxH, myaw = myaw, sprite = sprite })
             else
                 CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
             end
@@ -2047,7 +2116,7 @@ RefreshStationMapCanvas = function()
     end
     for _, pe in pairs(portsByKey) do
         local pmx, pmy = WorldToBaseCanvas(pe.x, pe.y)
-        table.insert(deferredPorts, { pmx = pmx, pmy = pmy })
+        table.insert(deferredPorts, { x = pe.x, y = pe.y, pmx = pmx, pmy = pmy })
         table.insert(RenderedPorts, {
             idx = #RenderedPorts + 1,
             x = pe.x,
@@ -2060,34 +2129,106 @@ RefreshStationMapCanvas = function()
         })
     end
 
-    -- Stream deferred conveyor tiles and port badges progressively across frames to avoid open-map lag spikes
-    if #deferredConveyors > 0 or #deferredPorts > 0 then
-        local cIdx = 1
-        local pIdx = 1
-        local CONV_PER_FRAME = 24
-        local PORTS_PER_FRAME = 12
-        local function pumpDeferredBatch()
-            if myRenderGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
-                return
-            end
-            local cEnd = math.min(#deferredConveyors, cIdx + CONV_PER_FRAME - 1)
-            while cIdx <= cEnd do
-                local dc = deferredConveyors[cIdx]
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
-                cIdx = cIdx + 1
-            end
-            local pEnd = math.min(#deferredPorts, pIdx + PORTS_PER_FRAME - 1)
-            while pIdx <= pEnd do
-                local dp = deferredPorts[pIdx]
-                RenderUnconnectedItemPort(outer, MapUI.MapCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
-                pIdx = pIdx + 1
-            end
-            if cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
-                ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
+    -- Viewport-culled lazy materializer: only construct UMG widgets for walls, conveyors, and ports visible on screen
+    ViewportPending = {
+        gen = myRenderGen,
+        outer = outer,
+        pc = pc,
+        portBadgePx = portBadgeBasePx,
+        walls = pendingWalls,
+        conveyors = deferredConveyors,
+        ports = deferredPorts,
+        pumping = false,
+    }
+
+    PumpVisibleTiles = function(budget)
+        local vp = ViewportPending
+        if not vp or vp.gen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
+            return
+        end
+        local halfW = (ViewTransform.canvasW * 0.5) / math.max(0.01, ViewTransform.scale) + 500.0
+        local halfH = (ViewTransform.canvasH * 0.5) / math.max(0.01, ViewTransform.scale) + 500.0
+        local vMinX, vMaxX = ViewTransform.cx - halfW, ViewTransform.cx + halfW
+        local vMinY, vMaxY = ViewTransform.cy - halfH, ViewTransform.cy + halfH
+
+        local spent = 0
+        local maxBudget = budget or 36
+        local hasMoreVisible = false
+        local wallBorderPad = 11.0
+
+        -- 1. Visible walls (2-pass seamless borders & fills)
+        local i = 1
+        while i <= #vp.walls do
+            local w = vp.walls[i]
+            if w.maxX >= vMinX and w.minX <= vMaxX and w.maxY >= vMinY and w.minY <= vMaxY then
+                if spent < maxBudget then
+                    AddBorderFast(vp.outer, MapUI.MapCanvas, w.wx, w.wy, w.ww + wallBorderPad, w.wh + wallBorderPad, COLORS.WallBorder, 5)
+                    AddBorderFast(vp.outer, MapUI.MapCanvas, w.wx, w.wy, w.ww + 1.0, w.wh + 1.0, COLORS.WallFill, 6)
+                    spent = spent + 2
+                    local last = #vp.walls
+                    vp.walls[i] = vp.walls[last]
+                    vp.walls[last] = nil
+                else
+                    hasMoreVisible = true
+                    break
+                end
+            else
+                i = i + 1
             end
         end
-        ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
+
+        -- 2. Visible conveyors
+        i = 1
+        while i <= #vp.conveyors do
+            local dc = vp.conveyors[i]
+            if dc.x >= vMinX and dc.x <= vMaxX and dc.y >= vMinY and dc.y <= vMaxY then
+                if spent < maxBudget then
+                    CreateMachineVisualWidget(MapUI.Window, vp.pc, vp.outer, MapUI.MapCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
+                    spent = spent + 3
+                    local last = #vp.conveyors
+                    vp.conveyors[i] = vp.conveyors[last]
+                    vp.conveyors[last] = nil
+                else
+                    hasMoreVisible = true
+                    break
+                end
+            else
+                i = i + 1
+            end
+        end
+
+        -- 3. Visible ports
+        i = 1
+        while i <= #vp.ports do
+            local dp = vp.ports[i]
+            if dp.x >= vMinX and dp.x <= vMaxX and dp.y >= vMinY and dp.y <= vMaxY then
+                if spent < maxBudget then
+                    RenderUnconnectedItemPort(vp.outer, MapUI.MapCanvas, dp.pmx, dp.pmy, vp.portBadgePx, 22)
+                    spent = spent + 4
+                    local last = #vp.ports
+                    vp.ports[i] = vp.ports[last]
+                    vp.ports[last] = nil
+                else
+                    hasMoreVisible = true
+                    break
+                end
+            else
+                i = i + 1
+            end
+        end
+
+        if hasMoreVisible and not vp.pumping then
+            vp.pumping = true
+            ExecuteInGameThreadAfterFrames(1, function()
+                if ViewportPending == vp then
+                    vp.pumping = false
+                    PumpVisibleTiles(32)
+                end
+            end)
+        end
     end
+
+    PumpVisibleTiles(42)
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
     local allPlayers = StationData.GetAllPlayersInfo(pc)
@@ -2878,6 +3019,7 @@ end
 
 local function DestroyStationMap()
     CanvasRenderGen = CanvasRenderGen + 1
+    ViewportPending = nil
     MapWinVisible = false
     MapWinInViewport = false
     InteractionMode = "Select"
