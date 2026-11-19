@@ -1072,42 +1072,24 @@ local function CaptureMachineConfig(m)
             end
         end
         if #dis == 0 and m.IsPortEnabled then
-            local cdo = nil
+            local maxPorts = 0
             pcall(function()
-                local cls = m:GetClass()
-                if Core.IsValidObj(cls) and cls.GetDefaultObject then
-                    cdo = cls:GetDefaultObject()
+                if m.PortStates then
+                    maxPorts = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
                 end
             end)
-            if Core.IsValidObj(cdo) and cdo.IsPortEnabled then
-                for portIdx = 0, 15 do
-                    local okD, defEn = pcall(function() return cdo:IsPortEnabled(portIdx) end)
-                    local okP, curEn = pcall(function() return m:IsPortEnabled(portIdx) end)
-                    if okD and defEn == true and okP and curEn == false and not seen[portIdx] then
+            if type(maxPorts) ~= "number" or maxPorts <= 0 then
+                -- Fallback: probe PortStates via known machine port counts only if PortStates reflection wasn't readable
+                local lowCls = clsKey:lower()
+                if lowCls:find("assembler", 1, true) then maxPorts = 4
+                elseif lowCls:find("refinery", 1, true) then maxPorts = 6 end
+            end
+            if type(maxPorts) == "number" and maxPorts > 0 then
+                for portIdx = 0, math.min(maxPorts - 1, 15) do
+                    local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
+                    if okP and en == false and not seen[portIdx] then
                         table.insert(dis, portIdx)
                         seen[portIdx] = true
-                    end
-                end
-            else
-                local maxPorts = 0
-                pcall(function()
-                    if m.PortStates then
-                        maxPorts = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
-                    end
-                end)
-                if (type(maxPorts) ~= "number" or maxPorts <= 0) then
-                    local lowCls = clsKey:lower()
-                    if lowCls:find("assembler", 1, true) then maxPorts = 4
-                    elseif lowCls:find("refinery", 1, true) then maxPorts = 6
-                    elseif lowCls:find("splitter", 1, true) or lowCls:find("balancer", 1, true) then maxPorts = 4 end
-                end
-                if type(maxPorts) == "number" and maxPorts > 0 then
-                    for portIdx = 0, math.min(maxPorts - 1, 15) do
-                        local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
-                        if okP and en == false and not seen[portIdx] then
-                            table.insert(dis, portIdx)
-                            seen[portIdx] = true
-                        end
                     end
                 end
             end
@@ -1214,7 +1196,8 @@ local function CaptureMachineConfig(m)
                         local pn = p:GetFName():ToString()
                         local low = pn:lower()
                         if (low:find("recipe", 1, true) or low:find("filter", 1, true) or low:find("priority", 1, true)
-                            or low:find("config", 1, true) or low:find("working", 1, true) or low:find("mode", 1, true))
+                            or low:find("config", 1, true) or low:find("working", 1, true) or low:find("mode", 1, true)
+                            or low:find("port", 1, true) or low:find("disabled", 1, true) or low:find("length", 1, true))
                             and not low:find("inventory", 1, true)
                         then
                             table.insert(props, pn)
@@ -2338,7 +2321,6 @@ RefreshDynamicOverlay = function()
                 ClearCanvasChildren(MapUI.GhostPreviewCanvas)
                 local rad = math.rad(PendingRotationDeg)
                 local cosA, sinA = math.cos(rad), math.sin(rad)
-                local pairPositions = {}
                 for _, item in ipairs(Clipboard) do
                     local rdx = item.dx * cosA - item.dy * sinA
                     local rdy = item.dx * sinA + item.dy * cosA
@@ -2356,19 +2338,18 @@ RefreshDynamicOverlay = function()
                         AddSplitterOrBalancerChevrons(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, fYaw, clsLow, 57)
                     elseif clsLow:find("underground", 1, true) then
                         AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, offBx, offBy, math.min(pxW, pxH) * 0.30, 2.2, fYaw, COLORS.GhostBorderOk, 57)
-                    end
-                    if item.pairGroupId then
-                        pairPositions[item.pairGroupId] = pairPositions[item.pairGroupId] or {}
-                        table.insert(pairPositions[item.pairGroupId], { x = offBx, y = offBy, isInput = item.isUndergroundInput })
-                    end
-                end
-                for _, pts in pairs(pairPositions) do
-                    if #pts >= 2 then
-                        local p1, p2 = pts[1], pts[2]
-                        if p1.isInput == false then p1, p2 = p2, p1 end
-                        RenderDashedLine(outer, MapUI.GhostPreviewCanvas, p1.x, p1.y, p2.x, p2.y, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 58)
-                        local linkAng = math.deg(math.atan(p2.y - p1.y, p2.x - p1.x))
-                        AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, (p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 59)
+                        if item.pairDx and item.pairDy then
+                            local rpdx = item.pairDx * cosA - item.pairDy * sinA
+                            local rpdy = item.pairDx * sinA + item.pairDy * cosA
+                            local pBx = offBx + rpdx * BASE_PX_PER_CM
+                            local pBy = offBy + rpdy * BASE_PX_PER_CM
+                            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, pBx, pBy, pxW, pxH, fYaw, itemCat, item.sprite, true, true, 55, false)
+                            RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, pBx, pBy, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
+                            AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, pBx, pBy, math.min(pxW, pxH) * 0.30, 2.2, fYaw, COLORS.GhostBorderOk, 57)
+                            RenderDashedLine(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pBx, pBy, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 58)
+                            local linkAng = math.deg(math.atan(pBy - offBy, pBx - offBx))
+                            AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, (offBx + pBx) * 0.5, (offBy + pBy) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 59)
+                        end
                     end
                 end
             end
@@ -2523,37 +2504,48 @@ local function RefreshSelectionLayer()
             local pxH = math.max(8.0, ry * BASE_CELL_PX)
             AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, COLORS.SelectedFill, 1)
             RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
+            if rm.pairX and rm.pairY then
+                local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
+                AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.5, COLORS.Selected, 2)
+            end
         end
     end
 
-    -- Proposed deletions (red ghost overlay + bold red X centered on each machine)
+    -- Proposed deletions (red ghost overlay + bold red X centered on each machine, including underground belt second end)
     local delFillCol = { R = 0.88, G = 0.10, B = 0.10, A = 0.44 }
     local delBdrCol  = { R = 1.00, G = 0.22, B = 0.22, A = 0.98 }
     local delXCol    = { R = 1.00, G = 0.16, B = 0.16, A = 1.00 }
+    local function drawDeleteMark(bx, by, pxW, pxH)
+        AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, delFillCol, 3)
+        RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, delBdrCol, 4)
+        local xLen = math.max(12.0, math.min(pxW, pxH) * 0.72)
+        local xThick = math.max(2.6, math.min(5.0, xLen * 0.13))
+        for _, ang in ipairs({ 45.0, -45.0 }) do
+            local bar = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, xLen, xThick, delXCol, 5)
+            if bar then
+                pcall(function()
+                    bar:SetRenderTransformPivot(ALIGN_CENTER)
+                    if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(ang) end
+                end)
+            end
+        end
+    end
     for _, dm in pairs(PendingDeletes) do
         if math.abs((dm.z or floor.z) - floor.z) <= 250.0 then
             local bx, by = WorldToBaseCanvas(dm.x, dm.y)
             local rx, ry = GetRotatedCellDims(dm.cellsX or 1, dm.cellsY or 1, dm.yaw or 0)
             local pxW = math.max(8.0, rx * BASE_CELL_PX)
             local pxH = math.max(8.0, ry * BASE_CELL_PX)
-            AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, delFillCol, 3)
-            RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, delBdrCol, 4)
-            local xLen = math.max(12.0, math.min(pxW, pxH) * 0.72)
-            local xThick = math.max(2.6, math.min(5.0, xLen * 0.13))
-            for _, ang in ipairs({ 45.0, -45.0 }) do
-                local bar = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, xLen, xThick, delXCol, 5)
-                if bar then
-                    pcall(function()
-                        bar:SetRenderTransformPivot(ALIGN_CENTER)
-                        if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(ang) end
-                    end)
-                end
+            drawDeleteMark(bx, by, pxW, pxH)
+            if dm.pairX and dm.pairY then
+                local pbx, pby = WorldToBaseCanvas(dm.pairX, dm.pairY)
+                drawDeleteMark(pbx, pby, pxW, pxH)
             end
         end
     end
 
-    -- Stamped build ghosts (with conveyor chevrons, splitter/balancer chevrons, and underground dashed pair links)
-    local ghostPairs = {}
+    -- Stamped build ghosts (with conveyor chevrons, splitter/balancer chevrons, and underground belt pair links)
     for _, gp in ipairs(PendingGhosts) do
         if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
             local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
@@ -2575,20 +2567,21 @@ local function RefreshSelectionLayer()
                 AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 8)
             elseif clsLow:find("underground", 1, true) then
                 AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, COLORS.GhostBorderOk, 8)
+                if gp.pairX and gp.pairY then
+                    local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
+                    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+                    if isGhostSel then
+                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 7)
+                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 8)
+                    else
+                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.0, COLORS.GhostBorderOk, 7)
+                    end
+                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, COLORS.GhostBorderOk, 8)
+                    RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 9)
+                    local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
+                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 10)
+                end
             end
-            if gp.pairGroupId then
-                ghostPairs[gp.pairGroupId] = ghostPairs[gp.pairGroupId] or {}
-                table.insert(ghostPairs[gp.pairGroupId], { x = gbx, y = gby, isInput = gp.isUndergroundInput })
-            end
-        end
-    end
-    for _, pts in pairs(ghostPairs) do
-        if #pts >= 2 then
-            local p1, p2 = pts[1], pts[2]
-            if p1.isInput == false then p1, p2 = p2, p1 end
-            RenderDashedLine(outer, MapUI.SelectionCanvas, p1.x, p1.y, p2.x, p2.y, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 9)
-            local linkAng = math.deg(math.atan(p2.y - p1.y, p2.x - p1.x))
-            AddMiniChevronAt(outer, MapUI.SelectionCanvas, (p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 10)
         end
     end
 
@@ -3017,6 +3010,9 @@ RefreshStationMapCanvas = function(machinesOnly)
                 local ch1 = RenderDirectionChevron(outer, mCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
                 if ch1 then table.insert(mWidgets, ch1) end
                 if uInfo.pairX and uInfo.pairY then
+                    recEntry.pairX = uInfo.pairX
+                    recEntry.pairY = uInfo.pairY
+                    recEntry.ugLength = math.max(1, math.floor(math.sqrt((uInfo.pairX - mwx) ^ 2 + (uInfo.pairY - mwy) ^ 2) / CELL_CM + 0.5))
                     local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
                     if not seenUndergroundPairs[pKey] then
@@ -3455,31 +3451,19 @@ end
 local function CopySelectedMachines()
     Clipboard = {}
     local list = {}
-    local selectedByAddr = {}
     for _, entry in pairs(SelectedMachines) do
         if IsSelectableMachine(entry) then
             table.insert(list, entry)
-            selectedByAddr[entry.addr] = entry
         end
     end
-    -- Also include any selected ghost machines (preserving configs, cat, and underground pairs)
-    local ghostPairRemap = {}
-    local nextPairGroup = 1
+    -- Also include any selected ghost machines (preserving configs, cat, and underground pair offsets)
     for _, gp in pairs(SelectedGhosts) do
         if Core.IsValidObj(gp.buildable) then
-            local gId = nil
-            if gp.pairGroupId then
-                gId = ghostPairRemap[gp.pairGroupId]
-                if not gId then
-                    gId = nextPairGroup
-                    nextPairGroup = nextPairGroup + 1
-                    ghostPairRemap[gp.pairGroupId] = gId
-                end
-            end
             table.insert(list, {
                 machine = nil,
                 addr = gp.ghostId,
                 x = gp.x, y = gp.y, z = gp.z, yaw = gp.yaw or 0.0,
+                pairX = gp.pairX, pairY = gp.pairY, ugLength = gp.ugLength,
                 cellsX = gp.cellsX or 1, cellsY = gp.cellsY or 1,
                 cat = gp.cat or "Other",
                 buildable = gp.buildable,
@@ -3488,83 +3472,12 @@ local function CopySelectedMachines()
                 actorClsPath = gp.actorClsPath,
                 sprite = gp.sprite,
                 displayName = gp.name,
-                _ugGroupId = gId,
-                _ugIsInput = gp.isUndergroundInput,
-                _isGhostCopy = true,
             })
         end
     end
     if #list == 0 then
         UpdateStatusBanner("Select one or more machines first (click, Shift+click, or drag box)")
         return
-    end
-
-    -- Auto-include paired endpoints for any selected underground belts so both ends & dashed link copy together
-    local extraPairs = {}
-    local pairGroupByAddr = {}
-    for _, e in ipairs(list) do
-        local clsLow = (e.actorClsPath or ""):lower()
-        if not e._isGhostCopy and clsLow:find("underground", 1, true) and Core.IsValidObj(e.machine) then
-            local uInfo = StationData.GetUndergroundBeltPairInfo(e.machine, CurrentFrameXform)
-            if uInfo and uInfo.pairX and uInfo.pairY then
-                local pAddr = uInfo.pairAddr
-                local gId = pairGroupByAddr[e.addr] or (pAddr and pairGroupByAddr[pAddr])
-                if not gId then
-                    gId = nextPairGroup
-                    nextPairGroup = nextPairGroup + 1
-                end
-                pairGroupByAddr[e.addr] = gId
-                e._ugGroupId = gId
-                e._ugIsInput = (uInfo.isInput ~= false)
-                if pAddr then
-                    pairGroupByAddr[pAddr] = gId
-                    if selectedByAddr[pAddr] then
-                        selectedByAddr[pAddr]._ugGroupId = gId
-                        selectedByAddr[pAddr]._ugIsInput = (uInfo.isInput == false)
-                    elseif not extraPairs[pAddr] then
-                        -- Find paired RenderedMachine or synthesize endpoint entry
-                        local foundRm = nil
-                        for _, rm in ipairs(RenderedMachines) do
-                            if rm.addr == pAddr then foundRm = rm; break end
-                        end
-                        local synth = foundRm and {
-                            machine = foundRm.machine, addr = foundRm.addr,
-                            x = foundRm.x, y = foundRm.y, z = foundRm.z, yaw = foundRm.yaw,
-                            cellsX = foundRm.cellsX, cellsY = foundRm.cellsY,
-                            cat = foundRm.cat, buildable = foundRm.buildable or e.buildable,
-                            recipe = foundRm.recipe, actorClsPath = foundRm.actorClsPath or e.actorClsPath,
-                            sprite = foundRm.sprite or e.sprite, displayName = foundRm.displayName or e.displayName,
-                            _ugGroupId = gId, _ugIsInput = (uInfo.isInput == false),
-                        } or {
-                            machine = nil, addr = pAddr,
-                            x = uInfo.pairX, y = uInfo.pairY, z = e.z, yaw = e.yaw,
-                            cellsX = e.cellsX, cellsY = e.cellsY,
-                            cat = e.cat, buildable = e.buildable,
-                            recipe = nil, actorClsPath = e.actorClsPath,
-                            sprite = e.sprite, displayName = e.displayName,
-                            _ugGroupId = gId, _ugIsInput = (uInfo.isInput == false),
-                        }
-                        extraPairs[pAddr] = synth
-                    end
-                else
-                    local synthKey = string.format("%.0f:%.0f", uInfo.pairX, uInfo.pairY)
-                    if not extraPairs[synthKey] then
-                        extraPairs[synthKey] = {
-                            machine = nil, addr = nil,
-                            x = uInfo.pairX, y = uInfo.pairY, z = e.z, yaw = e.yaw,
-                            cellsX = e.cellsX, cellsY = e.cellsY,
-                            cat = e.cat, buildable = e.buildable,
-                            recipe = nil, actorClsPath = e.actorClsPath,
-                            sprite = e.sprite, displayName = e.displayName,
-                            _ugGroupId = gId, _ugIsInput = (uInfo.isInput == false),
-                        }
-                    end
-                end
-            end
-        end
-    end
-    for _, pe in pairs(extraPairs) do
-        table.insert(list, pe)
     end
 
     -- Anchor clipboard offsets around snapped center so copied groups remain grid-aligned
@@ -3584,10 +3497,23 @@ local function CopySelectedMachines()
         local cellsX = e.cellsX or 1
         local cellsY = e.cellsY or 1
         local mCfg = e.machineConfig or (Core.IsValidObj(e.machine) and CaptureMachineConfig(e.machine) or nil)
+        local pairDx = (e.pairX and e.pairY) and (e.pairX - e.x) or nil
+        local pairDy = (e.pairX and e.pairY) and (e.pairY - e.y) or nil
+        local ugLen = e.ugLength
+        if not ugLen and pairDx and pairDy then
+            ugLen = math.max(1, math.floor(math.sqrt(pairDx * pairDx + pairDy * pairDy) / CELL_CM + 0.5))
+        end
+        if ugLen and ugLen > 0 then
+            mCfg = mCfg or {}
+            mCfg.config = ugLen
+        end
         table.insert(Clipboard, {
             buildable = e.buildable,
             dx = e.x - anchorX,
             dy = e.y - anchorY,
+            pairDx = pairDx,
+            pairDy = pairDy,
+            ugLength = ugLen,
             yaw = e.yaw or 0.0,
             cat = e.cat or "Other",
             recipe = e.recipe,
@@ -3597,11 +3523,7 @@ local function CopySelectedMachines()
             actorClsPath = e.actorClsPath,
             sprite = e.sprite,
             name = e.displayName,
-            pairGroupId = e._ugGroupId,
-            isUndergroundInput = e._ugIsInput,
         })
-        e._ugGroupId = nil
-        e._ugIsInput = nil
     end
 
     InteractionMode = "Paste"
@@ -3844,11 +3766,19 @@ local function HandleMapLeftClick(mx, my, isShift)
                 local sx, sy = SnapWorldToMachineGrid(anchorSx + rdx, anchorSy + rdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
                 if IsPointOverAnyFloorModule(sx, sy, floor) and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor) then
                     NextGhostSeq = NextGhostSeq + 1
+                    local pX, pY = nil, nil
+                    if item.pairDx and item.pairDy then
+                        local rpdx = item.pairDx * cosA - item.pairDy * sinA
+                        local rpdy = item.pairDx * sinA + item.pairDy * cosA
+                        pX, pY = SnapWorldToMachineGrid(sx + rpdx, sy + rpdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
+                    end
                     table.insert(staged, {
                         ghostId = "ghost:" .. tostring(NextGhostSeq),
                         buildable = item.buildable,
                         floorIdx = SelectedFloorIdx,
                         x = sx, y = sy, z = floor.z,
+                        pairX = pX, pairY = pY,
+                        ugLength = item.ugLength,
                         yaw = finalYaw,
                         cat = item.cat or "Other",
                         cellsX = item.cellsX or 1,
@@ -3858,8 +3788,6 @@ local function HandleMapLeftClick(mx, my, isShift)
                         recipe = item.recipe,
                         machineConfig = item.machineConfig,
                         name = item.name,
-                        pairGroupId = item.pairGroupId and (stampId .. ":" .. tostring(item.pairGroupId)) or nil,
-                        isUndergroundInput = item.isUndergroundInput,
                     })
                 end
             end
@@ -3881,15 +3809,18 @@ local function HandleMapLeftClick(mx, my, isShift)
         return
     end
 
-    -- Select mode: check stamped ghosts first (drawn on top), then selectable real machines
+    -- Select mode: check stamped ghosts first (drawn on top, testing BOTH underground belt ends), then selectable real machines
     local hitGhost = nil
     local bestGhostDist = math.huge
     for _, gp in ipairs(PendingGhosts) do
         if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
             local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
             local hw, hh = rx * CELL_CM * 0.5, ry * CELL_CM * 0.5
-            if math.abs(wx - gp.x) <= hw and math.abs(wy - gp.y) <= hh then
-                local d2 = (wx - gp.x) ^ 2 + (wy - gp.y) ^ 2
+            local hitPrimary = (math.abs(wx - gp.x) <= hw and math.abs(wy - gp.y) <= hh)
+            local hitPair = (gp.pairX and gp.pairY and math.abs(wx - gp.pairX) <= hw and math.abs(wy - gp.pairY) <= hh)
+            if hitPrimary or hitPair then
+                local tx, ty = hitPrimary and gp.x or gp.pairX, hitPrimary and gp.y or gp.pairY
+                local d2 = (wx - tx) ^ 2 + (wy - ty) ^ 2
                 if d2 < bestGhostDist then
                     bestGhostDist = d2
                     hitGhost = gp
@@ -3902,11 +3833,16 @@ local function HandleMapLeftClick(mx, my, isShift)
     if not hitGhost then
         local bestDist = math.huge
         for _, rm in ipairs(RenderedMachines) do
-            if IsSelectableMachine(rm) and math.abs(wx - rm.x) <= rm.halfW and math.abs(wy - rm.y) <= rm.halfH then
-                local d2 = (wx - rm.x) ^ 2 + (wy - rm.y) ^ 2
-                if d2 < bestDist then
-                    bestDist = d2
-                    hit = rm
+            if IsSelectableMachine(rm) then
+                local hitPrimary = (math.abs(wx - rm.x) <= rm.halfW and math.abs(wy - rm.y) <= rm.halfH)
+                local hitPair = (rm.pairX and rm.pairY and math.abs(wx - rm.pairX) <= rm.halfW and math.abs(wy - rm.pairY) <= rm.halfH)
+                if hitPrimary or hitPair then
+                    local tx, ty = hitPrimary and rm.x or rm.pairX, hitPrimary and rm.y or rm.pairY
+                    local d2 = (wx - tx) ^ 2 + (wy - ty) ^ 2
+                    if d2 < bestDist then
+                        bestDist = d2
+                        hit = rm
+                    end
                 end
             end
         end
@@ -3918,26 +3854,10 @@ local function HandleMapLeftClick(mx, my, isShift)
     end
     if hitGhost and hitGhost.ghostId then
         local toggleOff = isShift and SelectedGhosts[hitGhost.ghostId] ~= nil
-        if toggleOff then
-            SelectedGhosts[hitGhost.ghostId] = nil
-        else
-            SelectedGhosts[hitGhost.ghostId] = hitGhost
-        end
-        if hitGhost.pairGroupId then
-            for _, gp2 in ipairs(PendingGhosts) do
-                if gp2.pairGroupId == hitGhost.pairGroupId and gp2.ghostId then
-                    SelectedGhosts[gp2.ghostId] = toggleOff and nil or gp2
-                end
-            end
-        end
+        SelectedGhosts[hitGhost.ghostId] = toggleOff and nil or hitGhost
     elseif hit then
         local toggleOff = isShift and SelectedMachines[hit.addr] ~= nil
-        if toggleOff then
-            SelectedMachines[hit.addr] = nil
-        else
-            SelectedMachines[hit.addr] = hit
-        end
-        -- Auto-select/deselect paired underground belt endpoint too
+        SelectedMachines[hit.addr] = toggleOff and nil or hit
         local pairRm = FindUndergroundPairEntry(hit)
         if pairRm and IsSelectableMachine(pairRm) then
             SelectedMachines[pairRm.addr] = toggleOff and nil or pairRm
@@ -3956,32 +3876,26 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
         SelectedGhosts = {}
     end
     for _, rm in ipairs(RenderedMachines) do
-        if IsSelectableMachine(rm)
-            and (rm.x + rm.halfW) >= wx1 and (rm.x - rm.halfW) <= wx2
-            and (rm.y + rm.halfH) >= wy1 and (rm.y - rm.halfH) <= wy2
-        then
-            SelectedMachines[rm.addr] = rm
-            local pairRm = FindUndergroundPairEntry(rm)
-            if pairRm and IsSelectableMachine(pairRm) then
-                SelectedMachines[pairRm.addr] = pairRm
+        if IsSelectableMachine(rm) then
+            local inMain = (rm.x + rm.halfW) >= wx1 and (rm.x - rm.halfW) <= wx2 and (rm.y + rm.halfH) >= wy1 and (rm.y - rm.halfH) <= wy2
+            local inPair = rm.pairX and rm.pairY and (rm.pairX + rm.halfW) >= wx1 and (rm.pairX - rm.halfW) <= wx2 and (rm.pairY + rm.halfH) >= wy1 and (rm.pairY - rm.halfH) <= wy2
+            if inMain or inPair then
+                SelectedMachines[rm.addr] = rm
+                local pairRm = FindUndergroundPairEntry(rm)
+                if pairRm and IsSelectableMachine(pairRm) then
+                    SelectedMachines[pairRm.addr] = pairRm
+                end
             end
         end
     end
     if floor then
-        local pairGroupsToAdd = {}
         for _, gp in ipairs(PendingGhosts) do
             if gp.ghostId and math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
                 local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
                 local hw, hh = rx * CELL_CM * 0.5, ry * CELL_CM * 0.5
-                if (gp.x + hw) >= wx1 and (gp.x - hw) <= wx2 and (gp.y + hh) >= wy1 and (gp.y - hh) <= wy2 then
-                    SelectedGhosts[gp.ghostId] = gp
-                    if gp.pairGroupId then pairGroupsToAdd[gp.pairGroupId] = true end
-                end
-            end
-        end
-        if next(pairGroupsToAdd) ~= nil then
-            for _, gp in ipairs(PendingGhosts) do
-                if gp.ghostId and gp.pairGroupId and pairGroupsToAdd[gp.pairGroupId] then
+                local inMain = (gp.x + hw) >= wx1 and (gp.x - hw) <= wx2 and (gp.y + hh) >= wy1 and (gp.y - hh) <= wy2
+                local inPair = gp.pairX and gp.pairY and (gp.pairX + hw) >= wx1 and (gp.pairX - hw) <= wx2 and (gp.pairY + hh) >= wy1 and (gp.pairY - hh) <= wy2
+                if inMain or inPair then
                     SelectedGhosts[gp.ghostId] = gp
                 end
             end
@@ -4088,6 +4002,11 @@ local function GetMapCanvasCursorPos(pc)
         local vpy = vpPos and tonumber(vpPos.Y) or -999
         Core.Log(string.format("[StationMap] CursorDiag local=(%.1f,%.1f) abs=(%.1f,%.1f) vp=(%.1f,%.1f) canvas=(%.1f,%.1f)",
             lx or -999, ly or -999, ax, ay, vpx, vpy, ViewTransform.canvasW, ViewTransform.canvasH))
+    end
+
+    -- Align to the top-left tip of Main Sequence's custom cursor (0px X, -15px Y from bottom-left)
+    if ly ~= nil then
+        ly = ly - 15.0
     end
 
     return lx, ly
@@ -4523,7 +4442,12 @@ local function OpenStationMap()
     then
         local tFast = os.clock()
         MapWinVisible = true
-        pcall(function() ActiveMapWin:SetVisibility(0) end) -- Visible
+        pcall(function()
+            if ActiveMapWin.IsInViewport and not ActiveMapWin:IsInViewport() then
+                ActiveMapWin:AddToViewport(50)
+            end
+            ActiveMapWin:SetVisibility(0)
+        end) -- Visible
         SetStationMapCursorMode(pc, ActiveMapWin, true)
         MouseState.wasLDown = false
         MouseState.wasRDown = false
@@ -5230,7 +5154,7 @@ function Feature.RegisterHooks()
         function(Context)
             local w = Context:get()
             if Core.IsValidObj(w) and Core.IsValidObj(ActiveMapWin) and w:GetAddress() == ActiveMapWin:GetAddress() then
-                DestroyStationMap()
+                CloseStationMap()
             end
         end
     )
