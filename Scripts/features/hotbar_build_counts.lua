@@ -335,7 +335,7 @@ local function DiscoverHotbarSlots(hud)
         end
     end
 
-    -- Fallback: scan HUD WidgetTree.AllWidgets once for any widget whose class or name contains "Hotbar"
+    -- Fallback: scan HUD WidgetTree.AllWidgets once for any widget whose class contains "Hotbar"
     local hudWT = nil
     pcall(function() hudWT = hud.WidgetTree end)
     if not Core.IsValidObj(hotbarWidget) and Core.IsValidObj(hudWT) and hudWT.AllWidgets then
@@ -361,72 +361,104 @@ local function DiscoverHotbarSlots(hud)
         slots[#slots + 1] = w
     end
 
-    -- 1. Check direct slot arrays or container children on hotbarWidget
+    local userWidgetCls = Core.FindOrLoadClass("/Script/UMG.UserWidget")
+    local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetClass)
+
     if Core.IsValidObj(hotbarWidget) then
-        for _, prop in ipairs({ "Slots", "HotbarSlots", "SlotWidgets", "Buttons" }) do
+        -- 1. Check direct slot arrays on hotbarWidget
+        for _, prop in ipairs({ "Slots", "HotbarSlots", "SlotWidgets", "Buttons", "Items", "Entries" }) do
             local ok, arr = pcall(function() return hotbarWidget[prop] end)
             if ok and arr then
                 StationData.ForEachArray(arr, function(_, elem)
                     addSlot(Core.UnwrapArrayElem(elem))
                 end)
             end
+            if #slots > 0 then break end
         end
 
-        -- Check HorizontalBox / UniformGridPanel / Container children inside hotbarWidget
-        if #slots == 0 then
-            for _, prop in ipairs({ "Container", "SlotsContainer", "SlotContainer", "HotbarContainer", "HorizontalBox", "HorizontalBox_0", "Grid" }) do
-                local ok, box = pcall(function() return hotbarWidget[prop] end)
-                if ok and Core.IsValidObj(box) and box.GetAllChildren then
-                    local okCh, ch = pcall(function() return box:GetAllChildren() end)
-                    if okCh and ch then
-                        StationData.ForEachArray(ch, function(_, elem)
-                            addSlot(Core.UnwrapArrayElem(elem))
-                        end)
-                    end
-                end
-                if #slots > 0 then break end
-            end
-        end
-
-        -- Walk hotbarWidget.WidgetTree.AllWidgets for slot widgets
+        -- 2. Inspect every PanelWidget inside hotbarWidget.WidgetTree.AllWidgets and find
+        --    the container holding 4..12 UserWidget children (the hotbar slot widgets).
         if #slots == 0 then
             local hbWT = nil
             pcall(function() hbWT = hotbarWidget.WidgetTree end)
+            local panelSummary = {}
             if Core.IsValidObj(hbWT) and hbWT.AllWidgets then
+                local bestChildren = nil
                 StationData.ForEachArray(hbWT.AllWidgets, function(_, elem)
                     local w = Core.UnwrapArrayElem(elem)
-                    if Core.IsValidObj(w) then
-                        local okN, cn = pcall(function() return w:GetClass():GetFName():ToString():lower() end)
-                        if okN and cn and (cn:find("hotbar", 1, true) or cn:find("slot", 1, true)) and cn:find("wbp_", 1, true) then
-                            addSlot(w)
+                    if Core.IsValidObj(w) and Core.IsValidObj(panelCls) and w:IsA(panelCls) and w.GetAllChildren then
+                        local okCh, ch = pcall(function() return w:GetAllChildren() end)
+                        if okCh and ch then
+                            local uwList = {}
+                            StationData.ForEachArray(ch, function(_, ce)
+                                local cw = Core.UnwrapArrayElem(ce)
+                                if Core.IsValidObj(cw) and Core.IsValidObj(userWidgetCls) and cw:IsA(userWidgetCls) then
+                                    uwList[#uwList + 1] = cw
+                                end
+                            end)
+                            if #panelSummary < 8 then
+                                local pn = "?"
+                                local fn = "?"
+                                pcall(function() pn = w:GetFName():ToString() end)
+                                if uwList[1] then pcall(function() fn = uwList[1]:GetClass():GetFName():ToString() end) end
+                                panelSummary[#panelSummary + 1] = string.format("%s(uw=%d,%s)", pn, #uwList, fn)
+                            end
+                            if #uwList >= 4 and #uwList <= 16 then
+                                if not bestChildren or #uwList > #bestChildren then
+                                    bestChildren = uwList
+                                end
+                            end
                         end
                     end
                 end)
-            end
-        end
-    end
-
-    -- 2. Fallback: look for WBP_*Hotbar*Slot* directly in hud.WidgetTree.AllWidgets
-    if #slots == 0 and Core.IsValidObj(hudWT) and hudWT.AllWidgets then
-        StationData.ForEachArray(hudWT.AllWidgets, function(_, elem)
-            local w = Core.UnwrapArrayElem(elem)
-            if Core.IsValidObj(w) then
-                local okN, cn = pcall(function() return w:GetClass():GetFName():ToString():lower() end)
-                if okN and cn and cn:find("hotbar", 1, true) and cn:find("slot", 1, true) then
-                    addSlot(w)
+                if bestChildren then
+                    for _, cw in ipairs(bestChildren) do addSlot(cw) end
                 end
             end
-        end)
+
+            -- 3. Also check direct UserWidget children in hotbarWidget.WidgetTree.AllWidgets
+            --    (in case slots are statically laid out inside the WidgetTree)
+            if #slots == 0 and Core.IsValidObj(hbWT) and hbWT.AllWidgets then
+                local byClass = {}
+                StationData.ForEachArray(hbWT.AllWidgets, function(_, elem)
+                    local w = Core.UnwrapArrayElem(elem)
+                    if Core.IsValidObj(w) and Core.IsValidObj(userWidgetCls) and w:IsA(userWidgetCls) then
+                        local okN, cn = pcall(function() return w:GetClass():GetFName():ToString() end)
+                        if okN and cn and cn ~= "" then
+                            byClass[cn] = byClass[cn] or {}
+                            byClass[cn][#byClass[cn] + 1] = w
+                        end
+                    end
+                end)
+                local bestList = nil
+                for _, list in pairs(byClass) do
+                    if #list >= 4 and #list <= 16 and (not bestList or #list > #bestList) then
+                        bestList = list
+                    end
+                end
+                if bestList then
+                    for _, cw in ipairs(bestList) do addSlot(cw) end
+                end
+            end
+
+            if #slots == 0 and not DiagLogged then
+                DiagLogged = true
+                Core.Log(string.format("[HotbarCounts] WBP_Hotbar_C panels=[%s]", table.concat(panelSummary, "; ")))
+            end
+        end
     end
 
     return hotbarWidget, slots
 end
 
+local PendingHuds = {} -- hudAddr -> { Hud, Attempts }
+
 local function EnsureHudHotbarTracked(hud)
-    if not Core.IsValidObj(hud) then return end
+    if not Core.IsValidObj(hud) then return false end
     local addr = hud:GetAddress()
     if TrackedHuds[addr] and Core.IsValidObj(TrackedHuds[addr].Hud) and #TrackedHuds[addr].Slots > 0 then
-        return
+        PendingHuds[addr] = nil
+        return true
     end
 
     local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
@@ -434,12 +466,10 @@ local function EnsureHudHotbarTracked(hud)
 
     local hotbarWidget, rawSlots = DiscoverHotbarSlots(hud)
     if #rawSlots == 0 then
-        if not DiagLogged then
-            DiagLogged = true
-            local hbName = Core.IsValidObj(hotbarWidget) and hotbarWidget:GetClass():GetFName():ToString() or "nil"
-            Core.Log(string.format("[HotbarCounts] No slots found yet on WBP_CharacterHUD_C (hotbar=%s)", hbName))
-        end
-        return
+        local pend = PendingHuds[addr] or { Hud = hud, Attempts = 0 }
+        pend.Attempts = pend.Attempts + 1
+        PendingHuds[addr] = pend
+        return false
     end
 
     local trackedSlots = {}
@@ -459,28 +489,47 @@ local function EnsureHudHotbarTracked(hud)
     end
 
     if #trackedSlots > 0 then
+        PendingHuds[addr] = nil
         TrackedHuds[addr] = {
             Hud = hud,
             HotbarWidget = hotbarWidget,
             Slots = trackedSlots,
         }
+        local hbName = Core.IsValidObj(hotbarWidget) and hotbarWidget:GetClass():GetFName():ToString() or "nil"
+        local sName = rawSlots[1]:GetClass():GetFName():ToString()
+        Core.Log(string.format("[HotbarCounts] Attached %d/%d slot labels (hotbar=%s, slotCls=%s)",
+            #trackedSlots, #rawSlots, hbName, sName))
+        return true
+    else
         if not DiagLogged then
             DiagLogged = true
-            local hbName = Core.IsValidObj(hotbarWidget) and hotbarWidget:GetClass():GetFName():ToString() or "nil"
             local sName = rawSlots[1]:GetClass():GetFName():ToString()
-            Core.Log(string.format("[HotbarCounts] Attached %d/%d slot labels (hotbar=%s, slotCls=%s)",
-                #trackedSlots, #rawSlots, hbName, sName))
+            Core.Log(string.format("[HotbarCounts] Found %d slots (%s) but no Overlay/Canvas host inside slot",
+                #rawSlots, sName))
         end
     end
+    return false
 end
 
 local function RefreshHotbarCounts()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return false end
 
+    -- Retry any HUDs whose WBP_Hotbar_C hadn't populated its slots yet on initial construct
+    local anyPending = false
+    for addr, pend in pairs(PendingHuds) do
+        if Core.IsValidObj(pend.Hud) and pend.Attempts < 20 then
+            if not EnsureHudHotbarTracked(pend.Hud) then
+                anyPending = true
+            end
+        else
+            PendingHuds[addr] = nil
+        end
+    end
+
     local inv = GetPlayerInventory(pc)
     local invCounts, hasCountsMap = BuildPlayerInventoryCounts(inv)
-    local anyValid = false
+    local anyValid = anyPending
 
     for addr, entry in pairs(TrackedHuds) do
         if not Core.IsValidObj(entry.Hud) then
@@ -556,10 +605,12 @@ local function TryAttachExistingHuds()
             end
         end
     end
-    for _ in pairs(TrackedHuds) do
-        StartPoll()
-        break
+    local shouldPoll = false
+    for _ in pairs(TrackedHuds) do shouldPoll = true; break end
+    if not shouldPoll then
+        for _ in pairs(PendingHuds) do shouldPoll = true; break end
     end
+    if shouldPoll then StartPoll() end
 end
 
 Feature.WatchWidgets = {
@@ -580,6 +631,7 @@ end
 
 function Feature.OnMapLoad()
     TrackedHuds = {}
+    PendingHuds = {}
     DiagLogged = false
 end
 

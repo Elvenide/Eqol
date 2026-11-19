@@ -1470,11 +1470,21 @@ local function EnsureHudKeybindIndicator(hud)
         nudgeX = 22.0
     end
 
-    -- Host inside a zero-width CanvasPanel in Row 0, Col 1 so our 3 icons extend cleanly to the left
-    -- of Tab without widening Col 0 / Col 1 or disturbing the bottom row (Y, M, T, G, K).
+    -- Wrap hostCanvas in a 1x1 SizeBox (unclipped) in Row 0, Col 1 so the GridPanel NEVER
+    -- stretches Column 1 (which would widen the base-game Map 'M' icon in Row 1, Col 1),
+    -- while [P] [N] [L] render at full size extending cleanly to the left of Tab.
+    local hostSizeBox = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
     local hostCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
     local iconsHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    if not (Core.IsValidObj(hostCanvas) and Core.IsValidObj(iconsHBox)) then return end
+    if not (Core.IsValidObj(hostSizeBox) and Core.IsValidObj(hostCanvas) and Core.IsValidObj(iconsHBox)) then return end
+
+    pcall(function()
+        hostSizeBox:SetWidthOverride(1.0)
+        hostSizeBox:SetHeightOverride(1.0)
+        if hostSizeBox.SetClipping then hostSizeBox:SetClipping(0) end
+        if hostCanvas.SetClipping then hostCanvas:SetClipping(0) end
+    end)
+    hostSizeBox:AddChild(hostCanvas)
 
     local cSlot = hostCanvas:AddChildToCanvas(iconsHBox)
     if Core.IsValidObj(cSlot) then
@@ -1542,16 +1552,16 @@ local function EnsureHudKeybindIndicator(hud)
 
     if #createdItems == 0 then return end
 
-    local gSlot = container:AddChildToGrid(hostCanvas, 0, 1)
+    local gSlot = container:AddChildToGrid(hostSizeBox, 0, 1)
     if Core.IsValidObj(gSlot) then
         pcall(function()
             gSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
             gSlot:SetHorizontalAlignment(3) -- Right
-            gSlot:SetVerticalAlignment(0)   -- Fill
+            gSlot:SetVerticalAlignment(2)   -- Center
         end)
     end
 
-    HudKeyIndicators[addr] = { Root = hostCanvas, Items = createdItems }
+    HudKeyIndicators[addr] = { Root = hostSizeBox, Items = createdItems }
 end
 
 local HudIndicatorPollActive = false

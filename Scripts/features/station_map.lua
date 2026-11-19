@@ -5411,7 +5411,6 @@ function Feature.OnClientRestart()
         PendingGhosts = {}
         Clipboard = {}
     end
-    ScheduleStationPrewarm()
 end
 
 function Feature.OnMapLoad()

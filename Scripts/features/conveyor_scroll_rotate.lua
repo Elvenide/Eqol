@@ -69,8 +69,16 @@ local function StartScrollRotatePoll()
                         end
                     end
                 end)
-                if delta ~= 0 then
-                    pcall(function() builder:AddRotation(delta) end)
+                if delta == 1 then
+                    pcall(function() builder:AddRotation(1) end)
+                elseif delta == -1 then
+                    -- Main Sequence's AddRotation always steps +90 deg (+1 mod 4);
+                    -- calling it 3 times steps +270 deg == -90 deg (opposite direction).
+                    pcall(function()
+                        builder:AddRotation(1)
+                        builder:AddRotation(1)
+                        builder:AddRotation(1)
+                    end)
                 end
             end
         end
