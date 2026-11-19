@@ -677,6 +677,38 @@ local function InspectBuildMachineCommandLayout()
         end)
         Core.Log("[StationMap] BuildFuncs: " .. table.concat(fnNames, ", "))
 
+        -- Also inspect AddBuildCommand & AddBlueprintBuildCommand signatures
+        for _, altName in ipairs({ "AddBuildCommand", "AddBlueprintBuildCommand" }) do
+            local afn = StaticFindObject("/Script/MainSequence.DMSPlayerController:" .. altName)
+            if Core.IsValidObj(afn) then
+                local aParts = {}
+                pcall(function()
+                    afn:ForEachProperty(function(p)
+                        local pn = p:GetFName():ToString()
+                        local pc2 = ""
+                        pcall(function() pc2 = p:GetClass():GetFName():ToString() end)
+                        if pn ~= "ReturnValue" then
+                            local extra = ""
+                            if pc2 == "StructProperty" and p.GetStruct then
+                                local okS, st = pcall(function() return p:GetStruct() end)
+                                if okS and Core.IsValidObj(st) then
+                                    local sf = {}
+                                    if st.ForEachProperty then
+                                        st:ForEachProperty(function(fp)
+                                            table.insert(sf, fp:GetFName():ToString() .. ":" .. fp:GetClass():GetFName():ToString())
+                                        end)
+                                    end
+                                    extra = ":" .. st:GetFName():ToString() .. "{" .. table.concat(sf, ",") .. "}"
+                                end
+                            end
+                            table.insert(aParts, pn .. "(" .. pc2 .. extra .. ")")
+                        end
+                    end)
+                end)
+                Core.Log("[StationMap] AltSig " .. altName .. ": [" .. table.concat(aParts, "; ") .. "]")
+            end
+        end
+
         -- Inspect a real placed machine on the current floor to see exact GridLocation / Height / PlatformID / Rotation units
         local refParts = {}
         pcall(function()
@@ -1823,6 +1855,7 @@ RefreshStationMapCanvas = function()
     local gridMidX = (bGridMinX + bGridMaxX) * 0.5
     local gridMidY = (bGridMinY + bGridMaxY) * 0.5
 
+    local deferredGridLines = {}
     local function addGridAxisLines(startIdx, endIdx, isVertical, spanOther, midOther)
         local maxLines = 260
         local drawn = 0
@@ -1837,20 +1870,30 @@ RefreshStationMapCanvas = function()
             local isMajor4 = ((idx % 4) == 0)
             local isMajor8 = ((idx % 8) == 0)
             local initThick = isMajor4 and 2.2 or 1.4
-            local line, s = AddBorderFast(
-                outer, MapUI.MapCanvas, posX, posY,
-                isVertical and initThick or spanOther,
-                isVertical and spanOther or initThick,
-                isMajor4 and COLORS.GridMajor or COLORS.GridLine, 3
-            )
-            if line and s then
-                table.insert(RenderedGridLines, {
-                    border = line,
-                    slot = s,
+            if isMajor4 then
+                local line, s = AddBorderFast(
+                    outer, MapUI.MapCanvas, posX, posY,
+                    isVertical and initThick or spanOther,
+                    isVertical and spanOther or initThick,
+                    COLORS.GridMajor, 3
+                )
+                if line and s then
+                    table.insert(RenderedGridLines, {
+                        border = line,
+                        slot = s,
+                        isVertical = isVertical,
+                        spanOther = spanOther,
+                        isMajor4 = true,
+                        isMajor8 = isMajor8,
+                    })
+                end
+            else
+                table.insert(deferredGridLines, {
+                    posX = posX, posY = posY,
+                    w = isVertical and initThick or spanOther,
+                    h = isVertical and spanOther or initThick,
                     isVertical = isVertical,
                     spanOther = spanOther,
-                    isMajor4 = isMajor4,
-                    isMajor8 = isMajor8,
                 })
             end
         end
@@ -2120,11 +2163,13 @@ RefreshStationMapCanvas = function()
         })
     end
 
-    -- Stream deferred walls, conveyor tiles, and port badges progressively across frames to avoid initial-open freezes
-    if #deferredWalls > 0 or #deferredConveyors > 0 or #deferredPorts > 0 then
+    -- Stream deferred minor grid lines, walls, conveyor tiles, and port badges progressively across frames
+    if #deferredGridLines > 0 or #deferredWalls > 0 or #deferredConveyors > 0 or #deferredPorts > 0 then
+        local gIdx = 1
         local wIdx = 1
         local cIdx = 1
         local pIdx = 1
+        local GRID_PER_FRAME = 48
         local WALLS_PER_FRAME = 32
         local CONV_PER_FRAME = 24
         local PORTS_PER_FRAME = 12
@@ -2132,6 +2177,28 @@ RefreshStationMapCanvas = function()
         local function pumpDeferredBatch()
             if myRenderGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
                 return
+            end
+            local gEnd = math.min(#deferredGridLines, gIdx + GRID_PER_FRAME - 1)
+            local addedGrid = false
+            while gIdx <= gEnd do
+                local dg = deferredGridLines[gIdx]
+                local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
+                if line and s then
+                    table.insert(RenderedGridLines, {
+                        border = line,
+                        slot = s,
+                        isVertical = dg.isVertical,
+                        spanOther = dg.spanOther,
+                        isMajor4 = false,
+                        isMajor8 = false,
+                    })
+                    addedGrid = true
+                end
+                gIdx = gIdx + 1
+            end
+            if addedGrid and gIdx > #deferredGridLines then
+                LastGridTier = nil
+                UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
             end
             local wEnd = math.min(#deferredWalls, wIdx + WALLS_PER_FRAME - 1)
             while wIdx <= wEnd do
@@ -2152,7 +2219,7 @@ RefreshStationMapCanvas = function()
                 RenderUnconnectedItemPort(outer, MapUI.MapCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
                 pIdx = pIdx + 1
             end
-            if wIdx <= #deferredWalls or cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
+            if gIdx <= #deferredGridLines or wIdx <= #deferredWalls or cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
                 ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
             end
         end
