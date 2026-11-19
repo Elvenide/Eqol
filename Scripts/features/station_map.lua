@@ -283,6 +283,9 @@ local function UpdateGridAppearanceForZoom(zoomRatio)
     end
 end
 
+local OnViewportChangedStatic = nil
+local OnViewportChangedMachines = nil
+
 local function ApplyViewTransform()
     if not MapUI then return end
     local zoomRatio = ViewTransform.scale / BASE_PX_PER_CM
@@ -301,6 +304,8 @@ local function ApplyViewTransform()
         end
     end
     UpdateGridAppearanceForZoom(zoomRatio)
+    if OnViewportChangedStatic then OnViewportChangedStatic() end
+    if OnViewportChangedMachines then OnViewportChangedMachines() end
 end
 
 local function CanvasToWorld(mx, my)
@@ -1009,6 +1014,41 @@ local function CaptureMachineConfig(m)
         end
     end)
 
+    -- 4b. Splitter / Belt Balancer Filters array (never touches inventory)
+    pcall(function()
+        local flt = m.Filters
+        if flt then
+            local len = flt.GetArrayNum and flt:GetArrayNum() or #flt
+            if type(len) == "number" and len > 0 then
+                cfg.filters = {}
+                for i = 1, len do
+                    local okE, elem = pcall(function() return flt[i] end)
+                    if okE and elem ~= nil then
+                        local unwrapped = Core.UnwrapArrayElem and Core.UnwrapArrayElem(elem) or elem
+                        local fItem = nil
+                        local fCount = 1
+                        if Core.IsValidObj(unwrapped) then
+                            fItem = unwrapped
+                        elseif unwrapped ~= nil then
+                            pcall(function()
+                                if Core.IsValidObj(unwrapped.Item) then fItem = unwrapped.Item
+                                elseif Core.IsValidObj(unwrapped.FilterItem) then fItem = unwrapped.FilterItem end
+                            end)
+                            pcall(function()
+                                if unwrapped.Count ~= nil then fCount = tonumber(unwrapped.Count) or 1
+                                elseif unwrapped.Amount ~= nil then fCount = tonumber(unwrapped.Amount) or 1 end
+                            end)
+                        end
+                        if Core.IsValidObj(fItem) then
+                            table.insert(cfg.filters, { idx = i - 1, item = fItem, count = fCount })
+                            hasAny = true
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
     -- 5. LogisticFilters array (Splitters, Belt Balancers, etc. - never touches inventory)
     pcall(function()
         local lf = m.LogisticFilters
@@ -1070,11 +1110,12 @@ local function CaptureMachineConfig(m)
                 c = c.GetSuperStruct and c:GetSuperStruct() or nil
             end
         end)
-        Core.Log(string.format("[StationMap] CopyConfigDiag cls=%s hasAny=%s recipe=%s pIn=%s pOut=%s cfg=%s cfg2=%s lf=%d props=[%s]",
+        Core.Log(string.format("[StationMap] CopyConfigDiag cls=%s hasAny=%s recipe=%s pIn=%s pOut=%s cfg=%s cfg2=%s flt=%d lf=%d props=[%s]",
             clsKey, tostring(hasAny),
             Core.IsValidObj(cfg.recipe) and cfg.recipe:GetFName():ToString() or "nil",
             tostring(cfg.priorityInput), tostring(cfg.priorityOutput),
             tostring(cfg.config), tostring(cfg.config2),
+            cfg.filters and #cfg.filters or 0,
             cfg.logisticFilters and #cfg.logisticFilters or 0,
             table.concat(props, ",")))
     end
@@ -1142,12 +1183,18 @@ local function InvokeCreateInputCommand(pc, className, funcName, valMap)
             v = valMap.config
         elseif low:find("working", 1, true) then
             v = valMap.bWorking
-        elseif low:find("port", 1, true) then
-            v = valMap.portIndex
+        elseif low:find("port", 1, true) or low:find("index", 1, true) then
+            v = valMap.portIndex or 0
         elseif low:find("remove", 1, true) then
             v = valMap.bRemove == true
         elseif low:find("action", 1, true) then
             v = valMap.action or 0
+        elseif low:find("itemstack", 1, true) then
+            if cls:find("Struct", 1, true) then
+                v = { Item = valMap.item, Count = valMap.amount or 1 }
+            else
+                v = valMap.item
+            end
         elseif low:find("filter", 1, true) and cls:find("Struct", 1, true) then
             v = valMap.filterStruct
         elseif low:find("item", 1, true) or low:find("filter", 1, true) then
@@ -1165,9 +1212,18 @@ local function InvokeCreateInputCommand(pc, className, funcName, valMap)
     local okCall, cmdObj = pcall(function()
         return sig.cdo[funcName](sig.cdo, table.unpack(args))
     end)
-    if okCall and Core.IsValidObj(cmdObj) then
-        local okAdd = pcall(function() pc:AddInputCommand(cmdObj) end)
-        return okAdd
+    if not okCall then
+        Core.Log(string.format("[StationMap] InputCmd %s call err: %s", key, tostring(cmdObj)))
+        return false
+    end
+    if Core.IsValidObj(cmdObj) then
+        -- DMSPlayerController:AddInputCommand takes TWO params: (InReceiverID:Int32, InCommand:UInputCommand*)
+        local okAdd, errAdd = pcall(function() pc:AddInputCommand(valMap.receiverId, cmdObj) end)
+        if not okAdd then
+            Core.Log(string.format("[StationMap] AddInputCommand(%s, %s) err: %s", tostring(valMap.receiverId), key, tostring(errAdd)))
+            return false
+        end
+        return true
     end
     return false
 end
@@ -1193,40 +1249,68 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
     end
 
     -- 2. Splitter / Belt Balancer priorities & Config/Config2
-    local cfg1 = (cfg.priorityInput ~= nil) and cfg.priorityInput or cfg.config
-    local cfg2 = (cfg.priorityOutput ~= nil) and cfg.priorityOutput or cfg.config2
-    if cfg1 ~= nil and cfg1 ~= 0 and cfg1 ~= -1 then
-        if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig", {
+    local hasPrio = (cfg.priorityInput ~= nil and cfg.priorityInput >= 0) or (cfg.priorityOutput ~= nil and cfg.priorityOutput >= 0)
+    if hasPrio then
+        if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
             receiverId = receiverId,
-            config = cfg1,
+            config = (cfg.priorityInput ~= nil) and cfg.priorityInput or -1,
+            config2 = (cfg.priorityOutput ~= nil) and cfg.priorityOutput or -1,
             playerObjId = playerObjId,
         }) then
             applied = true
         end
-    end
-    if cfg2 ~= nil and cfg2 ~= 0 and cfg2 ~= -1 then
-        if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
-            receiverId = receiverId,
-            config2 = cfg2,
-            config = cfg2,
-            playerObjId = playerObjId,
-        }) then
-            applied = true
+    elseif cfg.config ~= nil and cfg.config ~= 0 then
+        if cfg.config2 ~= nil and cfg.config2 ~= 0 then
+            if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
+                receiverId = receiverId,
+                config = cfg.config,
+                config2 = cfg.config2,
+                playerObjId = playerObjId,
+            }) then
+                applied = true
+            end
+        else
+            if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig", {
+                receiverId = receiverId,
+                config = cfg.config,
+                playerObjId = playerObjId,
+            }) then
+                applied = true
+            end
         end
     end
 
-    -- 3. Single item filter
+    -- 3. Splitter / Belt Balancer per-port Filters array
+    if cfg.filters and #cfg.filters > 0 then
+        for _, f in ipairs(cfg.filters) do
+            if Core.IsValidObj(f.item) then
+                if InvokeCreateInputCommand(pc, "SetItemInput", "CreateInputSetItem", {
+                    receiverId = receiverId,
+                    item = f.item,
+                    amount = f.count or 1,
+                    config = f.idx or 0,
+                    playerObjId = playerObjId,
+                }) then
+                    applied = true
+                end
+            end
+        end
+    end
+
+    -- 3b. Single item filter
     if Core.IsValidObj(cfg.filterItem) then
         if InvokeCreateInputCommand(pc, "SetItemInput", "CreateInputSetItem", {
             receiverId = receiverId,
             item = cfg.filterItem,
+            amount = 1,
+            config = 0,
             playerObjId = playerObjId,
         }) then
             applied = true
         end
     end
 
-    -- 4. Logistic filters (Splitters / Belt Balancers / etc.)
+    -- 4. Logistic filters (Containers / Drone Bays / etc.)
     if cfg.logisticFilters and #cfg.logisticFilters > 0 then
         for _, lf in ipairs(cfg.logisticFilters) do
             if InvokeCreateInputCommand(pc, "LogisticFilterInput", "CreateInputLogisticFilter", {
@@ -1754,17 +1838,34 @@ local function FitViewTransformToFloor()
         cy = ys[math.ceil(#ys * 0.5)]
     end
 
+    -- Center on local player's position if on this floor; otherwise fall back to median of machines/platforms
+    local centeredOnPlayer = false
+    pcall(function()
+        local pc = MapUI and MapUI.PC or Core.GetLocalPlayerController()
+        if Core.IsValidObj(pc) and Core.IsValidObj(pc.Pawn) then
+            local loc = pc.Pawn:K2_GetActorLocation()
+            if loc and type(loc.X) == "number" then
+                local plx, ply, plz = StationData.WorldToStationLocal(CurrentFrameXform, loc.X, loc.Y or 0.0, loc.Z or 0.0, nil, nil, nil)
+                if math.abs(plz - floor.z) <= 260.0 then
+                    cx, cy = plx, ply
+                    centeredOnPlayer = true
+                end
+            end
+        end
+    end)
+
     local spanX = math.max(1200.0, maxX - minX)
     local spanY = math.max(1200.0, maxY - minY)
     local pad = 90.0
     local availW = math.max(300.0, ViewTransform.canvasW - pad)
     local availH = math.max(300.0, ViewTransform.canvasH - pad)
 
-    -- Default base scale makes 1x1 cells larger (~28px) for comfortable inspection while still fitting smaller floors
+    -- Start moderately zoomed in around the player (~36px/cell) so only the nearby area loads initially
     local fitted = math.min(availW / spanX, availH / spanY)
+    local minStartScale = centeredOnPlayer and 0.36 or 0.28
     ViewTransform.cx = cx
     ViewTransform.cy = cy
-    ViewTransform.scale = Core.Clamp(math.max(fitted, 0.28), 0.14, 0.90)
+    ViewTransform.scale = Core.Clamp(math.max(fitted, minStartScale), 0.14, 0.90)
     ViewTransform.floorZ = floor.z
     ViewTransform.hasFitted = true
 end
@@ -2222,13 +2323,17 @@ RefreshStationMapCanvas = function(machinesOnly)
             RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
         end
 
-        -- 2b. Queue structural module walls for fast chunked 2-pass continuous rendering (Z=5 border, Z=6 opaque fill)
+        -- 2b. Index structural module walls for viewport-driven lazy 2-pass continuous rendering (Z=5 border, Z=6 opaque fill)
         if floor.walls and #floor.walls > 0 then
             for _, w in ipairs(floor.walls) do
                 local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
                 local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
                 local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-                table.insert(deferredWalls, { wx = wx, wy = wy, ww = ww, wh = wh })
+                table.insert(deferredWalls, {
+                    wx = wx, wy = wy, ww = ww, wh = wh,
+                    minX = w.minX, maxX = w.maxX, minY = w.minY, maxY = w.maxY,
+                    rendered = false,
+                })
             end
         end
     end
@@ -2237,13 +2342,24 @@ RefreshStationMapCanvas = function(machinesOnly)
     local myMachineGen = MachineRenderGen
     local deferredPorts = {}
 
-    -- 3. Collect & stream ALL placed machines + ports progressively across frames (time-budgeted ~6ms/frame)
-    -- so large floors (e.g. 500+ machines) open instantaneously with zero freeze.
+    local function getPaddedVisibleWorldRect()
+        local scale = math.max(0.05, ViewTransform.scale or 0.36)
+        local halfW = (math.max(300.0, ViewTransform.canvasW or 1200.0) * 0.5) / scale
+        local halfH = (math.max(200.0, ViewTransform.canvasH or 800.0) * 0.5) / scale
+        local padX = math.max(600.0, halfW * 0.35)
+        local padY = math.max(600.0, halfH * 0.35)
+        return ViewTransform.cx - halfW - padX, ViewTransform.cx + halfW + padX,
+               ViewTransform.cy - halfH - padY, ViewTransform.cy + halfH + padY
+    end
+
+    -- 3. Index placed machines for viewport-driven lazy streaming (permanent once loaded, never unloaded on pan)
     local floorMachines = floor.machines or {}
     local presentAddrs = {}
+    local pendingMachines = {}
     for _, me in ipairs(floorMachines) do
         if Core.IsValidObj(me.machine) then
             presentAddrs[me.machine:GetAddress()] = true
+            table.insert(pendingMachines, { me = me, rendered = false })
         end
     end
     local seenUndergroundPairs = {}
@@ -2251,13 +2367,17 @@ RefreshStationMapCanvas = function(machinesOnly)
     local portHalfCm = 32.0
     local portsByKey = {}
 
-    -- Stream deferred minor grid lines and walls on static MapCanvas independently of machine refreshes
-    if #deferredGridLines > 0 or #deferredWalls > 0 then
+    -- Stream deferred minor grid lines and viewport-visible walls on static MapCanvas independently of machine refreshes
+    if not machinesOnly then
         local gIdx = 1
-        local wIdx = 1
+        local visibleWallQueue = {}
+        local wQueueIdx = 1
         local wallBorderPad = 11.0
+        local staticPumpRunning = false
+
         local function pumpStaticBatch()
             if myCanvasGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
+                staticPumpRunning = false
                 return
             end
             local budgetEnd = os.clock() + 0.005
@@ -2285,24 +2405,43 @@ RefreshStationMapCanvas = function(machinesOnly)
                 UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
             end
             local wCount = 0
-            while wIdx <= #deferredWalls and (wCount < 6 or os.clock() < budgetEnd) and wCount < 32 do
-                local dw = deferredWalls[wIdx]
+            while wQueueIdx <= #visibleWallQueue and (wCount < 6 or os.clock() < budgetEnd) and wCount < 32 do
+                local dw = visibleWallQueue[wQueueIdx]
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
-                wIdx = wIdx + 1
+                wQueueIdx = wQueueIdx + 1
                 wCount = wCount + 1
             end
-            if gIdx <= #deferredGridLines or wIdx <= #deferredWalls then
+            if gIdx <= #deferredGridLines or wQueueIdx <= #visibleWallQueue then
+                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+            else
+                staticPumpRunning = false
+            end
+        end
+
+        OnViewportChangedStatic = function()
+            if myCanvasGen ~= CanvasRenderGen then return end
+            local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRect()
+            for _, dw in ipairs(deferredWalls) do
+                if not dw.rendered and dw.maxX >= vMinX and dw.minX <= vMaxX and dw.maxY >= vMinY and dw.minY <= vMaxY then
+                    dw.rendered = true
+                    table.insert(visibleWallQueue, dw)
+                end
+            end
+            if not staticPumpRunning and (gIdx <= #deferredGridLines or wQueueIdx <= #visibleWallQueue) then
+                staticPumpRunning = true
                 ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
             end
         end
-        ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
     end
 
-    -- Stream ALL machines (non-conveyors, conveyors, icons, underground links) and port badges within a 6ms/frame budget
-    if #floorMachines > 0 then
-        local mIdx = 1
+    -- Stream ONLY viewport-visible machines and their port badges within a 6ms/frame budget (load once, keep permanently)
+    if #pendingMachines > 0 then
+        local visibleMachineQueue = {}
+        local mQueueIdx = 1
         local pIdx = 1
+        local machinePumpRunning = false
+
         local function processOneMachine(me)
             local m = me.machine
             if not (Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m)) then return end
@@ -2510,13 +2649,14 @@ RefreshStationMapCanvas = function(machinesOnly)
 
         local function pumpMachineBatch()
             if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(mCanvas) then
+                machinePumpRunning = false
                 return
             end
             local budgetEnd = os.clock() + 0.006
             local mCount = 0
-            while mIdx <= #floorMachines and (mCount < 2 or os.clock() < budgetEnd) and mCount < 28 do
-                processOneMachine(floorMachines[mIdx])
-                mIdx = mIdx + 1
+            while mQueueIdx <= #visibleMachineQueue and (mCount < 2 or os.clock() < budgetEnd) and mCount < 24 do
+                processOneMachine(visibleMachineQueue[mQueueIdx])
+                mQueueIdx = mQueueIdx + 1
                 mCount = mCount + 1
             end
             local pCount = 0
@@ -2526,11 +2666,32 @@ RefreshStationMapCanvas = function(machinesOnly)
                 pIdx = pIdx + 1
                 pCount = pCount + 1
             end
-            if mIdx <= #floorMachines or pIdx <= #deferredPorts then
+            if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts then
+                ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
+            else
+                machinePumpRunning = false
+            end
+        end
+
+        OnViewportChangedMachines = function()
+            if myMachineGen ~= MachineRenderGen then return end
+            local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRect()
+            for _, pm in ipairs(pendingMachines) do
+                if not pm.rendered then
+                    local me = pm.me
+                    if me.x >= vMinX and me.x <= vMaxX and me.y >= vMinY and me.y <= vMaxY then
+                        pm.rendered = true
+                        table.insert(visibleMachineQueue, me)
+                    end
+                end
+            end
+            if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts) then
+                machinePumpRunning = true
                 ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             end
         end
-        ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
+    else
+        OnViewportChangedMachines = nil
     end
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
@@ -3415,6 +3576,8 @@ end
 local function DestroyStationMap()
     CanvasRenderGen = CanvasRenderGen + 1
     MachineRenderGen = MachineRenderGen + 1
+    OnViewportChangedStatic = nil
+    OnViewportChangedMachines = nil
     GhostPreviewSig = nil
     MapWinVisible = false
     MapWinInViewport = false
