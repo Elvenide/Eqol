@@ -1763,6 +1763,82 @@ local function IsSelectableMachine(rm)
     return true
 end
 
+local function IsSplitterOrBalancerCls(clsPath)
+    local low = (clsPath or ""):lower()
+    return (low:find("splitter", 1, true) ~= nil) or (low:find("balancer", 1, true) ~= nil)
+end
+
+local function IsPlainConveyorBeltRm(rm)
+    if not rm then return false end
+    local low = (rm.actorClsPath or ""):lower()
+    return (rm.cat == "Conveyor" or low:find("conveyorbelt", 1, true) ~= nil) and (low:find("underground", 1, true) == nil)
+end
+
+local function IsSameMachineType(item, rm)
+    if not item or not rm then return false end
+    if Core.IsValidObj(item.buildable) and Core.IsValidObj(rm.buildable) then
+        if item.buildable:GetAddress() == rm.buildable:GetAddress() then
+            return true
+        end
+    end
+    if item.actorClsPath and rm.actorClsPath and item.actorClsPath ~= "" and item.actorClsPath == rm.actorClsPath then
+        return true
+    end
+    return false
+end
+
+local function EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
+    local rx, ry = GetRotatedCellDims(item.cellsX or 1, item.cellsY or 1, finalYaw)
+    local hw, hh = rx * CELL_CM * 0.5, ry * CELL_CM * 0.5
+    local overlaps = {}
+    local seenAddr = {}
+
+    local function checkFootprintAgainst(fx, fy)
+        for _, rm in ipairs(RenderedMachines) do
+            if not PendingDeletes[rm.addr] and not seenAddr[rm.addr] then
+                local hitMain = (math.abs(fx - rm.x) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.y) < (hh + rm.halfH - 10.0))
+                local hitPair = rm.pairX and rm.pairY and (math.abs(fx - rm.pairX) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.pairY) < (hh + rm.halfH - 10.0))
+                if hitMain or hitPair then
+                    seenAddr[rm.addr] = true
+                    table.insert(overlaps, rm)
+                end
+            end
+        end
+    end
+
+    checkFootprintAgainst(sx, sy)
+    if pX and pY then checkFootprintAgainst(pX, pY) end
+
+    if #overlaps == 0 then
+        return true, false, nil
+    end
+
+    -- Exception A: Same machine type at the same footprint (even if different state/rotation)
+    if #overlaps == 1 and IsSelectableMachine(overlaps[1]) and IsSameMachineType(item, overlaps[1]) then
+        local rm = overlaps[1]
+        if math.abs(rm.x - sx) < 25.0 and math.abs(rm.y - sy) < 25.0 then
+            return true, true, overlaps
+        end
+    end
+
+    -- Exception B: Splitter or Belt Balancer overwriting one or more plain Conveyor Belts
+    if IsSplitterOrBalancerCls(item.actorClsPath) then
+        local allBelts = true
+        for _, rm in ipairs(overlaps) do
+            if not (IsSelectableMachine(rm) and IsPlainConveyorBeltRm(rm)) then
+                allBelts = false
+                break
+            end
+        end
+        if allBelts then
+            return true, true, overlaps
+        end
+    end
+
+    -- Disallowed overwrite: skip placing ghost at this position
+    return false, false, nil
+end
+
 --------------------------------------------------------------------------------
 -- UI Creation & Rendering
 --------------------------------------------------------------------------------
@@ -2103,6 +2179,23 @@ local function AddSplitterOrBalancerChevrons(outer, canvas, mx, my, pxW, pxH, ya
             AddMiniChevronAt(outer, canvas, ox, oy, armLen, armThick, (yawDeg or 0.0), YELLOW_CHEVRON_COL, zOrder, outWidgets)
         end
     end
+end
+
+local REPLACE_ICON_COL = { R = 0.85, G = 0.97, B = 1.00, A = 0.98 }
+local function DrawReplaceIcon(outer, canvas, cx, cy, pxW, pxH, zOrder)
+    -- Crisp opposing horizontal swap arrows (⇄) centered on the blue replace ghost
+    local dim = math.max(12.0, math.min(pxW, pxH) * 0.44)
+    local barLen = dim * 0.72
+    local thick = math.max(2.0, dim * 0.14)
+    local offY = dim * 0.24
+    local tipLen = math.max(4.5, dim * 0.30)
+
+    -- Top arrow pointing RIGHT (→)
+    AddBorderFast(outer, canvas, cx - dim * 0.04, cy - offY, barLen, thick, REPLACE_ICON_COL, zOrder)
+    AddMiniChevronAt(outer, canvas, cx + barLen * 0.42, cy - offY, tipLen, thick, 0.0, REPLACE_ICON_COL, zOrder)
+    -- Bottom arrow pointing LEFT (←)
+    AddBorderFast(outer, canvas, cx + dim * 0.04, cy + offY, barLen, thick, REPLACE_ICON_COL, zOrder)
+    AddMiniChevronAt(outer, canvas, cx - barLen * 0.42, cy + offY, tipLen, thick, 180.0, REPLACE_ICON_COL, zOrder)
 end
 
 local function RenderBorderOutline(outer, canvas, cx, cy, w, h, thickness, col, zOrder)
@@ -2586,7 +2679,9 @@ local function RefreshSelectionLayer()
         end
     end
 
-    -- Stamped build ghosts (with conveyor chevrons, splitter/balancer chevrons, and underground belt pair links)
+    -- Stamped build ghosts (green for new builds, blue + replace icon for valid overwrites)
+    local replaceFillCol = { R = 0.12, G = 0.48, B = 0.98, A = 0.44 }
+    local replaceBdrCol  = { R = 0.28, G = 0.76, B = 1.00, A = 0.98 }
     for _, gp in ipairs(PendingGhosts) do
         if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
             local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
@@ -2596,31 +2691,42 @@ local function RefreshSelectionLayer()
             local gpCat = gp.cat or "Other"
             local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
             CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+            if gp.isReplace then
+                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
+            end
             local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
+            local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
             if isGhostSel then
-                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 7)
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 8)
+                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
             else
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.0, COLORS.GhostBorderOk, 7)
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+            end
+            if gp.isReplace then
+                DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
             end
             local clsLow = (gp.actorClsPath or ""):lower()
             if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-                AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 8)
+                AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
             elseif clsLow:find("underground", 1, true) then
-                AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, COLORS.GhostBorderOk, 8)
+                AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
                 if gp.pairX and gp.pairY then
                     local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
                     CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-                    if isGhostSel then
-                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 7)
-                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 8)
-                    else
-                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.0, COLORS.GhostBorderOk, 7)
+                    if gp.isReplace then
+                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
+                        DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
                     end
-                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, COLORS.GhostBorderOk, 8)
-                    RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 9)
+                    if isGhostSel then
+                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 8)
+                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 9)
+                    else
+                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+                    end
+                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+                    RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
                     local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
-                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 10)
+                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
                 end
             end
         end
@@ -3578,8 +3684,23 @@ end
 
 local function CommitPendingGhosts()
     local delList = {}
+    local seenDelAddr = {}
     for _, dm in pairs(PendingDeletes) do
-        if Core.IsValidObj(dm.machine) then table.insert(delList, dm) end
+        if Core.IsValidObj(dm.machine) and not seenDelAddr[dm.addr] then
+            seenDelAddr[dm.addr] = true
+            table.insert(delList, dm)
+        end
+    end
+    -- Also include all valid overwrite targets from blue replace ghosts (disassembled & refunded natively BEFORE building!)
+    for _, gp in ipairs(PendingGhosts) do
+        if gp.isReplace and gp.replaceTargets then
+            for _, rt in ipairs(gp.replaceTargets) do
+                if Core.IsValidObj(rt.machine) and not seenDelAddr[rt.addr] then
+                    seenDelAddr[rt.addr] = true
+                    table.insert(delList, rt)
+                end
+            end
+        end
     end
     Core.Log(string.format("[StationMap] CommitPendingGhosts entered (inProgress=%s, builds=%d, deletes=%d)", tostring(ApplyInProgress), #PendingGhosts, #delList))
     if ApplyInProgress then return end
@@ -3701,6 +3822,7 @@ local function CommitPendingGhosts()
         end
     end
 
+    local buildPhaseStarted = (totalDeletes == 0)
     local function pumpApplyBatch()
         local curPC = Core.GetLocalPlayerController()
         if not Core.IsValidObj(curPC) or not Core.IsValidObj(CurrentStation) then
@@ -3710,19 +3832,33 @@ local function CommitPendingGhosts()
             return
         end
         local doneThisFrame = 0
-        -- Process deletes first (frees tiles & refunds materials before building!)
-        while dIdx <= totalDeletes and doneThisFrame < OPS_PER_FRAME do
-            local dm = delList[dIdx]
-            local ok, err = IssueRemoteDisassembleMachine(curPC, dm.machine)
-            if ok then
-                deletedCount = deletedCount + 1
-            else
-                lastErr = err
-                table.insert(remainingDeletes, dm)
+        -- Phase 1: Process all deletes & overwrite-target disassembles first (frees tiles & refunds materials natively)
+        if dIdx <= totalDeletes then
+            while dIdx <= totalDeletes and doneThisFrame < OPS_PER_FRAME do
+                local dm = delList[dIdx]
+                local ok, err = IssueRemoteDisassembleMachine(curPC, dm.machine)
+                if ok then
+                    deletedCount = deletedCount + 1
+                else
+                    lastErr = err
+                    table.insert(remainingDeletes, dm)
+                end
+                dIdx = dIdx + 1
+                doneThisFrame = doneThisFrame + 1
             end
-            dIdx = dIdx + 1
-            doneThisFrame = doneThisFrame + 1
+            if dIdx <= totalDeletes then
+                UpdateStatusBanner(string.format("Applying changes: %d / %d...", builtCount + deletedCount, totalCount))
+                ExecuteInGameThreadAfterFrames(1, pumpApplyBatch)
+                return
+            elseif totalBuilds > 0 and not buildPhaseStarted then
+                -- Give simulation 200ms after disassembling overwritten machines so tiles are freed & materials refunded before building
+                buildPhaseStarted = true
+                UpdateStatusBanner(string.format("Applying changes: %d / %d...", builtCount + deletedCount, totalCount))
+                ExecuteInGameThreadWithDelay(200, pumpApplyBatch)
+                return
+            end
         end
+        -- Phase 2: Build all new & replacement machines
         while qIdx <= totalBuilds and doneThisFrame < OPS_PER_FRAME do
             local g = buildQueue[qIdx]
             local targetFloor = CurrentFloors[g.floorIdx] or CurrentFloors[SelectedFloorIdx]
@@ -3746,7 +3882,7 @@ local function CommitPendingGhosts()
             doneThisFrame = doneThisFrame + 1
         end
 
-        if dIdx <= totalDeletes or qIdx <= totalBuilds then
+        if qIdx <= totalBuilds then
             UpdateStatusBanner(string.format("Applying changes: %d / %d...", builtCount + deletedCount, totalCount))
             ExecuteInGameThreadAfterFrames(1, pumpApplyBatch)
         else
@@ -3802,42 +3938,70 @@ local function HandleMapLeftClick(mx, my, isShift)
         local cosA, sinA = math.cos(rad), math.sin(rad)
         local stampId = tostring(os.clock())
         local staged = {}
+        local skippedBlocked = 0
         for _, item in ipairs(Clipboard) do
             if Core.IsValidObj(item.buildable) then
                 local rdx = item.dx * cosA - item.dy * sinA
                 local rdy = item.dx * sinA + item.dy * cosA
                 local finalYaw = (item.yaw or 0.0) + PendingRotationDeg
                 local sx, sy = SnapWorldToMachineGrid(anchorSx + rdx, anchorSy + rdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
-                if IsPointOverAnyFloorModule(sx, sy, floor) and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor) then
-                    NextGhostSeq = NextGhostSeq + 1
-                    local pX, pY = nil, nil
-                    if item.pairDx and item.pairDy then
-                        local rpdx = item.pairDx * cosA - item.pairDy * sinA
-                        local rpdy = item.pairDx * sinA + item.pairDy * cosA
-                        pX, pY = SnapWorldToMachineGrid(sx + rpdx, sy + rpdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
+                local pX, pY = nil, nil
+                if item.pairDx and item.pairDy then
+                    local rpdx = item.pairDx * cosA - item.pairDy * sinA
+                    local rpdy = item.pairDx * sinA + item.pairDy * cosA
+                    pX, pY = SnapWorldToMachineGrid(sx + rpdx, sy + rpdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
+                end
+                local inBounds = IsPointOverAnyFloorModule(sx, sy, floor)
+                    and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor)
+                if inBounds and pX and pY then
+                    inBounds = IsPointOverAnyFloorModule(pX, pY, floor)
+                        and not IsFootprintBlockedByWall(pX, pY, item.cellsX or 1, item.cellsY or 1, finalYaw, floor)
+                end
+                if inBounds then
+                    local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
+                    if allowed then
+                        -- Also avoid stacking a duplicate ghost on top of an existing ghost at the exact same spot
+                        local dupGhost = false
+                        for _, eg in ipairs(PendingGhosts) do
+                            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 and math.abs(eg.x - sx) < 25.0 and math.abs(eg.y - sy) < 25.0 then
+                                dupGhost = true
+                                break
+                            end
+                        end
+                        if not dupGhost then
+                            NextGhostSeq = NextGhostSeq + 1
+                            table.insert(staged, {
+                                ghostId = "ghost:" .. tostring(NextGhostSeq),
+                                buildable = item.buildable,
+                                floorIdx = SelectedFloorIdx,
+                                x = sx, y = sy, z = floor.z,
+                                pairX = pX, pairY = pY,
+                                ugLength = item.ugLength,
+                                yaw = finalYaw,
+                                cat = item.cat or "Other",
+                                cellsX = item.cellsX or 1,
+                                cellsY = item.cellsY or 1,
+                                actorClsPath = item.actorClsPath,
+                                sprite = item.sprite,
+                                recipe = item.recipe,
+                                machineConfig = item.machineConfig,
+                                name = item.name,
+                                isReplace = isReplace,
+                                replaceTargets = replaceTargets,
+                            })
+                        else
+                            skippedBlocked = skippedBlocked + 1
+                        end
+                    else
+                        skippedBlocked = skippedBlocked + 1
                     end
-                    table.insert(staged, {
-                        ghostId = "ghost:" .. tostring(NextGhostSeq),
-                        buildable = item.buildable,
-                        floorIdx = SelectedFloorIdx,
-                        x = sx, y = sy, z = floor.z,
-                        pairX = pX, pairY = pY,
-                        ugLength = item.ugLength,
-                        yaw = finalYaw,
-                        cat = item.cat or "Other",
-                        cellsX = item.cellsX or 1,
-                        cellsY = item.cellsY or 1,
-                        actorClsPath = item.actorClsPath,
-                        sprite = item.sprite,
-                        recipe = item.recipe,
-                        machineConfig = item.machineConfig,
-                        name = item.name,
-                    })
+                else
+                    skippedBlocked = skippedBlocked + 1
                 end
             end
         end
         if #staged == 0 then
-            UpdateStatusBanner("Paste inside a station module")
+            UpdateStatusBanner(skippedBlocked > 0 and "Cannot overwrite existing incompatible machines here" or "Paste inside a station module")
             return
         end
         local okMat = CheckMaterialsForPendingList(pc, staged)
@@ -3856,6 +4020,9 @@ local function HandleMapLeftClick(mx, my, isShift)
         end
         UpdateActionBar()
         RefreshSelectionLayer()
+        if skippedBlocked > 0 then
+            UpdateStatusBanner(string.format("Pasted %d machine(s) (%d skipped - blocked)", #staged, skippedBlocked))
+        end
         return
     end
 
