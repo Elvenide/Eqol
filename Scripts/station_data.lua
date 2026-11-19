@@ -2943,6 +2943,10 @@ function StationData.PrewarmBuildables(sampleMachine)
     end
 end
 
+function StationData.GetMachineLocalPosAndYaw(machine, xform)
+    return GetMachineLocalPosAndYaw(machine, xform)
+end
+
 function StationData.InvalidateMachineCache()
     CachedMachinesByFrame = {}
     CachedFloorMap = nil

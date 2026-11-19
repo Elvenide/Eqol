@@ -1020,20 +1020,50 @@ local function CaptureMachineConfig(m)
         end
     end)
 
-    -- 3b. Disabled ports (Assemblers, Refineries, Splitters, etc.)
+    -- 3b. Disabled ports (Assemblers, Refineries, etc. - bounded by PortStates count so out-of-bounds indices are never included!)
     pcall(function()
-        if m.IsPortEnabled then
-            local dis = {}
-            for portIdx = 0, 15 do
-                local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
-                if okP and en == false then
-                    table.insert(dis, portIdx)
+        local dis = {}
+        local seen = {}
+        local dp = m.DisabledPorts
+        if dp ~= nil then
+            if type(dp) == "number" then
+                if dp ~= 0 then
+                    for bit = 0, 15 do
+                        if ((math.floor(dp / (2 ^ bit)) % 2) == 1) then
+                            table.insert(dis, bit)
+                            seen[bit] = true
+                        end
+                    end
+                end
+            else
+                local len = dp.GetArrayNum and dp:GetArrayNum() or #dp
+                if type(len) == "number" and len > 0 then
+                    for i = 1, len do
+                        local okE, val = pcall(function() return dp[i] end)
+                        local idx = okE and tonumber(val) or nil
+                        if idx ~= nil and not seen[idx] then
+                            table.insert(dis, idx)
+                            seen[idx] = true
+                        end
+                    end
                 end
             end
-            if #dis > 0 then
-                cfg.disabledPorts = dis
-                hasAny = true
+        end
+        if #dis == 0 and m.IsPortEnabled and m.PortStates then
+            local pLen = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
+            if type(pLen) == "number" and pLen > 0 then
+                for portIdx = 0, math.min(pLen - 1, 15) do
+                    local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
+                    if okP and en == false and not seen[portIdx] then
+                        table.insert(dis, portIdx)
+                        seen[portIdx] = true
+                    end
+                end
             end
+        end
+        if #dis > 0 then
+            cfg.disabledPorts = dis
+            hasAny = true
         end
     end)
 
@@ -1325,21 +1355,25 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
         end
     end
 
-    -- 2b. Disabled ports (via MachinePortInput:TogglePortEnabled)
+    -- 2b. Disabled ports (UMachinePortInput:TogglePortEnabled is a void instance method -> construct instance, call method, submit via AddInputCommand)
     if cfg.disabledPorts and #cfg.disabledPorts > 0 then
-        for _, portIdx in ipairs(cfg.disabledPorts) do
-            local shouldToggle = true
-            if targetMachine.IsPortEnabled then
-                local okP, en = pcall(function() return targetMachine:IsPortEnabled(portIdx) end)
-                if okP and en == false then shouldToggle = false end
-            end
-            if shouldToggle then
-                if InvokeCreateInputCommand(pc, "MachinePortInput", "TogglePortEnabled", {
-                    receiverId = receiverId,
-                    portIndex = portIdx,
-                    playerObjId = playerObjId,
-                }) then
-                    applied = true
+        local portInputCls = Core.FindOrLoadClass("/Script/MainSequence.MachinePortInput")
+        if Core.IsValidObj(portInputCls) then
+            for _, portIdx in ipairs(cfg.disabledPorts) do
+                local shouldToggle = true
+                if targetMachine.IsPortEnabled then
+                    local okP, en = pcall(function() return targetMachine:IsPortEnabled(portIdx) end)
+                    if okP and en == false then shouldToggle = false end
+                end
+                if shouldToggle then
+                    local okNew, cmdObj = pcall(StaticConstructObject, portInputCls, pc)
+                    if okNew and Core.IsValidObj(cmdObj) then
+                        local okMut = pcall(function() cmdObj:TogglePortEnabled(portIdx) end)
+                        if okMut then
+                            local okAdd = pcall(function() pc:AddInputCommand(receiverId, cmdObj) end)
+                            if okAdd then applied = true end
+                        end
+                    end
                 end
             end
         end
@@ -1745,7 +1779,7 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
             if bar then
                 pcall(function()
                     bar:SetRenderTransformPivot(ALIGN_CENTER)
-                    if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle((yawDeg or 0.0) + sign * 45.0) end
+                    if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle((yawDeg or 0.0) - sign * 45.0) end
                 end)
                 if outWidgets then table.insert(outWidgets, bar) end
             end
@@ -2788,34 +2822,28 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
         end
 
-        -- Incremental diff sync: removes deleted machines and renders ONLY newly added machines (zero full floor reload!)
+        -- Lightweight machine-only incremental diff sync (~5ms, never rebuilds walls/platforms!)
         SyncFloorMachinesIncremental = function()
             if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) then return end
-            StationData.InvalidateMachineCache()
-            local pc2 = Core.GetLocalPlayerController()
-            local px2, py2, pz2 = nil, nil, nil
-            if Core.IsValidObj(pc2) and Core.IsValidObj(pc2.Pawn) then
-                local okL, loc2 = pcall(function() return pc2.Pawn:K2_GetActorLocation() end)
-                if okL and loc2 and type(loc2.X) == "number" then
-                    px2, py2, pz2 = loc2.X, loc2.Y or 0, loc2.Z or 0
-                end
-            end
-            local newFloors, _, _, gox2, goy2, xform2 = StationData.BuildStationFloorMap(CurrentStation, CurrentWalkFrame, px2, py2, pz2)
-            if not newFloors or #newFloors == 0 then return end
-            CurrentFloors = newFloors
-            CurrentFrameXform = xform2
-            if SelectedFloorIdx > #CurrentFloors then SelectedFloorIdx = #CurrentFloors end
-            ViewTransform.gridOriginX = gox2 or ViewTransform.gridOriginX
-            ViewTransform.gridOriginY = goy2 or ViewTransform.gridOriginY
-
             local curFl = CurrentFloors[SelectedFloorIdx]
-            local liveList = (curFl and curFl.machines) or {}
+            if not curFl then return end
+
+            StationData.InvalidateMachineCache()
+            local allMachines = StationData.GetAllStationMachines(CurrentStation, curFl.platforms, CurrentWalkFrame)
+            local liveList = {}
             local liveByAddr = {}
-            for _, me in ipairs(liveList) do
-                if Core.IsValidObj(me.machine) then
-                    liveByAddr[me.machine:GetAddress()] = me
+            for _, m in ipairs(allMachines or {}) do
+                if Core.IsValidObj(m) then
+                    local lx, ly, lz, lyaw = StationData.GetMachineLocalPosAndYaw(m, CurrentFrameXform)
+                    if lx and ly and lz and math.abs(lz - curFl.z) <= 220.0 then
+                        local addr = m:GetAddress()
+                        local me = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw or 0.0 }
+                        table.insert(liveList, me)
+                        liveByAddr[addr] = me
+                    end
                 end
             end
+            curFl.machines = liveList
 
             -- 1. Remove any machine that was deleted in-game
             local removedCount = 0
@@ -3040,6 +3068,7 @@ local function CommitPendingGhosts()
     local queue = PendingGhosts
     PendingGhosts = {}
     UpdateActionBar()
+    RefreshSelectionLayer()
 
     local totalCount = #queue
     local qIdx = 1
@@ -3058,6 +3087,7 @@ local function CommitPendingGhosts()
             table.insert(PendingGhosts, rem)
         end
         UpdateActionBar()
+        RefreshSelectionLayer()
 
         if builtCount > 0 then
             UpdateStatusBanner(string.format("Applied %d placement(s)%s", builtCount, (#remaining > 0 and (" (" .. #remaining .. " failed)") or "")))
@@ -3824,9 +3854,11 @@ local function OpenStationMap()
         MouseState.rPanning = false
         EnsureInputPoll()
         RefreshDynamicOverlay()
-        if SyncFloorMachinesIncremental then
-            SyncFloorMachinesIncremental()
-        end
+        ExecuteInGameThreadAfterFrames(2, function()
+            if IsMapOpen() and SyncFloorMachinesIncremental then
+                SyncFloorMachinesIncremental()
+            end
+        end)
         Core.Log(string.format("[StationMap] Reused cached map window in %.1fms", (os.clock() - tFast) * 1000.0))
         return
     end
@@ -4355,14 +4387,18 @@ function Feature.RegisterHooks()
                 local cmd = CmdObjParam and CmdObjParam.get and CmdObjParam:get() or CmdObjParam
                 if Core.IsValidObj(cmd) then
                     local cls = cmd:GetClass():GetFName():ToString()
-                    if cls == "SetConfigInput" or cls == "MachinePortInput" or cls == "SetNamedConfigInput" then
+                    local low = cls:lower()
+                    if not low:find("movement", 1, true) and not low:find("view", 1, true)
+                        and not low:find("hotbar", 1, true) and not low:find("interact", 1, true)
+                    then
                         local rid = RecvIdParam and RecvIdParam.get and RecvIdParam:get() or RecvIdParam
-                        local c1, c2, pi = nil, nil, nil
+                        local c1, c2, pi, nm = nil, nil, nil, nil
                         pcall(function() c1 = cmd.Config end)
                         pcall(function() c2 = cmd.Config2 end)
                         pcall(function() pi = cmd.PortIndex end)
-                        Core.Log(string.format("[StationMap] RecvInputCmd: recv=%s cls=%s cfg=%s cfg2=%s port=%s",
-                            tostring(rid), cls, tostring(c1), tostring(c2), tostring(pi)))
+                        pcall(function() nm = cmd.ConfigName and cmd.ConfigName:ToString() or (cmd.Name and cmd.Name:ToString()) end)
+                        Core.Log(string.format("[StationMap] RecvInputCmd: recv=%s cls=%s cfg=%s cfg2=%s port=%s name=%s",
+                            tostring(rid), cls, tostring(c1), tostring(c2), tostring(pi), tostring(nm)))
                     end
                 end
             end)
