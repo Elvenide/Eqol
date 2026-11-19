@@ -212,6 +212,7 @@ local CachedWallAnchors = {}       -- addr -> { obj, addr, clsPath }
 local CachedWallPropNames = {}     -- "clsPath:offset" -> propName
 local CachedMachineCatByCls = {}   -- clsAddr -> string
 local CachedMachineDispByCls = {}  -- clsAddr -> string
+local CachedHideByCls = {}         -- clsAddr -> bool
 local CachedIconTexByCls = {}      -- clsAddr -> Texture2D or false
 
 local StationDiagLoggedKey = nil
@@ -1253,12 +1254,12 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                         local elemAddr = dataAddr + (i - 1) * COLLIDER_STRIDE
                         local z1 = readIntAt(elemAddr + 0x08)
                         local z2 = readIntAt(elemAddr + 0x14)
-                        if z1 and z2 and z2 > z1 and (z2 - z1) >= 70 then
+                        if z1 and z2 and z2 > z1 then
                             local x1 = readIntAt(elemAddr + 0x00)
                             local y1 = readIntAt(elemAddr + 0x04)
                             local x2 = readIntAt(elemAddr + 0x0C)
                             local y2 = readIntAt(elemAddr + 0x10)
-                            if x1 and y1 and x2 and y2 and x1 < 900000000 and x2 > x1 and y2 > y1 then
+                            if x1 and y1 and x2 and y2 and x1 < 999000000 and x2 > -999000000 and x2 > x1 and y2 > y1 then
                                 local aMax = math.max(math.abs(x1), math.abs(x2), math.abs(y1), math.abs(y2))
                                 if aMax > maxAbs then maxAbs = aMax end
                                 table.insert(rawBoxes, { x1 = x1, y1 = y1, z1 = z1, x2 = x2, y2 = y2, z2 = z2 })
@@ -1268,7 +1269,12 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 end
 
                 local scale = 1.0
-                if maxAbs > 100000.0 then
+                if maxAbs > 1000000.0 then
+                    scale = 1.0 / 65536.0
+                    if (maxAbs * scale) < 260.0 then
+                        scale = scale * 100.0
+                    end
+                elseif maxAbs > 100000.0 then
                     scale = 0.1
                 elseif maxAbs > 0.0 and maxAbs < 260.0 then
                     scale = 50.0
@@ -1369,7 +1375,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevCols=%d elevStops=[%s] floors(%d): %s",
             playerLx, playerLy, playerLz, currentFloorIndex, #elevStopLists, elevStr, #floors, table.concat(flParts, ", ")))
         Core.Log(string.format("[StationData] PlatsDiag count=%d items=[%s]", #platDiagParts, table.concat(platDiagParts, "; ")))
-        Core.Log(string.format("[StationData] WallColliders total=%d status=%s walls=%d scale=%.2f fl1Walls=%d fl6Walls=%d sample=[%s]",
+        Core.Log(string.format("[StationData] WallColliders total=%d status=%s walls=%d scale=%.6f fl1Walls=%d fl6Walls=%d sample=[%s]",
             wallDiagTotal, wallDiagStatus, wallDiagKept, wallDiagScale,
             floors[1] and #floors[1].walls or 0, floors[6] and #floors[6].walls or 0, table.concat(wallSamples, "; ")))
 
@@ -2134,6 +2140,16 @@ function StationData.GetContainerTopItems(container, maxCount)
 end
 
 function StationData.ShouldHideMachineOnMap(machine, buildableOpt)
+    local clsAddr = nil
+    if not Core.IsValidObj(buildableOpt) and Core.IsValidObj(machine) then
+        pcall(function()
+            local c = machine:GetClass()
+            if Core.IsValidObj(c) then clsAddr = c:GetAddress() end
+        end)
+        if clsAddr and CachedHideByCls[clsAddr] ~= nil then
+            return CachedHideByCls[clsAddr]
+        end
+    end
     local parts = {}
     if Core.IsValidObj(machine) then
         pcall(function() table.insert(parts, machine:GetClass():GetFName():ToString()) end)
@@ -2148,9 +2164,9 @@ function StationData.ShouldHideMachineOnMap(machine, buildableOpt)
         end)
     end
     local combined = table.concat(parts, " "):lower()
-    if combined:find("solar", 1, true) then return true end
-    if combined:find("turret", 1, true) then return true end
-    return false
+    local hide = (combined:find("solar", 1, true) ~= nil) or (combined:find("turret", 1, true) ~= nil)
+    if clsAddr then CachedHideByCls[clsAddr] = hide end
+    return hide
 end
 
 function StationData.GetUndergroundBeltPairInfo(machine, xform)
@@ -2835,6 +2851,10 @@ function StationData.GetMachineFootprintCells(machine, buildableOpt)
     return cx, cy
 end
 
+function StationData.InvalidateMachineCache()
+    CachedMachinesByFrame = {}
+end
+
 function StationData.InvalidateCaches()
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
@@ -2843,6 +2863,7 @@ function StationData.InvalidateCaches()
     CachedStationWallsByKey = {}
     CachedMachineCatByCls = {}
     CachedMachineDispByCls = {}
+    CachedHideByCls = {}
     CachedIconTexByCls = {}
     CachedBeltTexByCls = {}
     CachedBuildablesByCls = nil

@@ -77,7 +77,12 @@ local COLORS = {
 -- UI & Map State
 local MapHudInjected = {}
 local ActiveMapWin = nil
+local MapWinVisible = false
 local MapUI = nil
+
+local function IsMapOpen()
+    return MapWinVisible and Core.IsValidObj(ActiveMapWin)
+end
 
 local CurrentStation = nil
 local CurrentWalkFrame = nil
@@ -1617,19 +1622,19 @@ RefreshStationMapCanvas = function()
             if me.y + 400.0 > bMaxY then bMaxY = me.y + 400.0 end
         end
     end
-    local padCm = 2400.0
+    local padCm = 800.0
     local minCol = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM)
     local maxCol = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM)
     local minRow = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM)
     local maxRow = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM)
     -- Expand narrow axis symmetrically so tall or wide stations still show a balanced square field
-    if (maxCol - minCol) < 100 then
-        local extra = math.ceil((100 - (maxCol - minCol)) * 0.5)
+    if (maxCol - minCol) < 64 then
+        local extra = math.ceil((64 - (maxCol - minCol)) * 0.5)
         minCol = minCol - extra
         maxCol = maxCol + extra
     end
-    if (maxRow - minRow) < 80 then
-        local extra = math.ceil((80 - (maxRow - minRow)) * 0.5)
+    if (maxRow - minRow) < 48 then
+        local extra = math.ceil((48 - (maxRow - minRow)) * 0.5)
         minRow = minRow - extra
         maxRow = maxRow + extra
     end
@@ -1738,19 +1743,8 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX
-    local floorMachines = floor.machines
-    if not floorMachines then
-        floorMachines = {}
-        local allM = StationData.GetAllStationMachines(CurrentStation, {}, CurrentWalkFrame)
-        for _, m in ipairs(allM) do
-            if not StationData.ShouldHideMachineOnMap(m) then
-                local mwx, mwy, mwz, myaw = StationData.GetMachineWorldPosAndYaw(m, floor.platforms[1] and floor.platforms[1].bounds)
-                table.insert(floorMachines, { machine = m, x = mwx, y = mwy, z = mwz, yaw = myaw })
-            end
-        end
-        floor.machines = floorMachines
-    end
+    -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX (station-local coords only)
+    local floorMachines = floor.machines or {}
 
     local presentAddrs = {}
     for _, me in ipairs(floorMachines) do
@@ -2199,12 +2193,30 @@ local function CommitPendingGhosts()
 
     if builtCount > 0 then
         UpdateStatusBanner(string.format("Applied %d placement(s)%s", builtCount, (#remaining > 0 and (" (" .. #remaining .. " failed)") or "")))
-        ExecuteInGameThreadWithDelay(250, function()
-            StationData.InvalidateCaches()
-            if CurrentFloors[SelectedFloorIdx] then
-                CurrentFloors[SelectedFloorIdx].machines = nil
+        ExecuteInGameThreadWithDelay(300, function()
+            StationData.InvalidateMachineCache()
+            if Core.IsValidObj(CurrentStation) then
+                local pc2 = Core.GetLocalPlayerController()
+                local px2, py2, pz2 = nil, nil, nil
+                if Core.IsValidObj(pc2) then
+                    local pawn2 = pc2.Pawn
+                    if Core.IsValidObj(pawn2) then
+                        local okL, loc2 = pcall(function() return pawn2:K2_GetActorLocation() end)
+                        if okL and loc2 and type(loc2.X) == "number" then
+                            px2, py2, pz2 = loc2.X, loc2.Y or 0, loc2.Z or 0
+                        end
+                    end
+                end
+                local newFloors, _, _, gox2, goy2, xform2 = StationData.BuildStationFloorMap(CurrentStation, CurrentWalkFrame, px2, py2, pz2)
+                if newFloors and #newFloors > 0 then
+                    CurrentFloors = newFloors
+                    CurrentFrameXform = xform2
+                    if SelectedFloorIdx > #CurrentFloors then SelectedFloorIdx = #CurrentFloors end
+                    ViewTransform.gridOriginX = gox2 or ViewTransform.gridOriginX
+                    ViewTransform.gridOriginY = goy2 or ViewTransform.gridOriginY
+                end
             end
-            if Core.IsValidObj(ActiveMapWin) then
+            if IsMapOpen() then
                 RefreshStationMapCanvas()
             end
         end)
@@ -2468,7 +2480,7 @@ local function EnsureInputPoll()
     InputPollActive = true
 
     local function Tick()
-        if not Core.IsValidObj(ActiveMapWin) or not MapUI then
+        if not IsMapOpen() or not MapUI then
             InputPollActive = false
             return
         end
@@ -2770,7 +2782,8 @@ local function SetStationMapCursorMode(pc, win, active)
     end
 end
 
-CloseStationMap = function()
+local function DestroyStationMap()
+    MapWinVisible = false
     InteractionMode = "Select"
     PendingBuildable = nil
     WaitingForBuildMenuSelection = false
@@ -2789,6 +2802,21 @@ CloseStationMap = function()
     end
     ActiveMapWin = nil
     MapUI = nil
+    SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
+end
+
+CloseStationMap = function()
+    MapWinVisible = false
+    InteractionMode = "Select"
+    PendingBuildable = nil
+    WaitingForBuildMenuSelection = false
+    MouseState.lDownInMap = false
+    MouseState.lDraggingBox = false
+    MouseState.rDownInMap = false
+    MouseState.rPanning = false
+    if Core.IsValidObj(ActiveMapWin) then
+        pcall(function() ActiveMapWin:SetVisibility(1) end) -- Collapsed (keeps UMG tree cached for instant re-open)
+    end
     SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
 end
 
@@ -2831,8 +2859,30 @@ local function OpenStationMap()
         return
     end
 
+    -- Fast path: reuse hidden Station Map window for the same station (instant <5ms re-open)
+    if Core.IsValidObj(ActiveMapWin) and MapUI and Core.IsValidObj(CurrentStation) and Core.IsValidObj(station)
+        and CurrentStation:GetAddress() == station:GetAddress()
+    then
+        local inVp = false
+        pcall(function() inVp = (ActiveMapWin.IsInViewport and ActiveMapWin:IsInViewport() == true) end)
+        if inVp then
+            MapWinVisible = true
+            pcall(function() ActiveMapWin:SetVisibility(0) end) -- Visible
+            SetStationMapCursorMode(pc, ActiveMapWin, true)
+            MouseState.wasLDown = false
+            MouseState.wasRDown = false
+            MouseState.lDownInMap = false
+            MouseState.lDraggingBox = false
+            MouseState.rDownInMap = false
+            MouseState.rPanning = false
+            EnsureInputPoll()
+            RefreshDynamicOverlay()
+            return
+        end
+    end
+
     if Core.IsValidObj(ActiveMapWin) then
-        CloseStationMap()
+        DestroyStationMap()
     end
 
     local win = Core.CreateUserWidget(PATHS.WindowBaseClass, pc, pc)
@@ -2842,6 +2892,7 @@ local function OpenStationMap()
     end
 
     ActiveMapWin = win
+    MapWinVisible = true
     local outer = Core.GetWidgetOuter(win)
 
     pcall(function()
@@ -3205,7 +3256,7 @@ local function OpenStationMap()
     -- Re-fit once after UMG finishes layout pass on frame 2, and pre-inspect BuildMachineCommand signature
     ExecuteInGameThreadAfterFrames(2, function()
         InspectBuildMachineCommandLayout()
-        if Core.IsValidObj(ActiveMapWin) and MeasureMapCanvasSize() then
+        if IsMapOpen() and MeasureMapCanvasSize() then
             FitViewTransformToFloor()
             ApplyViewTransform()
         end
@@ -3213,7 +3264,7 @@ local function OpenStationMap()
 end
 
 local function ToggleStationMap()
-    if Core.IsValidObj(ActiveMapWin) then
+    if IsMapOpen() then
         CloseStationMap()
     else
         OpenStationMap()
@@ -3230,7 +3281,7 @@ local function EnsureMapKeybinds()
 
     if Key.B then
         RegisterKeyBind(Key.B, function()
-            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
+            if IsMapOpen() and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(OpenBuildMenuFromStationMap)
             end
         end)
@@ -3238,7 +3289,7 @@ local function EnsureMapKeybinds()
 
     if Key.R then
         RegisterKeyBind(Key.R, function()
-            if Core.IsValidObj(ActiveMapWin) and (InteractionMode == "Place" or InteractionMode == "Paste") and not Core.IsAnyTextInputFocused() then
+            if IsMapOpen() and (InteractionMode == "Place" or InteractionMode == "Paste") and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
                     PendingRotationDeg = (PendingRotationDeg + 90) % 360
                     UpdateStatusBanner()
@@ -3250,13 +3301,13 @@ local function EnsureMapKeybinds()
 
     if Key.C and ModifierKey and ModifierKey.CONTROL then
         RegisterKeyBind(Key.C, { ModifierKey.CONTROL }, function()
-            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
+            if IsMapOpen() and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(CopySelectedMachines)
             end
         end)
     elseif Key.C then
         RegisterKeyBind(Key.C, function()
-            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
+            if IsMapOpen() and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
                     local pc = Core.GetLocalPlayerController()
                     local ctrlDown = false
@@ -3276,7 +3327,7 @@ local function EnsureMapKeybinds()
 
     if Key.ESCAPE then
         RegisterKeyBind(Key.ESCAPE, function()
-            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
+            if IsMapOpen() and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
                     if InteractionMode ~= "Select" then
                         InteractionMode = "Select"
@@ -3305,12 +3356,12 @@ function Feature.Init()
         Label       = "Station Map",
         OnPress     = ToggleStationMap,
         CanTrigger  = function()
-            return Core.IsValidObj(ActiveMapWin) or nil
+            return IsMapOpen() or nil
         end,
     })
     EnsureMapKeybinds()
     StationData.OnIconVisibilityChanged(function()
-        if Core.IsValidObj(ActiveMapWin) then
+        if IsMapOpen() then
             pcall(RefreshStationMapCanvas)
         end
     end)
@@ -3323,7 +3374,7 @@ function Feature.RegisterHooks()
         function(Context)
             local w = Context:get()
             if Core.IsValidObj(w) and Core.IsValidObj(ActiveMapWin) and w:GetAddress() == ActiveMapWin:GetAddress() then
-                CloseStationMap()
+                DestroyStationMap()
             end
         end
     )
@@ -3332,7 +3383,7 @@ function Feature.RegisterHooks()
         "Building_BuildableSelected_StationMap",
         "/Game/Blueprints/Widgets/Menus/WBP_Building.WBP_Building_C:BuildableSelected",
         function(Context, BuildableParam)
-            if not WaitingForBuildMenuSelection or not Core.IsValidObj(ActiveMapWin) then
+            if not WaitingForBuildMenuSelection or not IsMapOpen() then
                 return
             end
             WaitingForBuildMenuSelection = false
@@ -3357,7 +3408,7 @@ function Feature.OnClientRestart()
     local curWorld = GetCurrentWorldAddr()
     if curWorld == nil or curWorld ~= LastWorldAddr then
         LastWorldAddr = curWorld
-        if Core.IsValidObj(ActiveMapWin) then CloseStationMap() end
+        if Core.IsValidObj(ActiveMapWin) then DestroyStationMap() end
         ResetSpriteCache()
         PendingGhosts = {}
         Clipboard = {}
@@ -3366,7 +3417,7 @@ end
 
 function Feature.OnMapLoad()
     LastWorldAddr = GetCurrentWorldAddr()
-    if Core.IsValidObj(ActiveMapWin) then CloseStationMap() end
+    if Core.IsValidObj(ActiveMapWin) then DestroyStationMap() end
     ResetSpriteCache()
     PendingGhosts = {}
     Clipboard = {}
@@ -3380,6 +3431,7 @@ function Feature.PruneCaches()
     end
     if ActiveMapWin and not Core.IsValidObj(ActiveMapWin) then
         ActiveMapWin = nil
+        MapWinVisible = false
         MapUI = nil
     end
 end
