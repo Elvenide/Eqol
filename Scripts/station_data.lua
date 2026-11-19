@@ -1307,6 +1307,62 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 end
             end)
 
+            -- Merge collinear touching/overlapping wall segments on the same Z-band to reduce widget count & seams
+            local function mergeWallList(list)
+                local merged = true
+                local eps = 8.0
+                while merged do
+                    merged = false
+                    local i = 1
+                    while i <= #list do
+                        local a = list[i]
+                        local j = i + 1
+                        while j <= #list do
+                            local b = list[j]
+                            local zOverlap = (a.minZ <= b.maxZ - 40.0 and b.minZ <= a.maxZ - 40.0)
+                            local didMerge = false
+                            if zOverlap then
+                                if math.abs(a.minY - b.minY) <= eps and math.abs(a.maxY - b.maxY) <= eps
+                                    and a.minX <= b.maxX + eps and b.minX <= a.maxX + eps
+                                then
+                                    a.minX = math.min(a.minX, b.minX)
+                                    a.maxX = math.max(a.maxX, b.maxX)
+                                    a.minY = math.min(a.minY, b.minY)
+                                    a.maxY = math.max(a.maxY, b.maxY)
+                                    a.minZ = math.min(a.minZ, b.minZ)
+                                    a.maxZ = math.max(a.maxZ, b.maxZ)
+                                    didMerge = true
+                                elseif math.abs(a.minX - b.minX) <= eps and math.abs(a.maxX - b.maxX) <= eps
+                                    and a.minY <= b.maxY + eps and b.minY <= a.maxY + eps
+                                then
+                                    a.minX = math.min(a.minX, b.minX)
+                                    a.maxX = math.max(a.maxX, b.maxX)
+                                    a.minY = math.min(a.minY, b.minY)
+                                    a.maxY = math.max(a.maxY, b.maxY)
+                                    a.minZ = math.min(a.minZ, b.minZ)
+                                    a.maxZ = math.max(a.maxZ, b.maxZ)
+                                    didMerge = true
+                                end
+                            end
+                            if didMerge then
+                                a.cx = (a.minX + a.maxX) * 0.5
+                                a.cy = (a.minY + a.maxY) * 0.5
+                                a.ex = (a.maxX - a.minX) * 0.5
+                                a.ey = (a.maxY - a.minY) * 0.5
+                                table.remove(list, j)
+                                merged = true
+                            else
+                                j = j + 1
+                            end
+                        end
+                        i = i + 1
+                    end
+                end
+            end
+            if #extractedWalls > 1 then
+                mergeWallList(extractedWalls)
+            end
+
             cachedWalls = { total = wallDiagTotal, scale = wallDiagScale, status = wallDiagStatus, walls = extractedWalls }
             CachedStationWallsByKey[stWallKey] = cachedWalls
         else

@@ -61,8 +61,8 @@ local COLORS = {
     GhostInvalid  = { R = 1.000, G = 0.320, B = 0.320, A = 0.58 },
     GhostBorderOk = { R = 0.350, G = 0.920, B = 0.650, A = 0.90 },
     GhostBorderBad= { R = 1.000, G = 0.300, B = 0.300, A = 0.90 },
-    WallFill      = { R = 0.080, G = 0.100, B = 0.130, A = 0.92 },
-    WallBorder    = { R = 0.720, G = 0.780, B = 0.860, A = 0.72 },
+    WallFill      = { R = 0.030, G = 0.040, B = 0.056, A = 1.00 },
+    WallBorder    = { R = 0.860, G = 0.910, B = 0.970, A = 0.92 },
     FloorRailBg   = { R = 0.045, G = 0.060, B = 0.082, A = 0.95 },
     FloorSelected = { R = 0.940, G = 0.620, B = 0.080, A = 1.00 },
     FloorNormal   = { R = 0.120, G = 0.155, B = 0.205, A = 0.90 },
@@ -78,7 +78,30 @@ local COLORS = {
 local MapHudInjected = {}
 local ActiveMapWin = nil
 local MapWinVisible = false
+local MapWinInViewport = false
 local MapUI = nil
+local CachedBorderCls = nil
+local EqolIssuingBuildCmd = false
+
+local ALIGN_CENTER = { X = 0.5, Y = 0.5 }
+local function AddBorderFast(outer, canvas, x, y, w, h, col, zOrder)
+    if not Core.IsValidObj(CachedBorderCls) then
+        CachedBorderCls = Core.FindOrLoadClass(PATHS.BorderClass)
+    end
+    if not Core.IsValidObj(CachedBorderCls) or not Core.IsValidObj(outer) then return nil, nil end
+    local ok, b = pcall(StaticConstructObject, CachedBorderCls, outer)
+    if not ok or not Core.IsValidObj(b) then return nil, nil end
+    b:SetVisibility(3)
+    b:SetBrushColor(col)
+    local s = canvas:AddChildToCanvas(b)
+    if Core.IsValidObj(s) then
+        s:SetPosition({ X = x, Y = y })
+        s:SetSize({ X = w, Y = h })
+        s:SetAlignment(ALIGN_CENTER)
+        if zOrder then s:SetZOrder(zOrder) end
+    end
+    return b, s
+end
 
 local function IsMapOpen()
     return MapWinVisible and Core.IsValidObj(ActiveMapWin)
@@ -621,6 +644,34 @@ local function InspectBuildMachineCommandLayout()
     if not BuildCmdSigLogged then
         BuildCmdSigLogged = true
         Core.Log("[StationMap] BuildCmdSig: params(" .. #layout.params .. ")=[" .. table.concat(sigParts, "; ") .. "]")
+        -- Also list all build/command-related UFunctions on DMSPlayerController & Builder for diagnostics
+        local fnNames = {}
+        pcall(function()
+            local pc = Core.GetLocalPlayerController()
+            local function scanFuncs(tag, obj)
+                if not Core.IsValidObj(obj) then return end
+                local c = obj:GetClass()
+                local d = 0
+                while Core.IsValidObj(c) and d < 5 do
+                    d = d + 1
+                    if c.ForEachFunction then
+                        c:ForEachFunction(function(fn)
+                            local n = fn:GetFName():ToString()
+                            local low = n:lower()
+                            if low:find("build", 1, true) or low:find("command", 1, true) or low:find("machine", 1, true) then
+                                table.insert(fnNames, tag .. ":" .. n)
+                            end
+                        end)
+                    end
+                    c = c.GetSuperStruct and c:GetSuperStruct() or nil
+                end
+            end
+            scanFuncs("PC", pc)
+            if Core.IsValidObj(pc) and Core.IsValidObj(pc.Builder) then
+                scanFuncs("Builder", pc.Builder)
+            end
+        end)
+        Core.Log("[StationMap] BuildFuncs: " .. table.concat(fnNames, ", "))
     end
 
     CachedBuildCmdLayout = layout
@@ -751,7 +802,8 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         local gridLocVal = (glStruct:find("intpoint", 1, true) or fields["Height"] ~= nil)
             and { X = gx, Y = gy }
             or { X = gx, Y = gy, Z = gz }
-        local targetPlatId = (platId and platId ~= 0) and platId or frameId
+        -- Prefer station/frame ID (UStationObject.ID) over subobject block ID for PlatformID
+        local targetPlatId = (frameId and frameId ~= 0) and frameId or platId
 
         setIfField("FrameID", frameId, "Int")
         setIfField("StationID", frameId, "Int")
@@ -777,9 +829,11 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         setIfField("Location", { X = locX, Y = locY, Z = locZ }, "Struct")
 
         if hasBuildable and populated >= 2 then
-            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(platId=%d, grid=(%d,%d), h=%d, rot=%d, fields=%d)",
-                targetPlatId, gx, gy, gz, rotSteps, populated))
+            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(platId=%d [stationId=%d,subId=%d], grid=(%d,%d), h=%d, rot=%d, fields=%d)",
+                targetPlatId, frameId, platId, gx, gy, gz, rotSteps, populated))
+            EqolIssuingBuildCmd = true
             local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
+            EqolIssuingBuildCmd = false
             Core.Log(string.format("[StationMap] AddBuildMachineCommand returned ok=%s err=%s", tostring(okCmd), tostring(errCmd)))
             if okCmd then
                 cmdSuccess = true
@@ -1021,42 +1075,24 @@ local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col
     return tile
 end
 
+local PORT_BG_COL = { R = 0.0, G = 0.0, B = 0.0, A = 0.56 }
+local PORT_DASH_COL = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
 local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder)
     local sz = math.max(12.0, portSize or 18.0)
     local half = sz * 0.5
 
-    local bg = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if Core.IsValidObj(bg) then
-        pcall(function()
-            bg:SetVisibility(3)
-            bg:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.56 })
-        end)
-        local bs = canvas:AddChildToCanvas(bg)
-        SetCanvasSlot(bs, px, py, sz - 2.0, sz - 2.0, 0.5, 0.5, zOrder)
-    end
+    AddBorderFast(outer, canvas, px, py, sz - 2.0, sz - 2.0, PORT_BG_COL, zOrder)
 
     -- True multi-dash thick black border (3 distinct dashes along each of the 4 sides)
-    local dashCol = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
     local thick = math.max(1.8, sz * 0.11)
     local dashLen = math.max(2.6, sz * 0.21)
     local step = sz * 0.34
+    local zDash = zOrder + 1
     for _, off in ipairs({ -step, 0.0, step }) do
-        for _, sy in ipairs({ py - half, py + half }) do
-            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(d) then
-                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
-                local ds = canvas:AddChildToCanvas(d)
-                SetCanvasSlot(ds, px + off, sy, dashLen, thick, 0.5, 0.5, zOrder + 1)
-            end
-        end
-        for _, sx in ipairs({ px - half, px + half }) do
-            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(d) then
-                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
-                local ds = canvas:AddChildToCanvas(d)
-                SetCanvasSlot(ds, sx, py + off, thick, dashLen, 0.5, 0.5, zOrder + 1)
-            end
-        end
+        AddBorderFast(outer, canvas, px + off, py - half, dashLen, thick, PORT_DASH_COL, zDash)
+        AddBorderFast(outer, canvas, px + off, py + half, dashLen, thick, PORT_DASH_COL, zDash)
+        AddBorderFast(outer, canvas, px - half, py + off, thick, dashLen, PORT_DASH_COL, zDash)
+        AddBorderFast(outer, canvas, px + half, py + off, thick, dashLen, PORT_DASH_COL, zDash)
     end
 end
 
@@ -1207,20 +1243,10 @@ local function RenderBorderOutline(outer, canvas, cx, cy, w, h, thickness, col, 
     local t = thickness or 2.0
     local halfW = w * 0.5
     local halfH = h * 0.5
-    local edges = {
-        { x = cx, y = cy - halfH, ew = w, eh = t }, -- Top
-        { x = cx, y = cy + halfH, ew = w, eh = t }, -- Bottom
-        { x = cx - halfW, y = cy, ew = t, eh = h }, -- Left
-        { x = cx + halfW, y = cy, ew = t, eh = h }, -- Right
-    }
-    for _, e in ipairs(edges) do
-        local b = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(b) then
-            pcall(function() b:SetBrushColor(col) end)
-            local s = canvas:AddChildToCanvas(b)
-            SetCanvasSlot(s, e.x, e.y, e.ew, e.eh, 0.5, 0.5, zOrder)
-        end
-    end
+    AddBorderFast(outer, canvas, cx, cy - halfH, w, t, col, zOrder)
+    AddBorderFast(outer, canvas, cx, cy + halfH, w, t, col, zOrder)
+    AddBorderFast(outer, canvas, cx - halfW, cy, t, h, col, zOrder)
+    AddBorderFast(outer, canvas, cx + halfW, cy, t, h, col, zOrder)
 end
 
 UpdateStatusBanner = function(textOverride)
@@ -1679,15 +1705,14 @@ RefreshStationMapCanvas = function()
             local posY = isVertical and midOther or by
             local isMajor4 = ((idx % 4) == 0)
             local isMajor8 = ((idx % 8) == 0)
-            local line = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(line) then
-                pcall(function()
-                    line:SetVisibility(3)
-                    line:SetBrushColor(isMajor4 and COLORS.GridMajor or COLORS.GridLine)
-                end)
-                local s = MapUI.MapCanvas:AddChildToCanvas(line)
-                local initThick = isMajor4 and 2.2 or 1.4
-                SetCanvasSlot(s, posX, posY, isVertical and initThick or spanOther, isVertical and spanOther or initThick, 0.5, 0.5, 3)
+            local initThick = isMajor4 and 2.2 or 1.4
+            local line, s = AddBorderFast(
+                outer, MapUI.MapCanvas, posX, posY,
+                isVertical and initThick or spanOther,
+                isVertical and spanOther or initThick,
+                isMajor4 and COLORS.GridMajor or COLORS.GridLine, 3
+            )
+            if line and s then
                 table.insert(RenderedGridLines, {
                     border = line,
                     slot = s,
@@ -1712,34 +1737,26 @@ RefreshStationMapCanvas = function()
         local mw = math.max(12.0, b.ex * 2.0 * BASE_PX_PER_CM)
         local mh = math.max(12.0, b.ey * 2.0 * BASE_PX_PER_CM)
 
-        local modFill = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(modFill) then
-            pcall(function()
-                modFill:SetVisibility(3)
-                modFill:SetBrushColor(COLORS.ModuleFill)
-            end)
-            local slot = MapUI.MapCanvas:AddChildToCanvas(modFill)
-            SetCanvasSlot(slot, mx, my, mw, mh, 0.5, 0.5, 2)
-        end
+        AddBorderFast(outer, MapUI.MapCanvas, mx, my, mw, mh, COLORS.ModuleFill, 2)
         RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
     end
 
-    -- 2b. Render structural module walls & interior partitions (with doorway gaps)
+    -- 2b. Render structural module walls & interior partitions as a continuous 2-pass silhouette:
+    --     Pass 1 (Z=5): expanded 5.5px outer border matching ModuleBorder thickness
+    --     Pass 2 (Z=6): opaque high-contrast interior fill fusing all corners/T-junctions with zero internal seams
     if floor.walls and #floor.walls > 0 then
+        local wallBorderPad = 11.0 -- 5.5px border on each side
         for _, w in ipairs(floor.walls) do
             local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
-            local ww = math.max(5.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
-            local wh = math.max(5.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            local wallBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(wallBox) then
-                pcall(function()
-                    wallBox:SetVisibility(3)
-                    wallBox:SetBrushColor(COLORS.WallFill)
-                end)
-                local ws = MapUI.MapCanvas:AddChildToCanvas(wallBox)
-                SetCanvasSlot(ws, wx, wy, ww, wh, 0.5, 0.5, 5)
-            end
-            RenderBorderOutline(outer, MapUI.MapCanvas, wx, wy, ww, wh, 1.5, COLORS.WallBorder, 6)
+            local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
+            local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
+            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + wallBorderPad, wh + wallBorderPad, COLORS.WallBorder, 5)
+        end
+        for _, w in ipairs(floor.walls) do
+            local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
+            local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
+            local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
+            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + 1.0, wh + 1.0, COLORS.WallFill, 6)
         end
     end
 
@@ -2784,6 +2801,7 @@ end
 
 local function DestroyStationMap()
     MapWinVisible = false
+    MapWinInViewport = false
     InteractionMode = "Select"
     PendingBuildable = nil
     WaitingForBuildMenuSelection = false
@@ -2860,25 +2878,23 @@ local function OpenStationMap()
     end
 
     -- Fast path: reuse hidden Station Map window for the same station (instant <5ms re-open)
-    if Core.IsValidObj(ActiveMapWin) and MapUI and Core.IsValidObj(CurrentStation) and Core.IsValidObj(station)
+    if MapWinInViewport and Core.IsValidObj(ActiveMapWin) and MapUI and Core.IsValidObj(CurrentStation) and Core.IsValidObj(station)
         and CurrentStation:GetAddress() == station:GetAddress()
     then
-        local inVp = false
-        pcall(function() inVp = (ActiveMapWin.IsInViewport and ActiveMapWin:IsInViewport() == true) end)
-        if inVp then
-            MapWinVisible = true
-            pcall(function() ActiveMapWin:SetVisibility(0) end) -- Visible
-            SetStationMapCursorMode(pc, ActiveMapWin, true)
-            MouseState.wasLDown = false
-            MouseState.wasRDown = false
-            MouseState.lDownInMap = false
-            MouseState.lDraggingBox = false
-            MouseState.rDownInMap = false
-            MouseState.rPanning = false
-            EnsureInputPoll()
-            RefreshDynamicOverlay()
-            return
-        end
+        local tFast = os.clock()
+        MapWinVisible = true
+        pcall(function() ActiveMapWin:SetVisibility(0) end) -- Visible
+        SetStationMapCursorMode(pc, ActiveMapWin, true)
+        MouseState.wasLDown = false
+        MouseState.wasRDown = false
+        MouseState.lDownInMap = false
+        MouseState.lDraggingBox = false
+        MouseState.rDownInMap = false
+        MouseState.rPanning = false
+        EnsureInputPoll()
+        RefreshDynamicOverlay()
+        Core.Log(string.format("[StationMap] Reused cached map window in %.1fms", (os.clock() - tFast) * 1000.0))
+        return
     end
 
     if Core.IsValidObj(ActiveMapWin) then
@@ -2893,6 +2909,7 @@ local function OpenStationMap()
 
     ActiveMapWin = win
     MapWinVisible = true
+    MapWinInViewport = true
     local outer = Core.GetWidgetOuter(win)
 
     pcall(function()
@@ -3369,6 +3386,26 @@ end
 
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
+        "DMSPlayerController_AddBuildMachineCommand_Diag",
+        "/Script/MainSequence.DMSPlayerController:AddBuildMachineCommand",
+        function(Context, CmdParam)
+            if EqolIssuingBuildCmd then return end
+            pcall(function()
+                local st = Core.UnwrapStruct(CmdParam) or (CmdParam and CmdParam.get and CmdParam:get()) or CmdParam
+                if st then
+                    local gx, gy = "?", "?"
+                    if st.GridLocation then
+                        gx, gy = tostring(st.GridLocation.X), tostring(st.GridLocation.Y)
+                    end
+                    local bName = Core.IsValidObj(st.Buildable) and st.Buildable:GetFName():ToString() or "nil"
+                    Core.Log(string.format("[StationMap] GameBuildCmd: platId=%s grid=(%s,%s) h=%s rot=%s cfg=%s bld=%s",
+                        tostring(st.PlatformID), gx, gy, tostring(st.Height), tostring(st.Rotation), tostring(st.Config), bName))
+                end
+            end)
+        end
+    )
+
+    Core.TryRegisterHook(
         "WindowBase_CloseWindow_StationMap",
         "/Game/Blueprints/Widgets/Basic/WBP_WindowBase.WBP_WindowBase_C:BndEvt__WBP_WindowBase_WBP_WindowHeader_K2Node_ComponentBoundEvent_1_CloseWindow__DelegateSignature",
         function(Context)
@@ -3432,6 +3469,7 @@ function Feature.PruneCaches()
     if ActiveMapWin and not Core.IsValidObj(ActiveMapWin) then
         ActiveMapWin = nil
         MapWinVisible = false
+        MapWinInViewport = false
         MapUI = nil
     end
 end
