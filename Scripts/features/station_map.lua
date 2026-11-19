@@ -568,7 +568,7 @@ local function InspectBuildMachineCommandLayout()
             local isRet = (pName == "ReturnValue")
             if not isRet then
                 local pInfo = { name = pName, cls = pCls, structName = nil, fields = nil }
-                if prop.GetStruct then
+                if pCls == "StructProperty" and prop.GetStruct then
                     local okS, st = pcall(function() return prop:GetStruct() end)
                     if okS and Core.IsValidObj(st) then
                         pcall(function() pInfo.structName = st:GetFName():ToString() end)
@@ -720,31 +720,43 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         -- Single struct command parameter: populate only fields that exist with type-appropriate values
         local cmd = {}
         local fields = layout.params[1].fields
-        local function setIfField(name, val)
-            if fields[name] ~= nil and val ~= nil then cmd[name] = val end
+        local populated = 0
+        local hasBuildable = false
+        local function setIfField(name, val, reqClsSub)
+            local fCls = fields[name]
+            if fCls ~= nil and val ~= nil and (not reqClsSub or fCls:find(reqClsSub, 1, true)) then
+                cmd[name] = val
+                populated = populated + 1
+                if name == "Buildable" or name == "BuildBlock" then hasBuildable = true end
+            end
         end
-        setIfField("FrameID", frameId)
-        setIfField("StationID", frameId)
-        setIfField("Frame", targetFrame)
-        setIfField("Station", targetFrame)
-        setIfField("PlatformID", platId)
-        setIfField("Platform", platform)
-        setIfField("Buildable", buildable)
-        setIfField("BuildBlock", buildable)
-        setIfField("GridLocation", { X = gx, Y = gy, Z = gz })
-        setIfField("GridRotation", rotSteps)
-        setIfField("Rotation", { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 })
-        setIfField("Yaw", yawDeg or 0.0)
-        setIfField("LocalQuat", quat)
-        setIfField("Quat", quat)
-        setIfField("Transform", localTransform)
-        setIfField("Location", { X = locX, Y = locY, Z = locZ })
+        setIfField("FrameID", frameId, "Int")
+        setIfField("StationID", frameId, "Int")
+        setIfField("Frame", targetFrame, "Object")
+        setIfField("Station", targetFrame, "Object")
+        setIfField("PlatformID", platId, "Int")
+        setIfField("Platform", platform, "Object")
+        setIfField("Buildable", buildable, "Object")
+        setIfField("BuildBlock", buildable, "Object")
+        setIfField("GridLocation", { X = gx, Y = gy, Z = gz }, "Struct")
+        setIfField("GridRotation", rotSteps, "Int")
+        setIfField("Rotation", { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 }, "Struct")
+        setIfField("Yaw", yawDeg or 0.0, "Float")
+        setIfField("LocalQuat", quat, "Struct")
+        setIfField("Quat", quat, "Struct")
+        setIfField("Transform", localTransform, "Struct")
+        setIfField("Location", { X = locX, Y = locY, Z = locZ }, "Struct")
 
-        local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
-        if okCmd then
-            cmdSuccess = true
+        if hasBuildable and populated >= 2 then
+            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(struct, fields=%d, loc=(%.0f,%.0f,%.0f))", populated, locX, locY, locZ))
+            local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
+            if okCmd then
+                cmdSuccess = true
+            else
+                callErr = tostring(errCmd)
+            end
         else
-            callErr = tostring(errCmd)
+            callErr = string.format("Struct fields mismatch (populated=%d, hasBuildable=%s; see BuildCmdSig in UE4SS.log)", populated, tostring(hasBuildable))
         end
     else
         -- Multi-parameter signature: map each parameter strictly by inspected name & type (no blind fuzzing)
@@ -801,6 +813,7 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         end
 
         if allMatched then
+            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(args=%d, loc=(%.0f,%.0f,%.0f))", #args, locX, locY, locZ))
             local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(table.unpack(args)) end)
             if okCmd then
                 cmdSuccess = true
@@ -2126,6 +2139,7 @@ local function CopySelectedMachines()
 end
 
 local function CommitPendingGhosts()
+    Core.Log(string.format("[StationMap] CommitPendingGhosts entered (inProgress=%s, pending=%d)", tostring(ApplyInProgress), #PendingGhosts))
     if ApplyInProgress then return end
     if #PendingGhosts == 0 then
         UpdateStatusBanner("No pending changes to apply")
@@ -3054,7 +3068,7 @@ local function OpenStationMap()
     end
 
     local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, function()
-        ExecuteInGameThread(CommitPendingGhosts)
+        ExecuteInGameThreadAfterFrames(1, CommitPendingGhosts)
     end)
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
@@ -3161,8 +3175,9 @@ local function OpenStationMap()
     RefreshStationMapCanvas()
     EnsureInputPoll()
 
-    -- Re-fit once after UMG finishes layout pass on frame 2
+    -- Re-fit once after UMG finishes layout pass on frame 2, and pre-inspect BuildMachineCommand signature
     ExecuteInGameThreadAfterFrames(2, function()
+        InspectBuildMachineCommandLayout()
         if Core.IsValidObj(ActiveMapWin) and MeasureMapCanvasSize() then
             FitViewTransformToFloor()
             ApplyViewTransform()
