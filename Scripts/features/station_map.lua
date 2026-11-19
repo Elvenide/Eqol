@@ -81,8 +81,24 @@ local MapWinVisible = false
 local MapWinInViewport = false
 local MapUI = nil
 local CachedBorderCls = nil
+local CachedWidgetClasses = {}
+local function CreateRawFast(path, outer)
+    local cls = CachedWidgetClasses[path]
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(path)
+        CachedWidgetClasses[path] = cls
+    end
+    if not Core.IsValidObj(cls) or not Core.IsValidObj(outer) then return nil end
+    local ok, w = pcall(StaticConstructObject, cls, outer)
+    if ok and Core.IsValidObj(w) then return w end
+    return nil
+end
+
 local CanvasRenderGen = 0
 local MachineRenderGen = 0
+local RenderedMachineWidgets = {} -- mAddr -> { widgets = {}, portKeys = {} }
+local SyncFloorMachinesIncremental = nil
+local RefreshSingleMachineVisual = nil
 local BuildGridDivisor = 50.0
 local BuildHeightDivisor = 50.0
 local GridCalibrated = false
@@ -1004,6 +1020,23 @@ local function CaptureMachineConfig(m)
         end
     end)
 
+    -- 3b. Disabled ports (Assemblers, Refineries, Splitters, etc.)
+    pcall(function()
+        if m.IsPortEnabled then
+            local dis = {}
+            for portIdx = 0, 15 do
+                local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
+                if okP and en == false then
+                    table.insert(dis, portIdx)
+                end
+            end
+            if #dis > 0 then
+                cfg.disabledPorts = dis
+                hasAny = true
+            end
+        end
+    end)
+
     -- 4. Single item filter (if present)
     pcall(function()
         local fi = m.FilterItem
@@ -1110,12 +1143,13 @@ local function CaptureMachineConfig(m)
                 c = c.GetSuperStruct and c:GetSuperStruct() or nil
             end
         end)
-        Core.Log(string.format("[StationMap] CopyConfigDiag cls=%s hasAny=%s recipe=%s pIn=%s pOut=%s cfg=%s cfg2=%s flt=%d lf=%d props=[%s]",
+        Core.Log(string.format("[StationMap] CopyConfigDiag cls=%s hasAny=%s recipe=%s pIn=%s pOut=%s cfg=%s cfg2=%s flt=%d disP=%d lf=%d props=[%s]",
             clsKey, tostring(hasAny),
             Core.IsValidObj(cfg.recipe) and cfg.recipe:GetFName():ToString() or "nil",
             tostring(cfg.priorityInput), tostring(cfg.priorityOutput),
             tostring(cfg.config), tostring(cfg.config2),
             cfg.filters and #cfg.filters or 0,
+            cfg.disabledPorts and #cfg.disabledPorts or 0,
             cfg.logisticFilters and #cfg.logisticFilters or 0,
             table.concat(props, ",")))
     end
@@ -1249,17 +1283,28 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
     end
 
     -- 2. Splitter / Belt Balancer priorities & Config/Config2
-    local hasPrio = (cfg.priorityInput ~= nil and cfg.priorityInput >= 0) or (cfg.priorityOutput ~= nil and cfg.priorityOutput >= 0)
-    if hasPrio then
+    -- USplitterObject handles SetConfigInput with InConfig = slot (0=InputPriority, 1=OutputPriority), InConfig2 = portIndex
+    if cfg.priorityInput ~= nil and cfg.priorityInput >= 0 then
         if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
             receiverId = receiverId,
-            config = (cfg.priorityInput ~= nil) and cfg.priorityInput or -1,
-            config2 = (cfg.priorityOutput ~= nil) and cfg.priorityOutput or -1,
+            config = 0,
+            config2 = cfg.priorityInput,
             playerObjId = playerObjId,
         }) then
             applied = true
         end
-    elseif cfg.config ~= nil and cfg.config ~= 0 then
+    end
+    if cfg.priorityOutput ~= nil and cfg.priorityOutput >= 0 then
+        if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
+            receiverId = receiverId,
+            config = 1,
+            config2 = cfg.priorityOutput,
+            playerObjId = playerObjId,
+        }) then
+            applied = true
+        end
+    end
+    if cfg.priorityInput == nil and cfg.priorityOutput == nil and cfg.config ~= nil and cfg.config ~= 0 then
         if cfg.config2 ~= nil and cfg.config2 ~= 0 then
             if InvokeCreateInputCommand(pc, "SetConfigInput", "CreateInputSetConfig2", {
                 receiverId = receiverId,
@@ -1276,6 +1321,26 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
                 playerObjId = playerObjId,
             }) then
                 applied = true
+            end
+        end
+    end
+
+    -- 2b. Disabled ports (via MachinePortInput:TogglePortEnabled)
+    if cfg.disabledPorts and #cfg.disabledPorts > 0 then
+        for _, portIdx in ipairs(cfg.disabledPorts) do
+            local shouldToggle = true
+            if targetMachine.IsPortEnabled then
+                local okP, en = pcall(function() return targetMachine:IsPortEnabled(portIdx) end)
+                if okP and en == false then shouldToggle = false end
+            end
+            if shouldToggle then
+                if InvokeCreateInputCommand(pc, "MachinePortInput", "TogglePortEnabled", {
+                    receiverId = receiverId,
+                    portIndex = portIdx,
+                    playerObjId = playerObjId,
+                }) then
+                    applied = true
+                end
             end
         end
     end
@@ -1594,24 +1659,16 @@ local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col
     return tile
 end
 
-local PORT_BG_COL = { R = 0.0, G = 0.0, B = 0.0, A = 0.56 }
+local PORT_BG_COL = { R = 0.08, G = 0.10, B = 0.14, A = 0.88 }
 local PORT_DASH_COL = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
-local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder)
+local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder, outWidgets)
     local sz = math.max(12.0, portSize or 18.0)
-    local half = sz * 0.5
-
-    AddBorderFast(outer, canvas, px, py, sz - 2.0, sz - 2.0, PORT_BG_COL, zOrder)
-
-    -- True multi-dash thick black border (3 distinct dashes along each of the 4 sides)
-    local thick = math.max(1.8, sz * 0.11)
-    local dashLen = math.max(2.6, sz * 0.21)
-    local step = sz * 0.34
-    local zDash = zOrder + 1
-    for _, off in ipairs({ -step, 0.0, step }) do
-        AddBorderFast(outer, canvas, px + off, py - half, dashLen, thick, PORT_DASH_COL, zDash)
-        AddBorderFast(outer, canvas, px + off, py + half, dashLen, thick, PORT_DASH_COL, zDash)
-        AddBorderFast(outer, canvas, px - half, py + off, thick, dashLen, PORT_DASH_COL, zDash)
-        AddBorderFast(outer, canvas, px + half, py + off, thick, dashLen, PORT_DASH_COL, zDash)
+    -- Compact 2-widget port badge (6.5x fewer UMG widgets than 13-dash borders!)
+    local bOuter = AddBorderFast(outer, canvas, px, py, sz, sz, PORT_DASH_COL, zOrder)
+    local bInner = AddBorderFast(outer, canvas, px, py, math.max(6.0, sz - 4.0), math.max(6.0, sz - 4.0), PORT_BG_COL, zOrder + 1)
+    if outWidgets then
+        if bOuter then table.insert(outWidgets, bOuter) end
+        if bInner then table.insert(outWidgets, bInner) end
     end
 end
 
@@ -1645,11 +1702,11 @@ local function RenderDashedLine(outer, canvas, x1, y1, x2, y2, col, thickness, d
     end
 end
 
-local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, mx, my, pxW, pxH, yawDeg, cat, spriteEntry, isGhost, validGhost, zBase, hasBottomOverlay)
+local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, mx, my, pxW, pxH, yawDeg, cat, spriteEntry, isGhost, validGhost, zBase, hasBottomOverlay, outWidgets)
     local fillW = math.max(6.0, pxW - 2.0)
     local fillH = math.max(6.0, pxH - 2.0)
 
-    -- Dedicated crisp 2D conveyor belt visual: darker gray belt bed, black/dark-gray guide rails, sharp tier chevrons
+    -- Fast 2D conveyor belt visual: 4 borders directly on targetCanvas (no per-tile CanvasPanel wrapper!)
     if cat == "Conveyor" then
         local tier = (spriteEntry and spriteEntry.tier) or 1
         local tierDark = (tier == 1) and 1.0 or ((tier == 2) and 0.78 or 0.62)
@@ -1660,40 +1717,40 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
         local railCol = isGhost and bdrCol or { R = 0.05, G = 0.06, B = 0.08, A = 0.98 }
         local arrowCol = isGhost and bdrCol or GetTierArrowColor(tier)
 
-        local tile = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
-        if Core.IsValidObj(tile) then
-            pcall(function()
-                tile:SetVisibility(3)
-                tile:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
-                if math.abs(yawDeg or 0.0) > 0.1 and tile.SetRenderTransformAngle then
-                    tile:SetRenderTransformAngle(yawDeg)
-                end
-            end)
-            local ts = targetCanvas:AddChildToCanvas(tile)
-            SetCanvasSlot(ts, mx, my, pxW, pxH, 0.5, 0.5, zBase)
+        local norm = (math.floor((yawDeg or 0.0) / 90.0 + 0.5) % 4 + 4) % 4
+        local isVert = (norm == 1 or norm == 3)
+        local railThick = math.max(2.0, math.min(fillW, fillH) * 0.12)
+        local bedW = isVert and math.max(4.0, fillW - railThick * 2.0) or fillW
+        local bedH = isVert and fillH or math.max(4.0, fillH - railThick * 2.0)
 
-            local railThick = math.max(2.0, fillH * 0.12)
-            local railBase = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(railBase) then
-                pcall(function() railBase:SetVisibility(3); railBase:SetBrushColor(railCol) end)
-                local rs = tile:AddChildToCanvas(railBase)
-                SetCanvasSlot(rs, pxW * 0.5, pxH * 0.5, fillW, fillH, 0.5, 0.5, 1)
-            end
-
-            local bg = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(bg) then
-                pcall(function() bg:SetVisibility(3); bg:SetBrushColor(bgCol) end)
-                local bs = tile:AddChildToCanvas(bg)
-                SetCanvasSlot(bs, pxW * 0.5, pxH * 0.5, fillW, math.max(4.0, fillH - railThick * 2.0), 0.5, 0.5, 2)
-            end
-
-            -- Two sharp apex-aligned chevrons (>>) pointing along +X (yaw=0)
-            local armLen = math.max(5.5, pxW * 0.25)
-            local armThick = math.max(1.6, math.min(2.6, pxH * 0.055))
-            AddSharpChevronToCanvas(outer, tile, pxW * 0.43, pxH * 0.5, armLen, armThick, arrowCol, 3)
-            AddSharpChevronToCanvas(outer, tile, pxW * 0.75, pxH * 0.5, armLen, armThick, arrowCol, 3)
-            return tile
+        local bRail = AddBorderFast(outer, targetCanvas, mx, my, fillW, fillH, railCol, zBase)
+        local bBed = AddBorderFast(outer, targetCanvas, mx, my, bedW, bedH, bgCol, zBase + 1)
+        if outWidgets then
+            if bRail then table.insert(outWidgets, bRail) end
+            if bBed then table.insert(outWidgets, bBed) end
         end
+
+        -- Single crisp directional chevron (2 borders) rotated to yawDeg
+        local armLen = math.max(6.0, math.min(pxW, pxH) * 0.30)
+        local armThick = math.max(1.8, math.min(2.8, math.min(pxW, pxH) * 0.065))
+        local halfArm = armLen * 0.3536
+        local rad = math.rad(yawDeg or 0.0)
+        local cosA, sinA = math.cos(rad), math.sin(rad)
+        for _, sign in ipairs({ -1.0, 1.0 }) do
+            local lx = -halfArm * 0.2
+            local ly = sign * halfArm
+            local rx = lx * cosA - ly * sinA
+            local ry = lx * sinA + ly * cosA
+            local bar = AddBorderFast(outer, targetCanvas, mx + rx, my + ry, armLen, armThick, arrowCol, zBase + 2)
+            if bar then
+                pcall(function()
+                    bar:SetRenderTransformPivot(ALIGN_CENTER)
+                    if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle((yawDeg or 0.0) + sign * 45.0) end
+                end)
+                if outWidgets then table.insert(outWidgets, bar) end
+            end
+        end
+        return bBed
     end
 
     local bgCol = (spriteEntry and spriteEntry.bgCol) or GetColorForMachine(cat)
@@ -1704,29 +1761,16 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
     end
 
     -- Outer subtle frame border + full-footprint colored fill covering the entire machine rectangle
-    local bdrBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if Core.IsValidObj(bdrBox) then
-        pcall(function()
-            bdrBox:SetVisibility(3)
-            bdrBox:SetBrushColor(bdrCol)
-        end)
-        local bs = targetCanvas:AddChildToCanvas(bdrBox)
-        SetCanvasSlot(bs, mx, my, math.max(6.0, pxW), math.max(6.0, pxH), 0.5, 0.5, zBase)
-    end
-
-    local fillBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if Core.IsValidObj(fillBox) then
-        pcall(function()
-            fillBox:SetVisibility(3)
-            fillBox:SetBrushColor(bgCol)
-        end)
-        local fs = targetCanvas:AddChildToCanvas(fillBox)
-        SetCanvasSlot(fs, mx, my, fillW, fillH, 0.5, 0.5, zBase + 1)
+    local bdrBox = AddBorderFast(outer, targetCanvas, mx, my, math.max(6.0, pxW), math.max(6.0, pxH), bdrCol, zBase)
+    local fillBox = AddBorderFast(outer, targetCanvas, mx, my, fillW, fillH, bgCol, zBase + 1)
+    if outWidgets then
+        if bdrBox then table.insert(outWidgets, bdrBox) end
+        if fillBox then table.insert(outWidgets, fillBox) end
     end
 
     -- Centered 2D build-menu machine asset inside the colored rectangle
     if spriteEntry and Core.IsValidObj(spriteEntry.tex) then
-        local img = Core.CreateRawWidget(PATHS.ImageClass, outer)
+        local img = CreateRawFast(PATHS.ImageClass, outer)
         if Core.IsValidObj(img) then
             local shiftUp = (hasBottomOverlay and pxH >= 52.0)
             local iconDim
@@ -1752,6 +1796,7 @@ local function CreateMachineVisualWidget(parentWindow, pc, outer, targetCanvas, 
             end)
             local islot = targetCanvas:AddChildToCanvas(img)
             SetCanvasSlot(islot, mx, iconY, iconDim, iconDim, 0.5, 0.5, zBase + 2)
+            if outWidgets then table.insert(outWidgets, img) end
         end
     end
 
@@ -2180,6 +2225,7 @@ RefreshStationMapCanvas = function(machinesOnly)
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
+    RenderedMachineWidgets = {}
     LastHoveredPortIdx = nil
     FloorIconButtons = {}
 
@@ -2380,10 +2426,10 @@ RefreshStationMapCanvas = function(machinesOnly)
                 staticPumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.005
+            local budgetEnd = os.clock() + 0.008
             local addedGrid = false
             local gCount = 0
-            while gIdx <= #deferredGridLines and (gCount < 8 or os.clock() < budgetEnd) and gCount < 48 do
+            while gIdx <= #deferredGridLines and (gCount < 12 or os.clock() < budgetEnd) and gCount < 64 do
                 local dg = deferredGridLines[gIdx]
                 local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
                 if line and s then
@@ -2405,7 +2451,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
             end
             local wCount = 0
-            while wQueueIdx <= #visibleWallQueue and (wCount < 6 or os.clock() < budgetEnd) and wCount < 32 do
+            while wQueueIdx <= #visibleWallQueue and (wCount < 10 or os.clock() < budgetEnd) and wCount < 48 do
                 local dw = visibleWallQueue[wQueueIdx]
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
@@ -2435,16 +2481,60 @@ RefreshStationMapCanvas = function(machinesOnly)
         end
     end
 
-    -- Stream ONLY viewport-visible machines and their port badges within a 6ms/frame budget (load once, keep permanently)
-    if #pendingMachines > 0 then
+    -- Stream ONLY viewport-visible machines and their port badges within a 10ms/frame budget (load once, keep permanently)
+    do
         local visibleMachineQueue = {}
         local mQueueIdx = 1
         local pIdx = 1
         local machinePumpRunning = false
+        local knownPendingByAddr = {}
+        for _, pm in ipairs(pendingMachines) do
+            if pm.me and Core.IsValidObj(pm.me.machine) then
+                knownPendingByAddr[pm.me.machine:GetAddress()] = pm
+            end
+        end
+
+        local function removeRenderedMachine(mAddr)
+            local track = RenderedMachineWidgets[mAddr]
+            if track then
+                for _, w in ipairs(track.widgets) do
+                    if Core.IsValidObj(w) then pcall(function() w:RemoveFromParent() end) end
+                end
+                for _, pk in ipairs(track.portKeys) do
+                    local pe = portsByKey[pk]
+                    if pe and pe.ownerAddr == mAddr then
+                        if pe.portWidgets then
+                            for _, pw in ipairs(pe.portWidgets) do
+                                if Core.IsValidObj(pw) then pcall(function() pw:RemoveFromParent() end) end
+                            end
+                        end
+                        portsByKey[pk] = nil
+                    end
+                end
+                RenderedMachineWidgets[mAddr] = nil
+            end
+            FloorIconButtons[mAddr] = nil
+            SelectedMachines[mAddr] = nil
+            for i = #RenderedMachines, 1, -1 do
+                if RenderedMachines[i].addr == mAddr then table.remove(RenderedMachines, i) end
+            end
+            for i = #RenderedConveyors, 1, -1 do
+                if RenderedConveyors[i].addr == mAddr then table.remove(RenderedConveyors, i) end
+            end
+            for i = #RenderedPorts, 1, -1 do
+                if RenderedPorts[i].ownerAddr == mAddr then table.remove(RenderedPorts, i) end
+            end
+        end
 
         local function processOneMachine(me)
             local m = me.machine
             if not (Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m)) then return end
+            local mAddr = m:GetAddress()
+            if RenderedMachineWidgets[mAddr] then return end
+            local mWidgets = {}
+            local mPortKeys = {}
+            RenderedMachineWidgets[mAddr] = { widgets = mWidgets, portKeys = mPortKeys }
+
             local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
             local mx, my = WorldToBaseCanvas(mwx, mwy)
             local cat = StationData.GetMachineCategory(m)
@@ -2457,7 +2547,6 @@ RefreshStationMapCanvas = function(machinesOnly)
             local okR, rec = pcall(function() return m.Recipe end)
             local clsKey = select(1, GetMachineClassKey(m, bld))
             local sprite = RequestMachineSprite(clsKey, m, cat, bld)
-            local mAddr = m:GetAddress()
 
             local overlayChips = {}
             local isContainer = (cat == "Container")
@@ -2500,9 +2589,9 @@ RefreshStationMapCanvas = function(machinesOnly)
             table.insert(RenderedMachines, recEntry)
             if cat == "Conveyor" then
                 table.insert(RenderedConveyors, recEntry)
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, "Conveyor", sprite, false, true, 10, false)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, "Conveyor", sprite, false, true, 10, false, mWidgets)
             else
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay, mWidgets)
             end
 
             -- Underground belt enhancements: direction arrow on tile + dashed pair line + second endpoint tile
@@ -2510,7 +2599,8 @@ RefreshStationMapCanvas = function(machinesOnly)
             local uInfo = (clsLow:find("underground", 1, true) ~= nil) and StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform) or nil
             if uInfo then
                 local arrowCol = GetTierArrowColor(sprite and sprite.tier or 1)
-                RenderDirectionChevron(outer, mCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                local ch1 = RenderDirectionChevron(outer, mCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                if ch1 then table.insert(mWidgets, ch1) end
                 if uInfo.pairX and uInfo.pairY then
                     local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
@@ -2523,11 +2613,13 @@ RefreshStationMapCanvas = function(machinesOnly)
                         end
                         RenderDashedLine(outer, mCanvas, x1, y1, x2, y2, lineCol, 2.6, 10.0, 6.0, 17)
                         local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
-                        RenderDirectionChevron(outer, mCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
+                        local chMid = RenderDirectionChevron(outer, mCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
+                        if chMid then table.insert(mWidgets, chMid) end
                     end
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
-                        CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
-                        RenderDirectionChevron(outer, mCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                        CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false, mWidgets)
+                        local ch2 = RenderDirectionChevron(outer, mCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                        if ch2 then table.insert(mWidgets, ch2) end
                     end
                 end
             end
@@ -2542,10 +2634,11 @@ RefreshStationMapCanvas = function(machinesOnly)
                 local badgeH = isProducer and (iconSize + 18.0) or (iconSize + 6.0)
                 local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
 
-                local ov = Core.CreateRawWidget(PATHS.OverlayClass, outer)
+                local ov = CreateRawFast(PATHS.OverlayClass, outer)
                 local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
-                local chipsHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+                local chipsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
                 if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(chipsHBox) then
+                    table.insert(mWidgets, ov)
                     pcall(function()
                         iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.72 })
                         iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
@@ -2562,7 +2655,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                         chipsHBox:SetVisibility(3)
 
                         for ci, chip in ipairs(overlayChips) do
-                            local chipVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
+                            local chipVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
                             local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
                             if Core.IsValidObj(chipVBox) and Core.IsValidObj(itemW) then
                                 chipVBox:SetVisibility(3)
@@ -2626,6 +2719,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                     local existing = portsByKey[cellKey]
                     if not existing then
                         local pmx, pmy = WorldToBaseCanvas(p.px, p.py)
+                        local pWidgets = {}
                         existing = {
                             idx = #RenderedPorts + 1,
                             x = p.px,
@@ -2635,10 +2729,13 @@ RefreshStationMapCanvas = function(machinesOnly)
                             isInput = p.isInput == true,
                             isOutput = p.isOutput == true,
                             machineName = recEntry.displayName,
+                            ownerAddr = mAddr,
+                            portWidgets = pWidgets,
                         }
                         portsByKey[cellKey] = existing
+                        table.insert(mPortKeys, cellKey)
                         table.insert(RenderedPorts, existing)
-                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy })
+                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy, outWidgets = pWidgets })
                     else
                         if p.isInput then existing.isInput = true end
                         if p.isOutput then existing.isOutput = true end
@@ -2652,17 +2749,17 @@ RefreshStationMapCanvas = function(machinesOnly)
                 machinePumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.006
+            local budgetEnd = os.clock() + 0.010
             local mCount = 0
-            while mQueueIdx <= #visibleMachineQueue and (mCount < 2 or os.clock() < budgetEnd) and mCount < 24 do
+            while mQueueIdx <= #visibleMachineQueue and (mCount < 6 or os.clock() < budgetEnd) and mCount < 48 do
                 processOneMachine(visibleMachineQueue[mQueueIdx])
                 mQueueIdx = mQueueIdx + 1
                 mCount = mCount + 1
             end
             local pCount = 0
-            while pIdx <= #deferredPorts and (pCount < 4 or os.clock() < budgetEnd) and pCount < 20 do
+            while pIdx <= #deferredPorts and (pCount < 8 or os.clock() < budgetEnd) and pCount < 36 do
                 local dp = deferredPorts[pIdx]
-                RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
+                RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22, dp.outWidgets)
                 pIdx = pIdx + 1
                 pCount = pCount + 1
             end
@@ -2677,7 +2774,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             if myMachineGen ~= MachineRenderGen then return end
             local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRect()
             for _, pm in ipairs(pendingMachines) do
-                if not pm.rendered then
+                if not pm.rendered and not pm.removed then
                     local me = pm.me
                     if me.x >= vMinX and me.x <= vMaxX and me.y >= vMinY and me.y <= vMaxY then
                         pm.rendered = true
@@ -2690,8 +2787,76 @@ RefreshStationMapCanvas = function(machinesOnly)
                 ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             end
         end
-    else
-        OnViewportChangedMachines = nil
+
+        -- Incremental diff sync: removes deleted machines and renders ONLY newly added machines (zero full floor reload!)
+        SyncFloorMachinesIncremental = function()
+            if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) then return end
+            StationData.InvalidateMachineCache()
+            local pc2 = Core.GetLocalPlayerController()
+            local px2, py2, pz2 = nil, nil, nil
+            if Core.IsValidObj(pc2) and Core.IsValidObj(pc2.Pawn) then
+                local okL, loc2 = pcall(function() return pc2.Pawn:K2_GetActorLocation() end)
+                if okL and loc2 and type(loc2.X) == "number" then
+                    px2, py2, pz2 = loc2.X, loc2.Y or 0, loc2.Z or 0
+                end
+            end
+            local newFloors, _, _, gox2, goy2, xform2 = StationData.BuildStationFloorMap(CurrentStation, CurrentWalkFrame, px2, py2, pz2)
+            if not newFloors or #newFloors == 0 then return end
+            CurrentFloors = newFloors
+            CurrentFrameXform = xform2
+            if SelectedFloorIdx > #CurrentFloors then SelectedFloorIdx = #CurrentFloors end
+            ViewTransform.gridOriginX = gox2 or ViewTransform.gridOriginX
+            ViewTransform.gridOriginY = goy2 or ViewTransform.gridOriginY
+
+            local curFl = CurrentFloors[SelectedFloorIdx]
+            local liveList = (curFl and curFl.machines) or {}
+            local liveByAddr = {}
+            for _, me in ipairs(liveList) do
+                if Core.IsValidObj(me.machine) then
+                    liveByAddr[me.machine:GetAddress()] = me
+                end
+            end
+
+            -- 1. Remove any machine that was deleted in-game
+            local removedCount = 0
+            for addr, pm in pairs(knownPendingByAddr) do
+                if not liveByAddr[addr] then
+                    pm.removed = true
+                    knownPendingByAddr[addr] = nil
+                    presentAddrs[addr] = nil
+                    removeRenderedMachine(addr)
+                    removedCount = removedCount + 1
+                end
+            end
+
+            -- 2. Queue ONLY newly added machines
+            local addedCount = 0
+            for addr, me in pairs(liveByAddr) do
+                if not knownPendingByAddr[addr] then
+                    presentAddrs[addr] = true
+                    local pm = { me = me, rendered = false }
+                    knownPendingByAddr[addr] = pm
+                    table.insert(pendingMachines, pm)
+                    addedCount = addedCount + 1
+                end
+            end
+
+            if removedCount > 0 then RefreshSelectionLayer() end
+            if addedCount > 0 and OnViewportChangedMachines then OnViewportChangedMachines() end
+        end
+
+        RefreshSingleMachineVisual = function(mAddr)
+            if myMachineGen ~= MachineRenderGen then return end
+            local pm = knownPendingByAddr[mAddr]
+            if not pm or pm.removed or not pm.me or not Core.IsValidObj(pm.me.machine) then return end
+            removeRenderedMachine(mAddr)
+            pm.rendered = true
+            table.insert(visibleMachineQueue, pm.me)
+            if not machinePumpRunning then
+                machinePumpRunning = true
+                ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
+            end
+        end
     end
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
@@ -2897,74 +3062,58 @@ local function CommitPendingGhosts()
         if builtCount > 0 then
             UpdateStatusBanner(string.format("Applied %d placement(s)%s", builtCount, (#remaining > 0 and (" (" .. #remaining .. " failed)") or "")))
             ExecuteInGameThreadWithDelay(350, function()
-                StationData.InvalidateMachineCache()
-                if Core.IsValidObj(CurrentStation) then
-                    local pc2 = Core.GetLocalPlayerController()
-                    local px2, py2, pz2 = nil, nil, nil
-                    if Core.IsValidObj(pc2) then
-                        local pawn2 = pc2.Pawn
-                        if Core.IsValidObj(pawn2) then
-                            local okL, loc2 = pcall(function() return pawn2:K2_GetActorLocation() end)
-                            if okL and loc2 and type(loc2.X) == "number" then
-                                px2, py2, pz2 = loc2.X, loc2.Y or 0, loc2.Z or 0
-                            end
-                        end
-                    end
-                    local newFloors, _, _, gox2, goy2, xform2 = StationData.BuildStationFloorMap(CurrentStation, CurrentWalkFrame, px2, py2, pz2)
-                    if newFloors and #newFloors > 0 then
-                        CurrentFloors = newFloors
-                        CurrentFrameXform = xform2
-                        if SelectedFloorIdx > #CurrentFloors then SelectedFloorIdx = #CurrentFloors end
-                        ViewTransform.gridOriginX = gox2 or ViewTransform.gridOriginX
-                        ViewTransform.gridOriginY = goy2 or ViewTransform.gridOriginY
-                    end
-
-                    -- Apply copied machine configs (recipes, splitter/balancer priorities & filters, etc. - never inventory)
-                    if #builtWithConfig > 0 and Core.IsValidObj(pc2) then
-                        local cfgIdx = 1
-                        local cfgApplied = 0
-                        local function pumpConfigBatch()
-                            local endIdx = math.min(#builtWithConfig, cfgIdx + 5)
-                            while cfgIdx <= endIdx do
-                                local item = builtWithConfig[cfgIdx]
-                                local fl = CurrentFloors[item.floorIdx] or CurrentFloors[SelectedFloorIdx]
-                                local bestM, bestD2 = nil, 45.0 * 45.0
-                                if fl and fl.machines then
-                                    for _, me in ipairs(fl.machines) do
-                                        if Core.IsValidObj(me.machine) then
-                                            local dx = (me.x or 0) - item.x
-                                            local dy = (me.y or 0) - item.y
-                                            local d2 = dx * dx + dy * dy
-                                            if d2 < bestD2 then
-                                                bestD2 = d2
-                                                bestM = me.machine
-                                            end
+                if SyncFloorMachinesIncremental then
+                    SyncFloorMachinesIncremental()
+                end
+                local pc2 = Core.GetLocalPlayerController()
+                -- Apply copied machine configs (recipes, splitter/balancer priorities & filters, disabled ports - never inventory)
+                if #builtWithConfig > 0 and Core.IsValidObj(pc2) then
+                    local cfgIdx = 1
+                    local cfgApplied = 0
+                    local configuredAddrs = {}
+                    local function pumpConfigBatch()
+                        local endIdx = math.min(#builtWithConfig, cfgIdx + 5)
+                        while cfgIdx <= endIdx do
+                            local item = builtWithConfig[cfgIdx]
+                            local fl = CurrentFloors[item.floorIdx] or CurrentFloors[SelectedFloorIdx]
+                            local bestM, bestD2 = nil, 45.0 * 45.0
+                            if fl and fl.machines then
+                                for _, me in ipairs(fl.machines) do
+                                    if Core.IsValidObj(me.machine) then
+                                        local dx = (me.x or 0) - item.x
+                                        local dy = (me.y or 0) - item.y
+                                        local d2 = dx * dx + dy * dy
+                                        if d2 < bestD2 then
+                                            bestD2 = d2
+                                            bestM = me.machine
                                         end
                                     end
                                 end
-                                if Core.IsValidObj(bestM) then
-                                    if ApplyMachineConfig(pc2, bestM, item.machineConfig) then
-                                        cfgApplied = cfgApplied + 1
-                                    end
-                                end
-                                cfgIdx = cfgIdx + 1
                             end
-                            if cfgIdx <= #builtWithConfig then
-                                ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
-                            else
-                                Core.Log(string.format("[StationMap] Applied machine configs to %d / %d configured machine(s)", cfgApplied, #builtWithConfig))
-                                if IsMapOpen() then
-                                    ExecuteInGameThreadWithDelay(150, function()
-                                        if IsMapOpen() then RefreshStationMapCanvas(true) end
-                                    end)
+                            if Core.IsValidObj(bestM) then
+                                if ApplyMachineConfig(pc2, bestM, item.machineConfig) then
+                                    cfgApplied = cfgApplied + 1
+                                    table.insert(configuredAddrs, bestM:GetAddress())
                                 end
+                            end
+                            cfgIdx = cfgIdx + 1
+                        end
+                        if cfgIdx <= #builtWithConfig then
+                            ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
+                        else
+                            Core.Log(string.format("[StationMap] Applied machine configs to %d / %d configured machine(s)", cfgApplied, #builtWithConfig))
+                            if IsMapOpen() and #configuredAddrs > 0 and RefreshSingleMachineVisual then
+                                ExecuteInGameThreadWithDelay(150, function()
+                                    if IsMapOpen() then
+                                        for _, addr in ipairs(configuredAddrs) do
+                                            RefreshSingleMachineVisual(addr)
+                                        end
+                                    end
+                                end)
                             end
                         end
-                        ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
                     end
-                end
-                if IsMapOpen() then
-                    RefreshStationMapCanvas(true) -- Only refresh machines/ports; keep grid lines, modules, and walls intact
+                    ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
                 end
             end)
         elseif lastErr then
@@ -3578,6 +3727,9 @@ local function DestroyStationMap()
     MachineRenderGen = MachineRenderGen + 1
     OnViewportChangedStatic = nil
     OnViewportChangedMachines = nil
+    SyncFloorMachinesIncremental = nil
+    RefreshSingleMachineVisual = nil
+    RenderedMachineWidgets = {}
     GhostPreviewSig = nil
     MapWinVisible = false
     MapWinInViewport = false
@@ -3672,6 +3824,9 @@ local function OpenStationMap()
         MouseState.rPanning = false
         EnsureInputPoll()
         RefreshDynamicOverlay()
+        if SyncFloorMachinesIncremental then
+            SyncFloorMachinesIncremental()
+        end
         Core.Log(string.format("[StationMap] Reused cached map window in %.1fms", (os.clock() - tFast) * 1000.0))
         return
     end
@@ -4192,6 +4347,28 @@ function Feature.Init()
 end
 
 function Feature.RegisterHooks()
+    Core.TryRegisterHook(
+        "DMSPlayerController_AddInputCommand_Diag",
+        "/Script/MainSequence.DMSPlayerController:AddInputCommand",
+        function(Context, RecvIdParam, CmdObjParam)
+            pcall(function()
+                local cmd = CmdObjParam and CmdObjParam.get and CmdObjParam:get() or CmdObjParam
+                if Core.IsValidObj(cmd) then
+                    local cls = cmd:GetClass():GetFName():ToString()
+                    if cls == "SetConfigInput" or cls == "MachinePortInput" or cls == "SetNamedConfigInput" then
+                        local rid = RecvIdParam and RecvIdParam.get and RecvIdParam:get() or RecvIdParam
+                        local c1, c2, pi = nil, nil, nil
+                        pcall(function() c1 = cmd.Config end)
+                        pcall(function() c2 = cmd.Config2 end)
+                        pcall(function() pi = cmd.PortIndex end)
+                        Core.Log(string.format("[StationMap] RecvInputCmd: recv=%s cls=%s cfg=%s cfg2=%s port=%s",
+                            tostring(rid), cls, tostring(c1), tostring(c2), tostring(pi)))
+                    end
+                end
+            end)
+        end
+    )
+
     Core.TryRegisterHook(
         "DMSPlayerController_AddBuildMachineCommand_Diag",
         "/Script/MainSequence.DMSPlayerController:AddBuildMachineCommand",
