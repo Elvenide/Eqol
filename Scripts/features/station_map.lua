@@ -976,6 +976,91 @@ local function CheckMaterialsForPendingList(pc, list)
     return true, nil
 end
 
+local function DumpObjectAllProperties(tag, obj)
+    if not Core.IsValidObj(obj) then return end
+    local clsName = "?"
+    pcall(function() clsName = obj:GetClass():GetFName():ToString() end)
+    local parts = {}
+    local seen = {}
+    pcall(function()
+        local c = obj:GetClass()
+        local depth = 0
+        while Core.IsValidObj(c) and depth < 5 do
+            depth = depth + 1
+            local cName = ""
+            pcall(function() cName = c:GetFName():ToString() end)
+            if cName == "Object" then break end
+            if c.ForEachProperty then
+                c:ForEachProperty(function(prop)
+                    local pn = prop:GetFName():ToString()
+                    local low = pn:lower()
+                    if not seen[pn] and not low:find("inventory", 1, true) and not low:find("itemslot", 1, true)
+                        and not low:find("itemtotal", 1, true) and not low:find("ubergraph", 1, true)
+                    then
+                        seen[pn] = true
+                        local pCls = ""
+                        pcall(function() pCls = prop:GetClass():GetFName():ToString() end)
+                        local valStr = "?"
+                        local okV, v = pcall(function() return obj[pn] end)
+                        if not okV then
+                            valStr = "<err>"
+                        elseif v == nil then
+                            valStr = "nil"
+                        elseif type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+                            valStr = tostring(v)
+                        elseif pCls:find("Array", 1, true) or pCls:find("Set", 1, true) then
+                            local elems = {}
+                            local okL, len = pcall(function() return v.GetArrayNum and v:GetArrayNum() or #v end)
+                            if okL and type(len) == "number" then
+                                for i = 1, math.min(len, 8) do
+                                    local okE, e = pcall(function() return v[i] end)
+                                    local ue = okE and (Core.UnwrapArrayElem and Core.UnwrapArrayElem(e) or e) or nil
+                                    if Core.IsValidObj(ue) then
+                                        table.insert(elems, ue:GetFName():ToString())
+                                    else
+                                        table.insert(elems, tostring(ue))
+                                    end
+                                end
+                                valStr = string.format("[%d:%s]", len, table.concat(elems, ","))
+                            elseif v.ForEach then
+                                pcall(function()
+                                    v:ForEach(function(_, e)
+                                        if #elems < 8 then
+                                            local ue = Core.UnwrapArrayElem and Core.UnwrapArrayElem(e) or e
+                                            table.insert(elems, Core.IsValidObj(ue) and ue:GetFName():ToString() or tostring(ue))
+                                        end
+                                    end)
+                                end)
+                                valStr = string.format("{%s}", table.concat(elems, ","))
+                            else
+                                valStr = pCls
+                            end
+                        elseif Core.IsValidObj(v) then
+                            pcall(function() valStr = v:GetFName():ToString() end)
+                        else
+                            valStr = pCls
+                        end
+                        table.insert(parts, pn .. "(" .. pCls:gsub("Property$", "") .. ")=" .. valStr)
+                    end
+                end)
+            end
+            c = c.GetSuperStruct and c:GetSuperStruct() or nil
+        end
+    end)
+    -- Log in chunks of ~900 chars so UE4SS never truncates
+    local full = table.concat(parts, "; ")
+    local idStr = "?"
+    pcall(function() if obj.ID ~= nil then idStr = tostring(obj.ID) end end)
+    local chunkIdx = 1
+    local pos = 1
+    while pos <= #full do
+        local chunk = full:sub(pos, pos + 899)
+        Core.Log(string.format("[StationMap] %s cls=%s id=%s [%d]: %s", tag, clsName, idStr, chunkIdx, chunk))
+        pos = pos + 900
+        chunkIdx = chunkIdx + 1
+    end
+end
+
 local function CaptureMachineConfig(m)
     if not Core.IsValidObj(m) then return nil end
     local cfg = {}
@@ -1216,6 +1301,10 @@ local function CaptureMachineConfig(m)
             cfg.disabledPorts and #cfg.disabledPorts or 0,
             cfg.logisticFilters and #cfg.logisticFilters or 0,
             table.concat(props, ",")))
+        local lowCls = clsKey:lower()
+        if lowCls:find("splitter", 1, true) or lowCls:find("balancer", 1, true) then
+            DumpObjectAllProperties("CopySplitterDump", m)
+        end
     end
 
     return hasAny and cfg or nil
@@ -2405,10 +2494,11 @@ RefreshDynamicOverlay = function()
                     tipTxt:SetText(Core.MakeText(portLabel))
                     tipBorder:AddChild(tipTxt)
                 end)
-                local tx = Core.Clamp(MouseState.lastCursorMx + 18.0, 90.0, ViewTransform.canvasW - 110.0)
-                local ty = Core.Clamp(MouseState.lastCursorMy - 24.0, 24.0, ViewTransform.canvasH - 24.0)
+                local tipW = 195.0
+                local tx = Core.Clamp(MouseState.lastCursorMx + 14.0, 8.0, math.max(8.0, ViewTransform.canvasW - tipW - 8.0))
+                local ty = Core.Clamp(MouseState.lastCursorMy - 8.0, 36.0, ViewTransform.canvasH - 8.0)
                 local tSlot = MapUI.OverlayCanvas:AddChildToCanvas(tipBorder)
-                SetCanvasSlot(tSlot, tx, ty, 195.0, 28.0, 0.0, 1.0, 80)
+                SetCanvasSlot(tSlot, tx, ty, tipW, 28.0, 0.0, 1.0, 80)
             end
         else
             local bestD2 = math.huge
@@ -2454,8 +2544,8 @@ RefreshDynamicOverlay = function()
                             if Core.IsValidObj(tSlot) then tSlot:SetVerticalAlignment(2) end
                             tipBorder:AddChild(tipHBox)
                         end)
-                        local tx = Core.Clamp(MouseState.lastCursorMx + 18.0, 90.0, ViewTransform.canvasW - tipW * 0.6)
-                        local ty = Core.Clamp(MouseState.lastCursorMy - 24.0, 24.0, ViewTransform.canvasH - 24.0)
+                        local tx = Core.Clamp(MouseState.lastCursorMx + 14.0, 8.0, math.max(8.0, ViewTransform.canvasW - tipW - 8.0))
+                        local ty = Core.Clamp(MouseState.lastCursorMy - 8.0, 38.0, ViewTransform.canvasH - 8.0)
                         local tSlot = MapUI.OverlayCanvas:AddChildToCanvas(tipBorder)
                         SetCanvasSlot(tSlot, tx, ty, tipW, 32.0, 0.0, 1.0, 80)
                     end
@@ -2471,8 +2561,8 @@ RefreshDynamicOverlay = function()
                             tipTxt:SetText(Core.MakeText(mLabel))
                             tipBorder:AddChild(tipTxt)
                         end)
-                        local tx = Core.Clamp(MouseState.lastCursorMx + 18.0, 90.0, ViewTransform.canvasW - tipW * 0.6)
-                        local ty = Core.Clamp(MouseState.lastCursorMy - 24.0, 24.0, ViewTransform.canvasH - 24.0)
+                        local tx = Core.Clamp(MouseState.lastCursorMx + 14.0, 8.0, math.max(8.0, ViewTransform.canvasW - tipW - 8.0))
+                        local ty = Core.Clamp(MouseState.lastCursorMy - 8.0, 36.0, ViewTransform.canvasH - 8.0)
                         local tSlot = MapUI.OverlayCanvas:AddChildToCanvas(tipBorder)
                         SetCanvasSlot(tSlot, tx, ty, tipW, 28.0, 0.0, 1.0, 80)
                     end
@@ -3012,7 +3102,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 if uInfo.pairX and uInfo.pairY then
                     recEntry.pairX = uInfo.pairX
                     recEntry.pairY = uInfo.pairY
-                    recEntry.ugLength = math.max(1, math.floor(math.sqrt((uInfo.pairX - mwx) ^ 2 + (uInfo.pairY - mwy) ^ 2) / CELL_CM + 0.5))
+                    recEntry.ugLength = math.max(2, math.floor(math.sqrt((uInfo.pairX - mwx) ^ 2 + (uInfo.pairY - mwy) ^ 2) / CELL_CM + 0.5) + 1)
                     local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
                     if not seenUndergroundPairs[pKey] then
@@ -3501,7 +3591,7 @@ local function CopySelectedMachines()
         local pairDy = (e.pairX and e.pairY) and (e.pairY - e.y) or nil
         local ugLen = e.ugLength
         if not ugLen and pairDx and pairDy then
-            ugLen = math.max(1, math.floor(math.sqrt(pairDx * pairDx + pairDy * pairDy) / CELL_CM + 0.5))
+            ugLen = math.max(2, math.floor(math.sqrt(pairDx * pairDx + pairDy * pairDy) / CELL_CM + 0.5) + 1)
         end
         if ugLen and ugLen > 0 then
             mCfg = mCfg or {}
@@ -5066,13 +5156,31 @@ function Feature.RegisterHooks()
                         and not low:find("hotbar", 1, true) and not low:find("interact", 1, true)
                     then
                         local rid = RecvIdParam and RecvIdParam.get and RecvIdParam:get() or RecvIdParam
-                        local c1, c2, pi, nm = nil, nil, nil, nil
-                        pcall(function() c1 = cmd.Config end)
-                        pcall(function() c2 = cmd.Config2 end)
-                        pcall(function() pi = cmd.PortIndex end)
-                        pcall(function() nm = cmd.ConfigName and cmd.ConfigName:ToString() or (cmd.Name and cmd.Name:ToString()) end)
-                        Core.Log(string.format("[StationMap] RecvInputCmd: recv=%s cls=%s cfg=%s cfg2=%s port=%s name=%s",
-                            tostring(rid), cls, tostring(c1), tostring(c2), tostring(pi), tostring(nm)))
+                        local ridNum = tonumber(rid) or 0
+                        DumpObjectAllProperties("RecvInputCmd(recv=" .. tostring(rid) .. ")", cmd)
+                        -- If target is a Splitter or Belt Balancer, dump ALL its properties before and 150ms after!
+                        if ridNum > 0 then
+                            for _, sCls in ipairs({ "BP_SplitterObject_C", "BP_SplitterObject_2_C", "BP_SplitterObject_3_C", "BPO_BeltBalancer_01_C", "BPO_BeltBalancer_02_C", "BPO_BeltBalancer_03_C" }) do
+                                local okF, list = pcall(FindAllOf, sCls)
+                                if okF and list then
+                                    for _, obj in ipairs(list) do
+                                        if Core.IsValidObj(obj) then
+                                            local okId, oid = pcall(function() return tonumber(obj.ID) end)
+                                            if okId and oid == ridNum then
+                                                DumpObjectAllProperties("SplitterBefore", obj)
+                                                local capObj = obj
+                                                ExecuteInGameThreadWithDelay(150, function()
+                                                    if Core.IsValidObj(capObj) then
+                                                        DumpObjectAllProperties("SplitterAfter", capObj)
+                                                    end
+                                                end)
+                                                return
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
                     end
                 end
             end)
