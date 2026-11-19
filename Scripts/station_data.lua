@@ -214,6 +214,7 @@ local CachedMachineCatByCls = {}   -- clsAddr -> string
 local CachedMachineDispByCls = {}  -- clsAddr -> string
 local CachedHideByCls = {}         -- clsAddr -> bool
 local CachedIconTexByCls = {}      -- clsAddr -> Texture2D or false
+local CachedFloorMap = nil         -- { key = str, time = os.clock(), floors, unitSize, gridOriginX, gridOriginY, xform }
 
 local StationDiagLoggedKey = nil
 
@@ -930,6 +931,23 @@ local function CollectElevatorStopLocalZs(station, allMachines, xform)
 end
 
 function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, playerZ)
+    local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
+    local now = os.clock()
+    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 30.0 then
+        local cFloors = CachedFloorMap.floors
+        local cXform = CachedFloorMap.xform
+        local curIdx = 1
+        if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" and #cFloors > 0 then
+            local _, _, plz = StationData.WorldToStationLocal(cXform, playerX, playerY, playerZ, nil, nil, nil)
+            local bestD = math.huge
+            for _, fl in ipairs(cFloors) do
+                local d = math.abs(plz - fl.z)
+                if d < bestD then bestD = d; curIdx = fl.index end
+            end
+        end
+        return cFloors, curIdx, CachedFloorMap.unitSize, CachedFloorMap.gridOriginX, CachedFloorMap.gridOriginY, cXform
+    end
+
     local xform = StationData.GetStationFrameTransform(station)
     local plats = StationData.GetStationPlatforms(station, walkFrame)
     if #plats == 0 and Core.IsValidObj(walkFrame) then
@@ -1448,6 +1466,18 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
             table.insert(topParts, ccList[i].k .. "=" .. ccList[i].v)
         end
         Core.Log("[StationData] TopClasses: " .. table.concat(topParts, ", "))
+    end
+
+    if cacheKey then
+        CachedFloorMap = {
+            key = cacheKey,
+            time = os.clock(),
+            floors = floors,
+            unitSize = unitSize,
+            gridOriginX = gridOriginX,
+            gridOriginY = gridOriginY,
+            xform = xform,
+        }
     end
 
     return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY, xform
@@ -2909,11 +2939,13 @@ end
 
 function StationData.InvalidateMachineCache()
     CachedMachinesByFrame = {}
+    CachedFloorMap = nil
 end
 
 function StationData.InvalidateCaches()
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
+    CachedFloorMap = nil
     CachedFootprintsByClass = {}
     CachedBlockBoundsByCls = {}
     CachedStationWallsByKey = {}

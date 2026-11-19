@@ -769,15 +769,16 @@ local function InspectBuildMachineCommandLayout()
                                     GridCalibrated = true
                                 end
                             elseif type(fv) == "userdata" then
-                                local okXY, gx0, gy0, gz0 = pcall(function()
+                                local okXY, gx0, gy0 = pcall(function()
                                     if fv.X ~= nil and fv.Y ~= nil then
-                                        local ax, ay, az = Core.GetFPVector(fv)
-                                        return ax, ay, az
+                                        local ax = Core.GetFPFloat(fv.X)
+                                        local ay = Core.GetFPFloat(fv.Y)
+                                        return ax, ay
                                     end
                                     return nil
                                 end)
                                 if okXY and gx0 ~= nil then
-                                    table.insert(gtParts, string.format("%s=(%.1f,%.1f,%.1f)", fn, gx0, gy0, gz0 or 0))
+                                    table.insert(gtParts, string.format("%s=(%.1f,%.1f)", fn, gx0, gy0))
                                     if math.abs(sampleM.x or 0) >= 100.0 and math.abs(gx0) > 0.01 then
                                         BuildGridDivisor = math.abs((sampleM.x or 0) / gx0)
                                         GridCalibrated = true
@@ -1804,9 +1805,9 @@ RefreshStationMapCanvas = function()
     local totalRows = maxRow - minRow
     local maxDim = math.max(totalCols, totalRows)
     local stepCells = 1
-    if maxDim > 260 then
+    if maxDim > 480 then
         stepCells = 4
-    elseif maxDim > 110 then
+    elseif maxDim > 240 then
         stepCells = 2
     end
 
@@ -1823,7 +1824,7 @@ RefreshStationMapCanvas = function()
     local gridMidY = (bGridMinY + bGridMaxY) * 0.5
 
     local function addGridAxisLines(startIdx, endIdx, isVertical, spanOther, midOther)
-        local maxLines = 240
+        local maxLines = 260
         local drawn = 0
         local originAxis = isVertical and ViewTransform.gridOriginX or ViewTransform.gridOriginY
         for idx = startIdx, endIdx, stepCells do
@@ -1871,27 +1872,19 @@ RefreshStationMapCanvas = function()
         RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
     end
 
-    -- 2b. Render structural module walls & interior partitions as a continuous 2-pass silhouette:
-    --     Pass 1 (Z=5): expanded 5.5px outer border matching ModuleBorder thickness
-    --     Pass 2 (Z=6): opaque high-contrast interior fill fusing all corners/T-junctions with zero internal seams
+    -- 2b. Queue structural module walls for fast chunked 2-pass continuous rendering (Z=5 border, Z=6 opaque fill)
+    CanvasRenderGen = CanvasRenderGen + 1
+    local myRenderGen = CanvasRenderGen
+    local deferredWalls = {}
     if floor.walls and #floor.walls > 0 then
-        local wallBorderPad = 11.0 -- 5.5px border on each side
         for _, w in ipairs(floor.walls) do
             local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
             local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
             local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + wallBorderPad, wh + wallBorderPad, COLORS.WallBorder, 5)
-        end
-        for _, w in ipairs(floor.walls) do
-            local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
-            local ww = math.max(6.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
-            local wh = math.max(6.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
-            AddBorderFast(outer, MapUI.MapCanvas, wx, wy, ww + 1.0, wh + 1.0, COLORS.WallFill, 6)
+            table.insert(deferredWalls, { wx = wx, wy = wy, ww = ww, wh = wh })
         end
     end
 
-    CanvasRenderGen = CanvasRenderGen + 1
-    local myRenderGen = CanvasRenderGen
     local deferredConveyors = {}
     local deferredPorts = {}
 
@@ -2127,15 +2120,25 @@ RefreshStationMapCanvas = function()
         })
     end
 
-    -- Stream deferred conveyor tiles and port badges progressively across frames to avoid open-map lag spikes
-    if #deferredConveyors > 0 or #deferredPorts > 0 then
+    -- Stream deferred walls, conveyor tiles, and port badges progressively across frames to avoid initial-open freezes
+    if #deferredWalls > 0 or #deferredConveyors > 0 or #deferredPorts > 0 then
+        local wIdx = 1
         local cIdx = 1
         local pIdx = 1
+        local WALLS_PER_FRAME = 32
         local CONV_PER_FRAME = 24
         local PORTS_PER_FRAME = 12
+        local wallBorderPad = 11.0
         local function pumpDeferredBatch()
             if myRenderGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
                 return
+            end
+            local wEnd = math.min(#deferredWalls, wIdx + WALLS_PER_FRAME - 1)
+            while wIdx <= wEnd do
+                local dw = deferredWalls[wIdx]
+                AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
+                AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
+                wIdx = wIdx + 1
             end
             local cEnd = math.min(#deferredConveyors, cIdx + CONV_PER_FRAME - 1)
             while cIdx <= cEnd do
@@ -2149,7 +2152,7 @@ RefreshStationMapCanvas = function()
                 RenderUnconnectedItemPort(outer, MapUI.MapCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
                 pIdx = pIdx + 1
             end
-            if cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
+            if wIdx <= #deferredWalls or cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
                 ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
             end
         end
@@ -3550,6 +3553,22 @@ function Feature.RegisterHooks()
     )
 
     Core.TryRegisterHook(
+        "DMSPlayerController_AddBuildCommand_Diag",
+        "/Script/MainSequence.DMSPlayerController:AddBuildCommand",
+        function(Context, CmdParam)
+            Core.Log("[StationMap] RecvAddBuildCommand fired!")
+        end
+    )
+
+    Core.TryRegisterHook(
+        "DMSPlayerController_ConfirmBuild_Diag",
+        "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
+        function(Context)
+            Core.Log("[StationMap] RecvConfirmBuild fired!")
+        end
+    )
+
+    Core.TryRegisterHook(
         "DMSPlayerController_SetBuildError_Diag",
         "/Script/MainSequence.DMSPlayerController:SetBuildError",
         function(Context, ErrParam)
@@ -3610,7 +3629,10 @@ local function ScheduleStationPrewarm()
         local inStation, walkFrame, station = StationData.IsPlayerInStation(pc)
         if inStation and Core.IsValidObj(station) then
             local t0 = os.clock()
-            StationData.BuildStationFloorMap(station, walkFrame, nil, nil, nil)
+            local floors = StationData.BuildStationFloorMap(station, walkFrame, nil, nil, nil)
+            if floors and #floors > 0 and #CurrentFloors == 0 then
+                CurrentFloors = floors
+            end
             InspectBuildMachineCommandLayout()
             Core.Log(string.format("[StationMap] Prewarmed station caches in %.0fms", (os.clock() - t0) * 1000.0))
         end
