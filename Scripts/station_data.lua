@@ -2949,7 +2949,6 @@ end
 
 function StationData.InvalidateMachineCache()
     CachedMachinesByFrame = {}
-    CachedFloorMap = nil
 end
 
 function StationData.InvalidateCaches()

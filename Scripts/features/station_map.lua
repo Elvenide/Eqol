@@ -169,6 +169,8 @@ local LastHadDynamicOverlay = false
 
 -- Selection, Ghosts, Deletes & Clipboard State
 local SelectedMachines = {}  -- mAddr -> entry
+local SelectedGhosts = {}    -- ghostId -> gp
+local NextGhostSeq = 0
 local PendingDeletes = {}    -- mAddr -> entry (proposed deletions applied on Apply Changes)
 local Clipboard = {}         -- { { buildable, dx, dy, yaw, cat, recipe, machineConfig, cellsX, cellsY, actorClsPath, name, pairGroupId, isUndergroundInput }, ... }
 local ClipboardGen = 0
@@ -1070,24 +1072,42 @@ local function CaptureMachineConfig(m)
             end
         end
         if #dis == 0 and m.IsPortEnabled then
-            local maxPorts = 0
+            local cdo = nil
             pcall(function()
-                if m.PortStates then
-                    maxPorts = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
+                local cls = m:GetClass()
+                if Core.IsValidObj(cls) and cls.GetDefaultObject then
+                    cdo = cls:GetDefaultObject()
                 end
             end)
-            if (type(maxPorts) ~= "number" or maxPorts <= 0) then
-                local lowCls = clsKey:lower()
-                if lowCls:find("assembler", 1, true) then maxPorts = 4
-                elseif lowCls:find("refinery", 1, true) then maxPorts = 6
-                elseif lowCls:find("splitter", 1, true) or lowCls:find("balancer", 1, true) then maxPorts = 4 end
-            end
-            if type(maxPorts) == "number" and maxPorts > 0 then
-                for portIdx = 0, math.min(maxPorts - 1, 15) do
-                    local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
-                    if okP and en == false and not seen[portIdx] then
+            if Core.IsValidObj(cdo) and cdo.IsPortEnabled then
+                for portIdx = 0, 15 do
+                    local okD, defEn = pcall(function() return cdo:IsPortEnabled(portIdx) end)
+                    local okP, curEn = pcall(function() return m:IsPortEnabled(portIdx) end)
+                    if okD and defEn == true and okP and curEn == false and not seen[portIdx] then
                         table.insert(dis, portIdx)
                         seen[portIdx] = true
+                    end
+                end
+            else
+                local maxPorts = 0
+                pcall(function()
+                    if m.PortStates then
+                        maxPorts = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
+                    end
+                end)
+                if (type(maxPorts) ~= "number" or maxPorts <= 0) then
+                    local lowCls = clsKey:lower()
+                    if lowCls:find("assembler", 1, true) then maxPorts = 4
+                    elseif lowCls:find("refinery", 1, true) then maxPorts = 6
+                    elseif lowCls:find("splitter", 1, true) or lowCls:find("balancer", 1, true) then maxPorts = 4 end
+                end
+                if type(maxPorts) == "number" and maxPorts > 0 then
+                    for portIdx = 0, math.min(maxPorts - 1, 15) do
+                        local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
+                        if okP and en == false and not seen[portIdx] then
+                            table.insert(dis, portIdx)
+                            seen[portIdx] = true
+                        end
                     end
                 end
             end
@@ -1404,41 +1424,48 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
         end
     end
 
-    -- 2b. Disabled ports (UMachinePortInput:TogglePortEnabled + direct SetPortEnabled fallback)
+    -- 2b. Disabled ports (delayed 200ms so SetRecipeInput takes effect first before toggling ports!)
     if cfg.disabledPorts and #cfg.disabledPorts > 0 then
-        local portInputCls = Core.FindOrLoadClass("/Script/MainSequence.MachinePortInput")
-        for _, portIdx in ipairs(cfg.disabledPorts) do
-            local shouldToggle = true
-            if targetMachine.IsPortEnabled then
-                local okP, en = pcall(function() return targetMachine:IsPortEnabled(portIdx) end)
-                if okP and en == false then shouldToggle = false end
-            end
-            if shouldToggle then
-                if Core.IsValidObj(portInputCls) then
-                    local okNew, cmdObj = pcall(StaticConstructObject, portInputCls, pc)
-                    if okNew and Core.IsValidObj(cmdObj) then
-                        local okMut = pcall(function() cmdObj:TogglePortEnabled(portIdx) end)
-                        if okMut then
-                            local okAdd = pcall(function() pc:AddInputCommand(receiverId, cmdObj) end)
-                            if okAdd then applied = true end
-                        end
-                    end
+        local capM = targetMachine
+        local capRecvId = receiverId
+        local capPorts = cfg.disabledPorts
+        ExecuteInGameThreadWithDelay(200, function()
+            local curPC = Core.GetLocalPlayerController()
+            if not Core.IsValidObj(capM) or not Core.IsValidObj(curPC) then return end
+            local portInputCls = Core.FindOrLoadClass("/Script/MainSequence.MachinePortInput")
+            for _, portIdx in ipairs(capPorts) do
+                local shouldToggle = true
+                if capM.IsPortEnabled then
+                    local okP, en = pcall(function() return capM:IsPortEnabled(portIdx) end)
+                    if okP and en == false then shouldToggle = false end
                 end
-                local capM = targetMachine
-                local capIdx = portIdx
-                ExecuteInGameThreadWithDelay(120, function()
-                    if not Core.IsValidObj(capM) then return end
-                    pcall(function()
-                        if capM.IsPortEnabled and capM:IsPortEnabled(capIdx) == true then
-                            if capM.SetPortEnabled then
-                                capM:SetPortEnabled(capIdx, false)
+                if shouldToggle then
+                    local okNew, okMut, okAdd = false, false, false
+                    if Core.IsValidObj(portInputCls) then
+                        local cmdObj
+                        okNew, cmdObj = pcall(StaticConstructObject, portInputCls, curPC)
+                        if okNew and Core.IsValidObj(cmdObj) then
+                            okMut = pcall(function() cmdObj:TogglePortEnabled(portIdx) end)
+                            if okMut then
+                                okAdd = pcall(function() curPC:AddInputCommand(capRecvId, cmdObj) end)
                             end
                         end
+                    end
+                    Core.Log(string.format("[StationMap] ApplyDisabledPort id=%d port=%d okNew=%s okMut=%s okAdd=%s",
+                        capRecvId, portIdx, tostring(okNew), tostring(okMut), tostring(okAdd)))
+                    local cIdx = portIdx
+                    ExecuteInGameThreadWithDelay(150, function()
+                        if not Core.IsValidObj(capM) then return end
+                        pcall(function()
+                            if capM.IsPortEnabled and capM:IsPortEnabled(cIdx) == true and capM.SetPortEnabled then
+                                capM:SetPortEnabled(cIdx, false)
+                            end
+                        end)
                     end)
-                end)
-                applied = true
+                end
             end
-        end
+        end)
+        applied = true
     end
 
     -- 3. Splitter / Belt Balancer per-port Filters array
@@ -1863,7 +1890,7 @@ local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder
     end
 end
 
-local function RenderDashedLine(outer, canvas, x1, y1, x2, y2, col, thickness, dashLen, gapLen, zOrder)
+local function RenderDashedLine(outer, canvas, x1, y1, x2, y2, col, thickness, dashLen, gapLen, zOrder, outWidgets)
     local dx, dy = x2 - x1, y2 - y1
     local dist = math.sqrt(dx * dx + dy * dy)
     if dist < 4.0 then return end
@@ -1877,16 +1904,13 @@ local function RenderDashedLine(outer, canvas, x1, y1, x2, y2, col, thickness, d
         local segLen = math.min(dLen, (dist - 4.0) - t)
         if segLen >= 2.0 then
             local mid = t + segLen * 0.5
-            local b = Core.CreateRawWidget(PATHS.BorderClass, outer)
-            if Core.IsValidObj(b) then
+            local b = AddBorderFast(outer, canvas, x1 + ux * mid, y1 + uy * mid, segLen, thickness or 2.4, col, zOrder)
+            if b then
                 pcall(function()
-                    b:SetVisibility(3)
-                    b:SetBrushColor(col)
-                    b:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+                    b:SetRenderTransformPivot(ALIGN_CENTER)
                     if math.abs(ang) > 0.1 and b.SetRenderTransformAngle then b:SetRenderTransformAngle(ang) end
                 end)
-                local bs = canvas:AddChildToCanvas(b)
-                SetCanvasSlot(bs, x1 + ux * mid, y1 + uy * mid, segLen, thickness or 2.4, 0.5, 0.5, zOrder)
+                if outWidgets then table.insert(outWidgets, b) end
             end
         end
         t = t + step
@@ -2081,11 +2105,18 @@ UpdateStatusBanner = function(textOverride)
             MapUI.FloorPillText:SetText(Core.MakeText(string.format("Floor %d / %d", SelectedFloorIdx, math.max(1, #CurrentFloors))))
         end)
     end
-    local selCount = CountTableKeys(SelectedMachines)
+    local selCount = CountTableKeys(SelectedMachines) + CountTableKeys(SelectedGhosts)
     if Core.IsValidObj(MapUI.SelPillWrap) and Core.IsValidObj(MapUI.SelPillText) then
         pcall(function()
             MapUI.SelPillText:SetText(Core.MakeText(string.format("Selected: %d", selCount)))
             MapUI.SelPillWrap:SetVisibility(selCount > 0 and 0 or 1)
+        end)
+    end
+    local delCount = CountTableKeys(PendingDeletes)
+    if Core.IsValidObj(MapUI.DelPillWrap) and Core.IsValidObj(MapUI.DelPillText) then
+        pcall(function()
+            MapUI.DelPillText:SetText(Core.MakeText(string.format("Deleting: %d", delCount)))
+            MapUI.DelPillWrap:SetVisibility(delCount > 0 and 0 or 1)
         end)
     end
     if Core.IsValidObj(MapUI.ModePillWrap) and Core.IsValidObj(MapUI.ModePillText) then
@@ -2532,7 +2563,13 @@ local function RefreshSelectionLayer()
             local gpCat = gp.cat or "Other"
             local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
             CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-            RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.0, COLORS.GhostBorderOk, 7)
+            local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
+            if isGhostSel then
+                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 7)
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 8)
+            else
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.0, COLORS.GhostBorderOk, 7)
+            end
             local clsLow = (gp.actorClsPath or ""):lower()
             if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
                 AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 8)
@@ -2768,6 +2805,8 @@ RefreshStationMapCanvas = function(machinesOnly)
         end
     end
     local seenUndergroundPairs = {}
+    local undergroundPairWidgets = {} -- pKey -> { widgets = {} }
+    local undergroundPairKeyByAddr = {} -- mAddr -> { pKey1, ... }
     local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
     local portHalfCm = 32.0
     local portsByKey = {}
@@ -2872,6 +2911,20 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
                 RenderedMachineWidgets[mAddr] = nil
             end
+            local pKeys = undergroundPairKeyByAddr[mAddr]
+            if pKeys then
+                for _, pk in ipairs(pKeys) do
+                    local pairEntry = undergroundPairWidgets[pk]
+                    if pairEntry then
+                        for _, uw in ipairs(pairEntry.widgets) do
+                            if Core.IsValidObj(uw) then pcall(function() uw:RemoveFromParent() end) end
+                        end
+                        undergroundPairWidgets[pk] = nil
+                    end
+                    seenUndergroundPairs[pk] = nil
+                end
+                undergroundPairKeyByAddr[mAddr] = nil
+            end
             FloorIconButtons[mAddr] = nil
             SelectedMachines[mAddr] = nil
             for i = #RenderedMachines, 1, -1 do
@@ -2968,15 +3021,23 @@ RefreshStationMapCanvas = function(machinesOnly)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
                     if not seenUndergroundPairs[pKey] then
                         seenUndergroundPairs[pKey] = true
+                        local pairW = {}
+                        undergroundPairWidgets[pKey] = { widgets = pairW }
+                        undergroundPairKeyByAddr[mAddr] = undergroundPairKeyByAddr[mAddr] or {}
+                        table.insert(undergroundPairKeyByAddr[mAddr], pKey)
+                        if uInfo.pairAddr then
+                            undergroundPairKeyByAddr[uInfo.pairAddr] = undergroundPairKeyByAddr[uInfo.pairAddr] or {}
+                            table.insert(undergroundPairKeyByAddr[uInfo.pairAddr], pKey)
+                        end
                         local lineCol = { R = arrowCol.R, G = arrowCol.G, B = arrowCol.B, A = 0.80 }
                         local x1, y1, x2, y2 = mx, my, omx, omy
                         if uInfo.isInput == false then
                             x1, y1, x2, y2 = omx, omy, mx, my
                         end
-                        RenderDashedLine(outer, mCanvas, x1, y1, x2, y2, lineCol, 2.6, 10.0, 6.0, 17)
+                        RenderDashedLine(outer, mCanvas, x1, y1, x2, y2, lineCol, 2.6, 10.0, 6.0, 17, pairW)
                         local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
                         local chMid = RenderDirectionChevron(outer, mCanvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 18.0, linkAng, arrowCol, 18)
-                        if chMid then table.insert(mWidgets, chMid) end
+                        if chMid then table.insert(pairW, chMid) end
                     end
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
                         CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false, mWidgets)
@@ -3329,16 +3390,56 @@ end
 -- Selection, Ghost Placement, Copy-Paste & Apply Changes Actions
 --------------------------------------------------------------------------------
 
+local function FindUndergroundPairEntry(rm)
+    if not rm or not Core.IsValidObj(rm.machine) then return nil end
+    local clsLow = (rm.actorClsPath or ""):lower()
+    if not clsLow:find("underground", 1, true) then return nil end
+    local uInfo = StationData.GetUndergroundBeltPairInfo(rm.machine, CurrentFrameXform)
+    if not uInfo or not uInfo.pairAddr then return nil end
+    for _, other in ipairs(RenderedMachines) do
+        if other.addr == uInfo.pairAddr then return other end
+    end
+    return nil
+end
+
 local function ProposeDeleteSelected()
+    -- 1. Instantly remove any selected ghost machines (no deletion mark, no refund)
+    local removedGhosts = 0
+    local ghostIdsToRemove = {}
+    local ghostPairsToRemove = {}
+    for gid, gp in pairs(SelectedGhosts) do
+        ghostIdsToRemove[gid] = true
+        if gp.pairGroupId then ghostPairsToRemove[gp.pairGroupId] = true end
+    end
+    if next(ghostIdsToRemove) ~= nil then
+        for i = #PendingGhosts, 1, -1 do
+            local gp = PendingGhosts[i]
+            if (gp.ghostId and ghostIdsToRemove[gp.ghostId]) or (gp.pairGroupId and ghostPairsToRemove[gp.pairGroupId]) then
+                table.remove(PendingGhosts, i)
+                removedGhosts = removedGhosts + 1
+            end
+        end
+        SelectedGhosts = {}
+    end
+
+    -- 2. Mark selected real machines (and their underground belt pairs) for deletion on Apply Changes
     local added = 0
+    local toMark = {}
     for addr, entry in pairs(SelectedMachines) do
         if IsSelectableMachine(entry) then
-            if PendingDeletes[addr] then
-                PendingDeletes[addr] = nil
-            else
-                PendingDeletes[addr] = entry
-                added = added + 1
+            toMark[addr] = entry
+            local pairRm = FindUndergroundPairEntry(entry)
+            if pairRm and IsSelectableMachine(pairRm) then
+                toMark[pairRm.addr] = pairRm
             end
+        end
+    end
+    for addr, entry in pairs(toMark) do
+        if PendingDeletes[addr] then
+            PendingDeletes[addr] = nil
+        else
+            PendingDeletes[addr] = entry
+            added = added + 1
         end
     end
     SelectedMachines = {}
@@ -3346,6 +3447,8 @@ local function ProposeDeleteSelected()
     RefreshSelectionLayer()
     if added > 0 then
         UpdateStatusBanner(string.format("Marked %d machine(s) for deletion (click Apply Changes to delete & refund)", added))
+    elseif removedGhosts > 0 then
+        UpdateStatusBanner(string.format("Removed %d ghost placement(s)", removedGhosts))
     end
 end
 
@@ -3359,6 +3462,38 @@ local function CopySelectedMachines()
             selectedByAddr[entry.addr] = entry
         end
     end
+    -- Also include any selected ghost machines (preserving configs, cat, and underground pairs)
+    local ghostPairRemap = {}
+    local nextPairGroup = 1
+    for _, gp in pairs(SelectedGhosts) do
+        if Core.IsValidObj(gp.buildable) then
+            local gId = nil
+            if gp.pairGroupId then
+                gId = ghostPairRemap[gp.pairGroupId]
+                if not gId then
+                    gId = nextPairGroup
+                    nextPairGroup = nextPairGroup + 1
+                    ghostPairRemap[gp.pairGroupId] = gId
+                end
+            end
+            table.insert(list, {
+                machine = nil,
+                addr = gp.ghostId,
+                x = gp.x, y = gp.y, z = gp.z, yaw = gp.yaw or 0.0,
+                cellsX = gp.cellsX or 1, cellsY = gp.cellsY or 1,
+                cat = gp.cat or "Other",
+                buildable = gp.buildable,
+                recipe = gp.recipe,
+                machineConfig = gp.machineConfig,
+                actorClsPath = gp.actorClsPath,
+                sprite = gp.sprite,
+                displayName = gp.name,
+                _ugGroupId = gId,
+                _ugIsInput = gp.isUndergroundInput,
+                _isGhostCopy = true,
+            })
+        end
+    end
     if #list == 0 then
         UpdateStatusBanner("Select one or more machines first (click, Shift+click, or drag box)")
         return
@@ -3367,10 +3502,9 @@ local function CopySelectedMachines()
     -- Auto-include paired endpoints for any selected underground belts so both ends & dashed link copy together
     local extraPairs = {}
     local pairGroupByAddr = {}
-    local nextPairGroup = 1
     for _, e in ipairs(list) do
         local clsLow = (e.actorClsPath or ""):lower()
-        if clsLow:find("underground", 1, true) and Core.IsValidObj(e.machine) then
+        if not e._isGhostCopy and clsLow:find("underground", 1, true) and Core.IsValidObj(e.machine) then
             local uInfo = StationData.GetUndergroundBeltPairInfo(e.machine, CurrentFrameXform)
             if uInfo and uInfo.pairX and uInfo.pairY then
                 local pAddr = uInfo.pairAddr
@@ -3449,7 +3583,7 @@ local function CopySelectedMachines()
     for _, e in ipairs(list) do
         local cellsX = e.cellsX or 1
         local cellsY = e.cellsY or 1
-        local mCfg = Core.IsValidObj(e.machine) and CaptureMachineConfig(e.machine) or nil
+        local mCfg = e.machineConfig or (Core.IsValidObj(e.machine) and CaptureMachineConfig(e.machine) or nil)
         table.insert(Clipboard, {
             buildable = e.buildable,
             dx = e.x - anchorX,
@@ -3504,6 +3638,7 @@ local function CommitPendingGhosts()
     local buildQueue = PendingGhosts
     PendingGhosts = {}
     PendingDeletes = {}
+    SelectedGhosts = {}
     UpdateActionBar()
     RefreshSelectionLayer()
 
@@ -3708,7 +3843,9 @@ local function HandleMapLeftClick(mx, my, isShift)
                 local finalYaw = (item.yaw or 0.0) + PendingRotationDeg
                 local sx, sy = SnapWorldToMachineGrid(anchorSx + rdx, anchorSy + rdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
                 if IsPointOverAnyFloorModule(sx, sy, floor) and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor) then
+                    NextGhostSeq = NextGhostSeq + 1
                     table.insert(staged, {
+                        ghostId = "ghost:" .. tostring(NextGhostSeq),
                         buildable = item.buildable,
                         floorIdx = SelectedFloorIdx,
                         x = sx, y = sy, z = floor.z,
@@ -3720,6 +3857,7 @@ local function HandleMapLeftClick(mx, my, isShift)
                         sprite = item.sprite,
                         recipe = item.recipe,
                         machineConfig = item.machineConfig,
+                        name = item.name,
                         pairGroupId = item.pairGroupId and (stampId .. ":" .. tostring(item.pairGroupId)) or nil,
                         isUndergroundInput = item.isUndergroundInput,
                     })
@@ -3743,27 +3881,66 @@ local function HandleMapLeftClick(mx, my, isShift)
         return
     end
 
-    -- Select mode: find topmost selectable machine under cursor (skips docks, drone bays, elevators, etc.)
+    -- Select mode: check stamped ghosts first (drawn on top), then selectable real machines
+    local hitGhost = nil
+    local bestGhostDist = math.huge
+    for _, gp in ipairs(PendingGhosts) do
+        if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+            local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
+            local hw, hh = rx * CELL_CM * 0.5, ry * CELL_CM * 0.5
+            if math.abs(wx - gp.x) <= hw and math.abs(wy - gp.y) <= hh then
+                local d2 = (wx - gp.x) ^ 2 + (wy - gp.y) ^ 2
+                if d2 < bestGhostDist then
+                    bestGhostDist = d2
+                    hitGhost = gp
+                end
+            end
+        end
+    end
+
     local hit = nil
-    local bestDist = math.huge
-    for _, rm in ipairs(RenderedMachines) do
-        if IsSelectableMachine(rm) and math.abs(wx - rm.x) <= rm.halfW and math.abs(wy - rm.y) <= rm.halfH then
-            local d2 = (wx - rm.x) ^ 2 + (wy - rm.y) ^ 2
-            if d2 < bestDist then
-                bestDist = d2
-                hit = rm
+    if not hitGhost then
+        local bestDist = math.huge
+        for _, rm in ipairs(RenderedMachines) do
+            if IsSelectableMachine(rm) and math.abs(wx - rm.x) <= rm.halfW and math.abs(wy - rm.y) <= rm.halfH then
+                local d2 = (wx - rm.x) ^ 2 + (wy - rm.y) ^ 2
+                if d2 < bestDist then
+                    bestDist = d2
+                    hit = rm
+                end
             end
         end
     end
 
     if not isShift then
         SelectedMachines = {}
+        SelectedGhosts = {}
     end
-    if hit then
-        if isShift and SelectedMachines[hit.addr] then
+    if hitGhost and hitGhost.ghostId then
+        local toggleOff = isShift and SelectedGhosts[hitGhost.ghostId] ~= nil
+        if toggleOff then
+            SelectedGhosts[hitGhost.ghostId] = nil
+        else
+            SelectedGhosts[hitGhost.ghostId] = hitGhost
+        end
+        if hitGhost.pairGroupId then
+            for _, gp2 in ipairs(PendingGhosts) do
+                if gp2.pairGroupId == hitGhost.pairGroupId and gp2.ghostId then
+                    SelectedGhosts[gp2.ghostId] = toggleOff and nil or gp2
+                end
+            end
+        end
+    elseif hit then
+        local toggleOff = isShift and SelectedMachines[hit.addr] ~= nil
+        if toggleOff then
             SelectedMachines[hit.addr] = nil
         else
             SelectedMachines[hit.addr] = hit
+        end
+        -- Auto-select/deselect paired underground belt endpoint too
+        local pairRm = FindUndergroundPairEntry(hit)
+        if pairRm and IsSelectableMachine(pairRm) then
+            SelectedMachines[pairRm.addr] = toggleOff and nil or pairRm
         end
     end
     RefreshSelectionLayer()
@@ -3772,9 +3949,11 @@ end
 local function FinishBoxSelect(x1, y1, x2, y2, isShift)
     local wx1, wy1 = CanvasToWorld(math.min(x1, x2), math.min(y1, y2))
     local wx2, wy2 = CanvasToWorld(math.max(x1, x2), math.max(y1, y2))
+    local floor = CurrentFloors[SelectedFloorIdx]
 
     if not isShift then
         SelectedMachines = {}
+        SelectedGhosts = {}
     end
     for _, rm in ipairs(RenderedMachines) do
         if IsSelectableMachine(rm)
@@ -3782,6 +3961,30 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
             and (rm.y + rm.halfH) >= wy1 and (rm.y - rm.halfH) <= wy2
         then
             SelectedMachines[rm.addr] = rm
+            local pairRm = FindUndergroundPairEntry(rm)
+            if pairRm and IsSelectableMachine(pairRm) then
+                SelectedMachines[pairRm.addr] = pairRm
+            end
+        end
+    end
+    if floor then
+        local pairGroupsToAdd = {}
+        for _, gp in ipairs(PendingGhosts) do
+            if gp.ghostId and math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+                local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
+                local hw, hh = rx * CELL_CM * 0.5, ry * CELL_CM * 0.5
+                if (gp.x + hw) >= wx1 and (gp.x - hw) <= wx2 and (gp.y + hh) >= wy1 and (gp.y - hh) <= wy2 then
+                    SelectedGhosts[gp.ghostId] = gp
+                    if gp.pairGroupId then pairGroupsToAdd[gp.pairGroupId] = true end
+                end
+            end
+        end
+        if next(pairGroupsToAdd) ~= nil then
+            for _, gp in ipairs(PendingGhosts) do
+                if gp.ghostId and gp.pairGroupId and pairGroupsToAdd[gp.pairGroupId] then
+                    SelectedGhosts[gp.ghostId] = gp
+                end
+            end
         end
     end
     RefreshSelectionLayer()
@@ -3885,12 +4088,6 @@ local function GetMapCanvasCursorPos(pc)
         local vpy = vpPos and tonumber(vpPos.Y) or -999
         Core.Log(string.format("[StationMap] CursorDiag local=(%.1f,%.1f) abs=(%.1f,%.1f) vp=(%.1f,%.1f) canvas=(%.1f,%.1f)",
             lx or -999, ly or -999, ax, ay, vpx, vpy, ViewTransform.canvasW, ViewTransform.canvasH))
-    end
-
-    -- Main Sequence's custom cursor renders centered on the platform mouse point; shift to top-left cursor tip
-    if lx ~= nil and ly ~= nil then
-        lx = lx - 11.0
-        ly = ly - 11.0
     end
 
     return lx, ly
@@ -4241,6 +4438,7 @@ local function DestroyStationMap()
     RenderedMachineWidgets = {}
     PlayerMarkerWidgets = {}
     PendingDeletes = {}
+    SelectedGhosts = {}
     GhostPreviewSig = nil
     MapWinVisible = false
     MapWinInViewport = false
@@ -4505,7 +4703,9 @@ local function OpenStationMap()
         win:SetContentForSlot(FName("Content"), rootVBox)
     end)
 
-    -- Top unified pill bar: spaced-out info pills merged with action pill buttons (no Build B, no Clear)
+    -- Top unified pill bar:
+    -- Left end: static info/keybind pills first, then dynamic contextual pills (Selected, Deleting, Mode) after them
+    -- Right end: padded action buttons (Copy, Rotate, Delete); Fit removed; +/- zoom stacked in map top-right corner
     local pillBgInfo = { R = 0.10, G = 0.13, B = 0.18, A = 0.92 }
     local pillBgMode = { R = 0.10, G = 0.28, B = 0.18, A = 0.96 }
     local pillBgSel  = { R = 0.34, G = 0.24, B = 0.06, A = 0.96 }
@@ -4517,7 +4717,7 @@ local function OpenStationMap()
         if Core.IsValidObj(bdr) and Core.IsValidObj(txt) then
             pcall(function()
                 bdr:SetBrushColor(bgCol or pillBgInfo)
-                bdr:SetPadding({ Left = 10.0, Top = 4.0, Right = 10.0, Bottom = 4.0 })
+                bdr:SetPadding({ Left = 10.0, Top = 5.0, Right = 10.0, Bottom = 5.0 })
                 bdr:SetVisibility(3)
                 txt:SetVisibility(3)
                 txt:SetSize(textSize or 11)
@@ -4529,33 +4729,17 @@ local function OpenStationMap()
     end
 
     local floorPillWrap, floorPillText = createInfoPill("Floor 1 / 1", pillBgInfo, 11)
-    local selPillWrap, selPillText = createInfoPill("Selected: 0", pillBgSel, 11)
-    pcall(function() if Core.IsValidObj(selPillWrap) then selPillWrap:SetVisibility(1) end end)
-    local modePillWrap, modePillText = createInfoPill("", pillBgMode, 11)
-    pcall(function() if Core.IsValidObj(modePillWrap) then modePillWrap:SetVisibility(1) end end)
     local hintDragPill = createInfoPill("Drag / Shift+Click: Select", pillBgInfo, 10)
     local hintPanPill  = createInfoPill("RMB: Pan  Scroll: Zoom", pillBgInfo, 10)
+    local selPillWrap, selPillText = createInfoPill("Selected: 0", pillBgSel, 11)
+    pcall(function() if Core.IsValidObj(selPillWrap) then selPillWrap:SetVisibility(1) end end)
+    local delPillWrap, delPillText = createInfoPill("Deleting: 0", pillBgDel, 11)
+    pcall(function() if Core.IsValidObj(delPillWrap) then delPillWrap:SetVisibility(1) end end)
+    local modePillWrap, modePillText = createInfoPill("", pillBgMode, 11)
+    pcall(function() if Core.IsValidObj(modePillWrap) then modePillWrap:SetVisibility(1) end end)
 
-    local zoomInWrap = CreateLabeledButton(win, pc, outer, "+", 14, 30.0, 26.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ZoomMapByFactor(1.22)
-    end)
-    local zoomOutWrap = CreateLabeledButton(win, pc, outer, "-", 14, 30.0, 26.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ZoomMapByFactor(1.0 / 1.22)
-    end)
-    local fitWrap = CreateLabeledButton(win, pc, outer, "Fit", 11, 42.0, 26.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        FitViewTransformToFloor()
-        ApplyViewTransform()
-        RefreshDynamicOverlay()
-    end)
-    local copyWrap, copyBtn = CreateLabeledButton(win, pc, outer, "Copy (Ctrl+C)", 11, 96.0, 26.0, COLORS.FloorNormal, COLORS.PlayerLocal, CopySelectedMachines)
-    local rotWrap, rotBtn = CreateLabeledButton(win, pc, outer, "Rotate (R)", 11, 78.0, 26.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        PendingRotationDeg = (PendingRotationDeg + 90) % 360
-        UpdateStatusBanner()
-        RefreshDynamicOverlay()
-    end)
-    local delWrap, delBtn = CreateLabeledButton(win, pc, outer, "Delete (X)", 11, 78.0, 26.0, pillBgDel, COLORS.PlayerLocal, ProposeDeleteSelected)
-
-    for idx, pill in ipairs({ floorPillWrap, selPillWrap, modePillWrap, copyWrap, rotWrap, delWrap, zoomInWrap, zoomOutWrap, fitWrap, hintDragPill, hintPanPill }) do
+    -- Add left-end pills (static first, dynamic pop-up pills after them so existing pills never shift)
+    for idx, pill in ipairs({ floorPillWrap, hintDragPill, hintPanPill, selPillWrap, delPillWrap, modePillWrap }) do
         if Core.IsValidObj(pill) then
             local sl = topHBox:AddChildToHorizontalBox(pill)
             if Core.IsValidObj(sl) then
@@ -4567,11 +4751,68 @@ local function OpenStationMap()
         end
     end
 
+    -- Flexible spacer pushing action buttons cleanly to the right end
+    local topSpacer = CreateRawFast(PATHS.SizeBoxClass, outer)
+    if Core.IsValidObj(topSpacer) then
+        pcall(function() topSpacer:SetVisibility(4) end)
+        local spSlot = topHBox:AddChildToHorizontalBox(topSpacer)
+        if Core.IsValidObj(spSlot) then
+            pcall(function() spSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end)
+        end
+    end
+
+    -- Right-end action buttons with generous horizontal padding
+    local copyWrap, copyBtn = CreateLabeledButton(win, pc, outer, "Copy (Ctrl+C)", 11, 122.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, CopySelectedMachines)
+    local rotWrap, rotBtn = CreateLabeledButton(win, pc, outer, "Rotate (R)", 11, 102.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+        PendingRotationDeg = (PendingRotationDeg + 90) % 360
+        UpdateStatusBanner()
+        RefreshDynamicOverlay()
+    end)
+    local delWrap, delBtn = CreateLabeledButton(win, pc, outer, "Delete (X)", 11, 102.0, 28.0, pillBgDel, COLORS.PlayerLocal, ProposeDeleteSelected)
+    for _, ab in ipairs({ copyWrap, rotWrap, delWrap }) do
+        if Core.IsValidObj(ab) then
+            local sl = topHBox:AddChildToHorizontalBox(ab)
+            if Core.IsValidObj(sl) then
+                pcall(function()
+                    sl:SetVerticalAlignment(2)
+                    sl:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                end)
+            end
+        end
+    end
+
+    -- Vertically stacked +/- zoom buttons overlaid in the top-right corner of the map rectangle
+    local zoomVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local zoomInWrap = CreateLabeledButton(win, pc, outer, "+", 15, 32.0, 32.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+        ZoomMapByFactor(1.22)
+    end)
+    local zoomOutWrap = CreateLabeledButton(win, pc, outer, "-", 15, 32.0, 32.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+        ZoomMapByFactor(1.0 / 1.22)
+    end)
+    if Core.IsValidObj(zoomVBox) then
+        pcall(function() zoomVBox:SetVisibility(4) end)
+        if Core.IsValidObj(zoomInWrap) then
+            local zs1 = zoomVBox:AddChildToVerticalBox(zoomInWrap)
+            if Core.IsValidObj(zs1) then pcall(function() zs1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 }) end) end
+        end
+        if Core.IsValidObj(zoomOutWrap) then
+            zoomVBox:AddChildToVerticalBox(zoomOutWrap)
+        end
+        local zOvSlot = mapOverlay:AddChildToOverlay(zoomVBox)
+        if Core.IsValidObj(zOvSlot) then
+            pcall(function()
+                zOvSlot:SetHorizontalAlignment(3) -- Right
+                zOvSlot:SetVerticalAlignment(1)   -- Top
+                zOvSlot:SetPadding({ Left = 0.0, Top = 10.0, Right = 10.0, Bottom = 0.0 })
+            end)
+        end
+    end
+
     local topSlot = rootVBox:AddChildToVerticalBox(topHBox)
     if Core.IsValidObj(topSlot) then
         pcall(function()
             topSlot:SetPadding({ Left = 8.0, Top = 4.0, Right = 8.0, Bottom = 6.0 })
-            topSlot:SetHorizontalAlignment(1)
+            topSlot:SetHorizontalAlignment(0)
         end)
     end
 
@@ -4651,6 +4892,7 @@ local function OpenStationMap()
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
         PendingDeletes = {}
+        SelectedGhosts = {}
         RefreshSelectionLayer()
     end)
 
@@ -4724,6 +4966,8 @@ local function OpenStationMap()
         FloorPillText = floorPillText,
         SelPillWrap = selPillWrap,
         SelPillText = selPillText,
+        DelPillWrap = delPillWrap,
+        DelPillText = delPillText,
         ModePillWrap = modePillWrap,
         ModePillText = modePillText,
         StatusText = statusText,
