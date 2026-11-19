@@ -993,21 +993,23 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
     local cmdSuccess = false
     local callErr = nil
 
-    -- Primary path: DMSPlayerController:AddBuildCommand(BuildCommand) matching station machine GridTransform/Location/ChunkLocation
+    -- Primary path: DMSPlayerController:AddBuildCommand(BuildCommand) (verified native builder entry point)
     local addBuildLayout = InspectAddBuildCommandLayout()
     if addBuildLayout and addBuildLayout.fields and addBuildLayout.fields["Buildable"] and pc.AddBuildCommand then
         local fs = addBuildLayout.fieldStructs or {}
         local function makeFP(v) return { Value = math.floor(v * 65536.0 + 0.5) } end
         local function makeVec(sName, x, y, z)
             local low = (sName or ""):lower()
-            if low:find("fp", 1, true) or low:find("fixed", 1, true) then
+            if low == "pvector" or low:find("fp", 1, true) or low:find("fixed", 1, true) then
                 return { X = makeFP(x), Y = makeFP(y), Z = makeFP(z) }
+            elseif low == "intvector" then
+                return { X = math.floor(x + 0.5), Y = math.floor(y + 0.5), Z = math.floor(z + 0.5) }
             end
             return { X = x, Y = y, Z = z }
         end
         local function makeQuat(sName, x, y, z, w)
             local low = (sName or ""):lower()
-            if low:find("fp", 1, true) or low:find("fixed", 1, true) then
+            if low == "pquat" or low:find("fp", 1, true) or low:find("fixed", 1, true) then
                 return { X = makeFP(x), Y = makeFP(y), Z = makeFP(z), W = makeFP(w) }
             end
             return { X = x, Y = y, Z = z, W = w }
@@ -1036,8 +1038,8 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
             },
             Config = 0,
         }
-        Core.Log(string.format("[StationMap] Calling AddBuildCommand(attachId=%d, sys=%d, chunk=(%.0f,%.0f,%.0f), grid=(%d,%d), h=%d, rot=%d)",
-            frameId, solarSysId, chunkX, chunkY, chunkZ, gx, gy, gz, rotSteps))
+        Core.Log(string.format("[StationMap] Calling AddBuildCommand(attachId=%d, sys=%d, chunk=(%.0f,%.0f,%.0f), loc=(%.2f,%.2f,%.2f), grid=(%d,%d), h=%d, rot=%d)",
+            frameId, solarSysId, chunkX, chunkY, chunkZ, locX / 100.0, locY / 100.0, locZ / 100.0, gx, gy, gz, rotSteps))
         local okCmd, errCmd = pcall(function() pc:AddBuildCommand(bCmd) end)
         Core.Log(string.format("[StationMap] AddBuildCommand returned ok=%s err=%s", tostring(okCmd), tostring(errCmd)))
         if okCmd then
@@ -1045,129 +1047,8 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         else
             callErr = tostring(errCmd)
         end
-    end
-
-    if not cmdSuccess and #layout.params == 1 and layout.params[1].fields then
-        -- Single struct command parameter (BuildMachineCommand): populate fields strictly by reflected type
-        local cmd = {}
-        local fields = layout.params[1].fields
-        local fStructs = layout.params[1].fieldStructs or {}
-        local populated = 0
-        local hasBuildable = false
-        local function setIfField(name, val, reqClsSub)
-            local fCls = fields[name]
-            if fCls ~= nil and val ~= nil and (not reqClsSub or fCls:find(reqClsSub, 1, true)) then
-                cmd[name] = val
-                populated = populated + 1
-                if name == "Buildable" or name == "BuildBlock" then hasBuildable = true end
-            end
-        end
-        local glStruct = (fStructs["GridLocation"] or ""):lower()
-        local gridLocVal = (glStruct:find("intpoint", 1, true) or fields["Height"] ~= nil)
-            and { X = gx, Y = gy }
-            or { X = gx, Y = gy, Z = gz }
-        -- Prefer station/frame ID (UStationObject.ID) over subobject block ID for PlatformID
-        local targetPlatId = (frameId and frameId ~= 0) and frameId or platId
-
-        setIfField("FrameID", frameId, "Int")
-        setIfField("StationID", frameId, "Int")
-        setIfField("Frame", targetFrame, "Object")
-        setIfField("Station", targetFrame, "Object")
-        setIfField("PlatformID", targetPlatId, "Int")
-        setIfField("Platform", platform, "Object")
-        setIfField("Buildable", buildable, "Object")
-        setIfField("BuildBlock", buildable, "Object")
-        setIfField("GridLocation", gridLocVal, "Struct")
-        setIfField("Height", gz, "Int")
-        setIfField("GridRotation", rotSteps, "Int")
-        if fields["Rotation"] and fields["Rotation"]:find("Int", 1, true) then
-            setIfField("Rotation", rotSteps, "Int")
-        else
-            setIfField("Rotation", { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 }, "Struct")
-        end
-        setIfField("Config", 0, "Int")
-        setIfField("Yaw", yawDeg or 0.0, "Float")
-        setIfField("LocalQuat", quat, "Struct")
-        setIfField("Quat", quat, "Struct")
-        setIfField("Transform", localTransform, "Struct")
-        setIfField("Location", { X = locX, Y = locY, Z = locZ }, "Struct")
-
-        if hasBuildable and populated >= 2 then
-            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(platId=%d [stationId=%d,subId=%d], grid=(%d,%d), h=%d, rot=%d, fields=%d)",
-                targetPlatId, frameId, platId, gx, gy, gz, rotSteps, populated))
-            local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
-            Core.Log(string.format("[StationMap] AddBuildMachineCommand returned ok=%s err=%s", tostring(okCmd), tostring(errCmd)))
-            if okCmd then
-                cmdSuccess = true
-            else
-                callErr = tostring(errCmd)
-            end
-        else
-            callErr = string.format("Struct fields mismatch (populated=%d, hasBuildable=%s; see BuildCmdSig in UE4SS.log)", populated, tostring(hasBuildable))
-        end
     else
-        -- Multi-parameter signature: map each parameter strictly by inspected name & type (no blind fuzzing)
-        local args = {}
-        local allMatched = true
-        for _, p in ipairs(layout.params) do
-            local low = p.name:lower()
-            local cls = p.cls or ""
-            local val = nil
-            if cls:find("Object", 1, true) then
-                if low:find("build", 1, true) or low:find("machine", 1, true) then
-                    val = buildable
-                elseif low:find("plat", 1, true) then
-                    val = Core.IsValidObj(platform) and platform or targetFrame
-                elseif low:find("frame", 1, true) or low:find("station", 1, true) or low:find("parent", 1, true) then
-                    val = targetFrame
-                end
-            elseif cls:find("Int", 1, true) then
-                if low:find("rot", 1, true) or low:find("dir", 1, true) then
-                    val = rotSteps
-                elseif low:find("plat", 1, true) then
-                    val = platId
-                elseif low:find("frame", 1, true) or low:find("station", 1, true) or low:find("id", 1, true) then
-                    val = frameId
-                end
-            elseif cls:find("Float", 1, true) or cls:find("Double", 1, true) then
-                if low:find("yaw", 1, true) or low:find("rot", 1, true) or low:find("ang", 1, true) then
-                    val = yawDeg or 0.0
-                end
-            elseif cls:find("Bool", 1, true) then
-                val = false
-            elseif cls:find("Struct", 1, true) then
-                local sn = (p.structName or ""):lower()
-                if sn:find("transform", 1, true) then
-                    val = low:find("world", 1, true) and worldTransform or localTransform
-                elseif sn:find("intvector", 1, true) then
-                    val = { X = gx, Y = gy, Z = gz }
-                elseif sn:find("intpoint", 1, true) then
-                    val = { X = gx, Y = gy }
-                elseif sn:find("rotator", 1, true) then
-                    val = { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 }
-                elseif sn:find("quat", 1, true) then
-                    val = quat
-                elseif sn:find("vector", 1, true) then
-                    val = low:find("world", 1, true) and { X = wx, Y = wy, Z = wz } or { X = locX, Y = locY, Z = locZ }
-                end
-            end
-            if val == nil then
-                allMatched = false
-                callErr = "Unmapped build param: " .. p.name .. "(" .. cls .. ":" .. tostring(p.structName) .. ")"
-                break
-            end
-            table.insert(args, val)
-        end
-
-        if allMatched then
-            Core.Log(string.format("[StationMap] Calling AddBuildMachineCommand(args=%d, loc=(%.0f,%.0f,%.0f))", #args, locX, locY, locZ))
-            local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(table.unpack(args)) end)
-            if okCmd then
-                cmdSuccess = true
-            else
-                callErr = tostring(errCmd)
-            end
-        end
+        callErr = "AddBuildCommand not available on PlayerController"
     end
 
     if not cmdSuccess then
@@ -3764,7 +3645,27 @@ function Feature.RegisterHooks()
         "DMSPlayerController_AddBuildCommand_Diag",
         "/Script/MainSequence.DMSPlayerController:AddBuildCommand",
         function(Context, CmdParam)
-            Core.Log("[StationMap] RecvAddBuildCommand fired!")
+            pcall(function()
+                local st = CmdParam and CmdParam:get()
+                if st then
+                    local bName = Core.IsValidObj(st.Buildable) and st.Buildable:GetFName():ToString() or "nil"
+                    local lx, ly, lz = Core.GetFPVector(st.Location)
+                    local cx, cy, cz = Core.GetFPVector(st.ChunkLocation)
+                    local gx, gy, gh, gr = "?", "?", "?", "?"
+                    pcall(function()
+                        if st.GridTransform then
+                            if st.GridTransform.GridLocation then
+                                gx = tostring(st.GridTransform.GridLocation.X)
+                                gy = tostring(st.GridTransform.GridLocation.Y)
+                            end
+                            gh = tostring(st.GridTransform.Height)
+                            gr = tostring(st.GridTransform.GridRotation)
+                        end
+                    end)
+                    Core.Log(string.format("[StationMap] RecvAddBuildCommand: bld=%s attach=%s sys=%s chunk=(%.0f,%.0f,%.0f) loc=(%.2f,%.2f,%.2f) grid=(%s,%s) h=%s rot=%s cfg=%s",
+                        bName, tostring(st.AttachTargetID), tostring(st.SolarSystemID), cx, cy, cz, lx, ly, lz, gx, gy, gh, gr, tostring(st.Config)))
+                end
+            end)
         end
     )
 
