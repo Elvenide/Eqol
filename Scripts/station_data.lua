@@ -939,8 +939,10 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     for _, sl in ipairs(elevStopLists) do
         if not bestElevStops or #sl > #bestElevStops then bestElevStops = sl end
     end
+    local stationInverted = false
     if bestElevStops and #bestElevStops >= 2 and bestElevStops[#bestElevStops] < bestElevStops[1] then
         -- Station actor is upside-down (Roll ~ 180 deg): invert Up and Right axes so Floor 1..N ascends and XY isn't mirrored
+        stationInverted = true
         xform.ux, xform.uy, xform.uz = -xform.ux, -xform.uy, -xform.uz
         xform.rx, xform.ry, xform.rz = -xform.rx, -xform.ry, -xform.rz
         for _, sl in ipairs(elevStopLists) do
@@ -962,6 +964,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
             z = lz,
             platforms = {},
             machines = {},
+            walls = {},
         }
         table.insert(floors, nf)
         return nf
@@ -1100,6 +1103,105 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         end
     end
 
+    -- Extract structural module walls (including interior walls with doorways) from station CollisionEnv
+    local wallDiagTotal, wallDiagKept, wallDiagScale = 0, 0, 1.0
+    local wallSamples = {}
+    if Core.IsValidObj(station) and #floors > 0 then
+        local machineIdSet = {}
+        for _, m in ipairs(allMachines) do
+            if Core.IsValidObj(m) then
+                pcall(function()
+                    local mid = tonumber(m.ID)
+                    if mid and mid > 0 then machineIdSet[mid] = true end
+                end)
+            end
+        end
+
+        pcall(function()
+            local env = nil
+            if station.GetCollisionEnv then
+                env = station:GetCollisionEnv()
+            end
+            if not Core.IsValidObj(env) then
+                env = station.CollisionEnv
+            end
+            if not Core.IsValidObj(env) or not env.Colliders then return end
+            local cols = env.Colliders
+            local num = cols.GetArrayNum and (tonumber(cols:GetArrayNum()) or 0) or 0
+            wallDiagTotal = num
+            if num <= 0 then return end
+
+            local rawBoxes = {}
+            local maxAbs = 0.0
+            for i = 1, num do
+                local c = cols[i]
+                if c then
+                    local cid = nil
+                    pcall(function() cid = tonumber(c.ColliderID) end)
+                    if not (cid and machineIdSet[cid]) then
+                        local okM, x1, y1, z1, x2, y2, z2 = pcall(function()
+                            local ax, ay, az = Core.GetFPVector(c.Min)
+                            local bx, by, bz = Core.GetFPVector(c.Max)
+                            return ax, ay, az, bx, by, bz
+                        end)
+                        if okM and x1 and x2 and x1 < 900000000 and x2 > x1 and y2 > y1 and z2 > z1 then
+                            local aMax = math.max(math.abs(x1), math.abs(x2), math.abs(y1), math.abs(y2))
+                            if aMax > maxAbs then maxAbs = aMax end
+                            table.insert(rawBoxes, { x1 = x1, y1 = y1, z1 = z1, x2 = x2, y2 = y2, z2 = z2, cid = cid or 0 })
+                        end
+                    end
+                end
+            end
+
+            local scale = 1.0
+            if maxAbs > 100000.0 then
+                scale = 0.1
+            elseif maxAbs > 0.0 and maxAbs < 260.0 then
+                scale = 50.0
+            end
+            wallDiagScale = scale
+
+            for _, rb in ipairs(rawBoxes) do
+                local minX, maxX = rb.x1 * scale, rb.x2 * scale
+                local minY, maxY = rb.y1 * scale, rb.y2 * scale
+                local minZ, maxZ = rb.z1 * scale, rb.z2 * scale
+                if stationInverted then
+                    minY, maxY = -maxY, -minY
+                    minZ, maxZ = -maxZ, -minZ
+                end
+                local dx = maxX - minX
+                local dy = maxY - minY
+                local dz = maxZ - minZ
+                -- Keep vertical standing walls & pillars; skip flat floor/ceiling slabs and full-deck envelopes
+                if dz >= 70.0 and math.max(dx, dy) >= 20.0 and not (dx >= 1200.0 and dy >= 1200.0) then
+                    local wb = {
+                        minX = minX, maxX = maxX,
+                        minY = minY, maxY = maxY,
+                        minZ = minZ, maxZ = maxZ,
+                        cx = (minX + maxX) * 0.5,
+                        cy = (minY + maxY) * 0.5,
+                        ex = dx * 0.5,
+                        ey = dy * 0.5,
+                    }
+                    local matchedAny = false
+                    for _, fl in ipairs(floors) do
+                        if minZ <= (fl.z + 200.0) and maxZ >= (fl.z + 50.0) then
+                            table.insert(fl.walls, wb)
+                            matchedAny = true
+                        end
+                    end
+                    if matchedAny then
+                        wallDiagKept = wallDiagKept + 1
+                        if #wallSamples < 6 then
+                            table.insert(wallSamples, string.format("(%.0f..%.0f,%.0f..%.0f,z=%.0f..%.0f)",
+                                minX, maxX, minY, maxY, minZ, maxZ))
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
     local unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
     local gridOriginX, gridOriginY = 0.0, 0.0
     local firstB = floors[1] and floors[1].platforms[1] and floors[1].platforms[1].bounds
@@ -1142,6 +1244,8 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         Core.Log(string.format("[StationData] LocalMap playerL=(%.0f,%.0f,%.0f) curFl=%d elevCols=%d elevStops=[%s] floors(%d): %s",
             playerLx, playerLy, playerLz, currentFloorIndex, #elevStopLists, elevStr, #floors, table.concat(flParts, ", ")))
         Core.Log(string.format("[StationData] PlatsDiag count=%d items=[%s]", #platDiagParts, table.concat(platDiagParts, "; ")))
+        Core.Log(string.format("[StationData] WallColliders total=%d walls=%d scale=%.2f fl1Walls=%d sample=[%s]",
+            wallDiagTotal, wallDiagKept, wallDiagScale, floors[1] and #floors[1].walls or 0, table.concat(wallSamples, "; ")))
 
         local clsCounts = {}
         for _, m in ipairs(allMachines) do
@@ -2277,8 +2381,8 @@ function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY
     local cosA, sinA = math.cos(rad), math.sin(rad)
 
     -- MachineInputs / Outputs are 50cm grid offsets centered on the machine actor origin (0,0).
-    -- Shift visual center 13cm (~1/6 of a 78cm port badge) inside the wall seam so 2/3 sits inside and 1/3 outside.
-    local PORT_INWARD_SHIFT_CM = 13.0
+    -- Shift visual center 9.7cm (~1/6 of a 58cm port badge) inside the wall seam so 2/3 sits inside and 1/3 outside.
+    local PORT_INWARD_SHIFT_CM = 9.7
 
     for _, mp in pairs(merged) do
         local lx = mp.vx * 50.0

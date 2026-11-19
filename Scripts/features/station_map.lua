@@ -61,6 +61,8 @@ local COLORS = {
     GhostInvalid  = { R = 1.000, G = 0.320, B = 0.320, A = 0.58 },
     GhostBorderOk = { R = 0.350, G = 0.920, B = 0.650, A = 0.90 },
     GhostBorderBad= { R = 1.000, G = 0.300, B = 0.300, A = 0.90 },
+    WallFill      = { R = 0.080, G = 0.100, B = 0.130, A = 0.92 },
+    WallBorder    = { R = 0.720, G = 0.780, B = 0.860, A = 0.72 },
     FloorRailBg   = { R = 0.045, G = 0.060, B = 0.082, A = 0.95 },
     FloorSelected = { R = 0.940, G = 0.620, B = 0.080, A = 1.00 },
     FloorNormal   = { R = 0.120, G = 0.155, B = 0.205, A = 0.90 },
@@ -305,6 +307,21 @@ local function IsPointOverAnyFloorModule(wx, wy, floor)
     return false, nil
 end
 
+local function IsFootprintBlockedByWall(sx, sy, cellsX, cellsY, yawDeg, floor)
+    if not floor or not floor.walls or #floor.walls == 0 then return false end
+    local rx, ry = GetRotatedCellDims(cellsX or 1, cellsY or 1, yawDeg or 0)
+    local halfW = math.max(10.0, rx * CELL_CM * 0.5 - 6.0)
+    local halfH = math.max(10.0, ry * CELL_CM * 0.5 - 6.0)
+    local minX, maxX = sx - halfW, sx + halfW
+    local minY, maxY = sy - halfH, sy + halfH
+    for _, w in ipairs(floor.walls) do
+        if maxX > w.minX and minX < w.maxX and maxY > w.minY and minY < w.maxY then
+            return true
+        end
+    end
+    return false
+end
+
 local function FindPlatformAtWorldXY(wx, wy, floor)
     if not floor or not floor.platforms then return nil, nil end
     local bestPlat, bestBounds = nil, nil
@@ -524,32 +541,72 @@ end
 --------------------------------------------------------------------------------
 
 local CachedBuildCmdLayout = nil
+local BuildCmdSigLogged = false
+local ApplyInProgress = false
 
 local function InspectBuildMachineCommandLayout()
-    if CachedBuildCmdLayout then return CachedBuildCmdLayout end
+    if CachedBuildCmdLayout ~= nil then
+        return CachedBuildCmdLayout or nil
+    end
     local ufunc = StaticFindObject("/Script/MainSequence.DMSPlayerController:AddBuildMachineCommand")
-    if not Core.IsValidObj(ufunc) then return nil end
+    if not Core.IsValidObj(ufunc) then
+        CachedBuildCmdLayout = false
+        if not BuildCmdSigLogged then
+            BuildCmdSigLogged = true
+            Core.Log("[StationMap] BuildCmdSig: AddBuildMachineCommand not found")
+        end
+        return nil
+    end
 
     local layout = { params = {}, firstStructFields = nil, firstStructName = nil }
+    local sigParts = {}
     pcall(function()
         ufunc:ForEachProperty(function(prop)
             local pName = prop:GetFName():ToString()
-            table.insert(layout.params, pName)
-            if not layout.firstStructFields and prop.GetStruct then
-                local okS, st = pcall(function() return prop:GetStruct() end)
-                if okS and Core.IsValidObj(st) and st.ForEachProperty then
-                    layout.firstStructName = pName
-                    layout.firstStructFields = {}
-                    st:ForEachProperty(function(fp)
-                        local fName = fp:GetFName():ToString()
-                        local fCls = ""
-                        pcall(function() fCls = fp:GetClass():GetFName():ToString() end)
-                        layout.firstStructFields[fName] = fCls
-                    end)
+            local pCls = ""
+            pcall(function() pCls = prop:GetClass():GetFName():ToString() end)
+            local isRet = (pName == "ReturnValue")
+            if not isRet then
+                local pInfo = { name = pName, cls = pCls, structName = nil, fields = nil }
+                if prop.GetStruct then
+                    local okS, st = pcall(function() return prop:GetStruct() end)
+                    if okS and Core.IsValidObj(st) then
+                        pcall(function() pInfo.structName = st:GetFName():ToString() end)
+                        if st.ForEachProperty then
+                            local fMap = {}
+                            local fList = {}
+                            st:ForEachProperty(function(fp)
+                                local fName = fp:GetFName():ToString()
+                                local fCls = ""
+                                pcall(function() fCls = fp:GetClass():GetFName():ToString() end)
+                                fMap[fName] = fCls
+                                table.insert(fList, fName .. ":" .. fCls)
+                            end)
+                            pInfo.fields = fMap
+                            if not layout.firstStructFields then
+                                layout.firstStructName = pName
+                                layout.firstStructFields = fMap
+                            end
+                            table.insert(sigParts, string.format("%s(%s:%s{%s})", pName, pCls, tostring(pInfo.structName), table.concat(fList, ",")))
+                        else
+                            table.insert(sigParts, string.format("%s(%s:%s)", pName, pCls, tostring(pInfo.structName)))
+                        end
+                    else
+                        table.insert(sigParts, string.format("%s(%s)", pName, pCls))
+                    end
+                else
+                    table.insert(sigParts, string.format("%s(%s)", pName, pCls))
                 end
+                table.insert(layout.params, pInfo)
             end
         end)
     end)
+
+    if not BuildCmdSigLogged then
+        BuildCmdSigLogged = true
+        Core.Log("[StationMap] BuildCmdSig: params(" .. #layout.params .. ")=[" .. table.concat(sigParts, "; ") .. "]")
+    end
+
     CachedBuildCmdLayout = layout
     return layout
 end
@@ -610,7 +667,7 @@ local function CheckMaterialsForPendingList(pc, list)
     return true, nil
 end
 
-local function IssueRemoteBuildMachine(pc, station, platform, platBounds, buildable, wx, wy, wz, yawDeg, recipe)
+local function IssueRemoteBuildMachine(pc, station, platform, platBounds, buildable, locX, locY, locZ, wx, wy, wz, yawDeg, recipe)
     if not (Core.IsValidObj(pc) and Core.IsValidObj(buildable)) then
         return false, "Invalid controller or buildable"
     end
@@ -623,10 +680,10 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         return false, "No target station"
     end
 
-    local fb = platBounds or StationData.GetPlatformWorldBounds(targetFrame)
-    local relX = wx - fb.cx
-    local relY = wy - fb.cy
-    local relZ = wz - fb.cz
+    local layout = InspectBuildMachineCommandLayout()
+    if not layout or #layout.params == 0 then
+        return false, "Build command unavailable (see UE4SS.log)"
+    end
 
     local quat = {
         X = 0.0,
@@ -634,9 +691,9 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         Z = math.sin(math.rad((yawDeg or 0.0) * 0.5)),
         W = math.cos(math.rad((yawDeg or 0.0) * 0.5)),
     }
-    local relTransform = {
+    local localTransform = {
         Rotation = quat,
-        Translation = { X = relX, Y = relY, Z = relZ },
+        Translation = { X = locX, Y = locY, Z = locZ },
         Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
     }
     local worldTransform = {
@@ -645,26 +702,31 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
     }
 
+    local frameId = 0
+    pcall(function() if targetFrame.ID ~= nil then frameId = tonumber(targetFrame.ID) or 0 end end)
     local platId = 0
     if Core.IsValidObj(platform) then
         pcall(function() if platform.ID ~= nil then platId = tonumber(platform.ID) or 0 end end)
     end
-    local gx = math.floor(relX / 50.0 + 0.5)
-    local gy = math.floor(relY / 50.0 + 0.5)
-    local gz = math.floor(relZ / 50.0 + 0.5)
+    local gx = math.floor(locX / 50.0 + 0.5)
+    local gy = math.floor(locY / 50.0 + 0.5)
+    local gz = math.floor(locZ / 50.0 + 0.5)
     local rotSteps = ((math.floor((yawDeg or 0.0) / 90.0 + 0.5) % 4) + 4) % 4
 
     local cmdSuccess = false
-    local layout = InspectBuildMachineCommandLayout()
-    if layout and layout.firstStructFields then
+    local callErr = nil
+
+    if #layout.params == 1 and layout.params[1].fields then
+        -- Single struct command parameter: populate only fields that exist with type-appropriate values
         local cmd = {}
-        local fields = layout.firstStructFields
+        local fields = layout.params[1].fields
         local function setIfField(name, val)
-            if fields[name] ~= nil then cmd[name] = val end
+            if fields[name] ~= nil and val ~= nil then cmd[name] = val end
         end
-        setIfField("FrameID", targetFrame.ID)
-        setIfField("StationID", targetFrame.ID)
+        setIfField("FrameID", frameId)
+        setIfField("StationID", frameId)
         setIfField("Frame", targetFrame)
+        setIfField("Station", targetFrame)
         setIfField("PlatformID", platId)
         setIfField("Platform", platform)
         setIfField("Buildable", buildable)
@@ -675,42 +737,82 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
         setIfField("Yaw", yawDeg or 0.0)
         setIfField("LocalQuat", quat)
         setIfField("Quat", quat)
-        setIfField("Transform", relTransform)
-        setIfField("Location", { X = relX, Y = relY, Z = relZ })
+        setIfField("Transform", localTransform)
+        setIfField("Location", { X = locX, Y = locY, Z = locZ })
 
-        local okCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
-        if okCmd then cmdSuccess = true end
-    end
-
-    if not cmdSuccess then
-        local attempts = {
-            function() pc:AddBuildMachineCommand(targetFrame, buildable, relTransform) end,
-            function() pc:AddBuildMachineCommand(buildable, targetFrame, relTransform) end,
-            function() pc:AddBuildMachineCommand(targetFrame, buildable, worldTransform) end,
-            function()
-                pc:AddBuildMachineCommand({
-                    FrameID = targetFrame.ID,
-                    PlatformID = platId,
-                    Frame = targetFrame,
-                    Buildable = buildable,
-                    GridLocation = { X = gx, Y = gy, Z = gz },
-                    GridRotation = rotSteps,
-                    Transform = relTransform,
-                    Location = { X = relX, Y = relY, Z = relZ },
-                    Rotation = { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 },
-                })
-            end,
-        }
-        for _, fn in ipairs(attempts) do
-            if pcall(fn) then
-                cmdSuccess = true
+        local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(cmd) end)
+        if okCmd then
+            cmdSuccess = true
+        else
+            callErr = tostring(errCmd)
+        end
+    else
+        -- Multi-parameter signature: map each parameter strictly by inspected name & type (no blind fuzzing)
+        local args = {}
+        local allMatched = true
+        for _, p in ipairs(layout.params) do
+            local low = p.name:lower()
+            local cls = p.cls or ""
+            local val = nil
+            if cls:find("Object", 1, true) then
+                if low:find("build", 1, true) or low:find("machine", 1, true) then
+                    val = buildable
+                elseif low:find("plat", 1, true) then
+                    val = Core.IsValidObj(platform) and platform or targetFrame
+                elseif low:find("frame", 1, true) or low:find("station", 1, true) or low:find("parent", 1, true) then
+                    val = targetFrame
+                end
+            elseif cls:find("Int", 1, true) then
+                if low:find("rot", 1, true) or low:find("dir", 1, true) then
+                    val = rotSteps
+                elseif low:find("plat", 1, true) then
+                    val = platId
+                elseif low:find("frame", 1, true) or low:find("station", 1, true) or low:find("id", 1, true) then
+                    val = frameId
+                end
+            elseif cls:find("Float", 1, true) or cls:find("Double", 1, true) then
+                if low:find("yaw", 1, true) or low:find("rot", 1, true) or low:find("ang", 1, true) then
+                    val = yawDeg or 0.0
+                end
+            elseif cls:find("Bool", 1, true) then
+                val = false
+            elseif cls:find("Struct", 1, true) then
+                local sn = (p.structName or ""):lower()
+                if sn:find("transform", 1, true) then
+                    val = low:find("world", 1, true) and worldTransform or localTransform
+                elseif sn:find("intvector", 1, true) then
+                    val = { X = gx, Y = gy, Z = gz }
+                elseif sn:find("intpoint", 1, true) then
+                    val = { X = gx, Y = gy }
+                elseif sn:find("rotator", 1, true) then
+                    val = { Pitch = 0.0, Yaw = yawDeg or 0.0, Roll = 0.0 }
+                elseif sn:find("quat", 1, true) then
+                    val = quat
+                elseif sn:find("vector", 1, true) then
+                    val = low:find("world", 1, true) and { X = wx, Y = wy, Z = wz } or { X = locX, Y = locY, Z = locZ }
+                end
+            end
+            if val == nil then
+                allMatched = false
+                callErr = "Unmapped build param: " .. p.name .. "(" .. cls .. ":" .. tostring(p.structName) .. ")"
                 break
+            end
+            table.insert(args, val)
+        end
+
+        if allMatched then
+            local okCmd, errCmd = pcall(function() pc:AddBuildMachineCommand(table.unpack(args)) end)
+            if okCmd then
+                cmdSuccess = true
+            else
+                callErr = tostring(errCmd)
             end
         end
     end
 
     if not cmdSuccess then
-        return false, "Build command failed"
+        Core.Log("[StationMap] IssueRemoteBuildMachine failed: " .. tostring(callErr))
+        return false, callErr or "Build command failed (see UE4SS.log)"
     end
 
     if Core.IsValidObj(recipe) then
@@ -720,7 +822,7 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
             local bestM, bestDist = nil, 150.0
             for _, m in ipairs(machines) do
                 if StationData.GetMachineCategory(m) == "Assembler" then
-                    local mx, my = StationData.GetMachineWorldPosAndYaw(m, fb)
+                    local mx, my = StationData.GetMachineWorldPosAndYaw(m, platBounds)
                     local d = math.sqrt((mx - wx) ^ 2 + (my - wy) ^ 2)
                     if d < bestDist then
                         bestDist = d
@@ -876,37 +978,40 @@ local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col
 end
 
 local function RenderUnconnectedItemPort(outer, canvas, px, py, portSize, zOrder)
-    local sz = math.max(12.0, portSize or 20.0)
+    local sz = math.max(12.0, portSize or 18.0)
     local half = sz * 0.5
 
     local bg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     if Core.IsValidObj(bg) then
         pcall(function()
             bg:SetVisibility(3)
-            bg:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.58 })
+            bg:SetBrushColor({ R = 0.0, G = 0.0, B = 0.0, A = 0.56 })
         end)
         local bs = canvas:AddChildToCanvas(bg)
         SetCanvasSlot(bs, px, py, sz - 2.0, sz - 2.0, 0.5, 0.5, zOrder)
     end
 
-    -- Thick black dashed border (centered dash per edge leaving corners open)
+    -- True multi-dash thick black border (3 distinct dashes along each of the 4 sides)
     local dashCol = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
-    local thick = math.max(2.4, sz * 0.14)
-    local dashLen = math.max(6.0, sz * 0.56)
-    for _, sy in ipairs({ py - half, py + half }) do
-        local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(d) then
-            pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
-            local ds = canvas:AddChildToCanvas(d)
-            SetCanvasSlot(ds, px, sy, dashLen, thick, 0.5, 0.5, zOrder + 1)
+    local thick = math.max(1.8, sz * 0.11)
+    local dashLen = math.max(2.6, sz * 0.21)
+    local step = sz * 0.34
+    for _, off in ipairs({ -step, 0.0, step }) do
+        for _, sy in ipairs({ py - half, py + half }) do
+            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(d) then
+                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
+                local ds = canvas:AddChildToCanvas(d)
+                SetCanvasSlot(ds, px + off, sy, dashLen, thick, 0.5, 0.5, zOrder + 1)
+            end
         end
-    end
-    for _, sx in ipairs({ px - half, px + half }) do
-        local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
-        if Core.IsValidObj(d) then
-            pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
-            local ds = canvas:AddChildToCanvas(d)
-            SetCanvasSlot(ds, sx, py, thick, dashLen, 0.5, 0.5, zOrder + 1)
+        for _, sx in ipairs({ px - half, px + half }) do
+            local d = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(d) then
+                pcall(function() d:SetVisibility(3); d:SetBrushColor(dashCol) end)
+                local ds = canvas:AddChildToCanvas(d)
+                SetCanvasSlot(ds, sx, py + off, thick, dashLen, 0.5, 0.5, zOrder + 1)
+            end
         end
     end
 end
@@ -1277,8 +1382,9 @@ RefreshDynamicOverlay = function()
             local sx, sy = SnapWorldToMachineGrid(gp.wx, gp.wy, gp.cellsX, gp.cellsY, gp.yaw)
             local gmx, gmy = WorldToCanvas(sx, sy)
             local onMod = IsPointOverAnyFloorModule(sx, sy, floor)
+            local inWall = IsFootprintBlockedByWall(sx, sy, gp.cellsX, gp.cellsY, gp.yaw, floor)
             local hasMat = PlayerHasBuildableMaterials(pc, gp.buildable, 1)
-            local valid = onMod and hasMat
+            local valid = onMod and (not inWall) and hasMat
             local rx, ry = GetRotatedCellDims(gp.cellsX, gp.cellsY, gp.yaw)
             local pxW = rx * cellPx
             local pxH = ry * cellPx
@@ -1574,6 +1680,25 @@ RefreshStationMapCanvas = function()
         RenderBorderOutline(outer, MapUI.MapCanvas, mx, my, mw, mh, 5.5, COLORS.ModuleBorder, 4)
     end
 
+    -- 2b. Render structural module walls & interior partitions (with doorway gaps)
+    if floor.walls and #floor.walls > 0 then
+        for _, w in ipairs(floor.walls) do
+            local wx, wy = WorldToBaseCanvas(w.cx, w.cy)
+            local ww = math.max(5.0, (w.maxX - w.minX) * BASE_PX_PER_CM)
+            local wh = math.max(5.0, (w.maxY - w.minY) * BASE_PX_PER_CM)
+            local wallBox = Core.CreateRawWidget(PATHS.BorderClass, outer)
+            if Core.IsValidObj(wallBox) then
+                pcall(function()
+                    wallBox:SetVisibility(3)
+                    wallBox:SetBrushColor(COLORS.WallFill)
+                end)
+                local ws = MapUI.MapCanvas:AddChildToCanvas(wallBox)
+                SetCanvasSlot(ws, wx, wy, ww, wh, 0.5, 0.5, 5)
+            end
+            RenderBorderOutline(outer, MapUI.MapCanvas, wx, wy, ww, wh, 1.5, COLORS.WallBorder, 6)
+        end
+    end
+
     -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX
     local floorMachines = floor.machines
     if not floorMachines then
@@ -1789,8 +1914,8 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    local portBadgeBasePx = math.max(18.0, BASE_CELL_PX * 0.78)
-    local portHalfCm = 42.0
+    local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
+    local portHalfCm = 32.0
     local portsByKey = {}
     for _, rm in ipairs(RenderedMachines) do
         local cn = ""
@@ -2001,6 +2126,7 @@ local function CopySelectedMachines()
 end
 
 local function CommitPendingGhosts()
+    if ApplyInProgress then return end
     if #PendingGhosts == 0 then
         UpdateStatusBanner("No pending changes to apply")
         return
@@ -2016,15 +2142,17 @@ local function CommitPendingGhosts()
         return
     end
 
+    ApplyInProgress = true
     local builtCount = 0
     local remaining = {}
     local lastErr = nil
 
+    Core.Log(string.format("[StationMap] ApplyChanges starting for %d pending ghost(s)", #PendingGhosts))
     for _, g in ipairs(PendingGhosts) do
         local targetFloor = CurrentFloors[g.floorIdx] or CurrentFloors[SelectedFloorIdx]
         local plat, pb = FindPlatformAtWorldXY(g.x, g.y, targetFloor)
         local wx, wy, wz = StationData.StationLocalToWorld(CurrentFrameXform, g.x, g.y, g.z)
-        local ok, err = IssueRemoteBuildMachine(pc, CurrentStation, plat, pb, g.buildable, wx, wy, wz, g.yaw, g.recipe)
+        local ok, err = IssueRemoteBuildMachine(pc, CurrentStation, plat, pb, g.buildable, g.x, g.y, g.z, wx, wy, wz, g.yaw, g.recipe)
         if ok then
             builtCount = builtCount + 1
         else
@@ -2032,6 +2160,7 @@ local function CommitPendingGhosts()
             table.insert(remaining, g)
         end
     end
+    ApplyInProgress = false
 
     PendingGhosts = remaining
     UpdateActionBar()
@@ -2049,7 +2178,7 @@ local function CommitPendingGhosts()
         end)
     elseif lastErr then
         UpdateStatusBanner("Apply failed: " .. tostring(lastErr))
-        RefreshStationMapCanvas()
+        RefreshSelectionLayer()
     end
 end
 
@@ -2064,6 +2193,10 @@ local function HandleMapLeftClick(mx, my, isShift)
         local onMod = IsPointOverAnyFloorModule(sx, sy, floor)
         if not onMod then
             UpdateStatusBanner("Place inside a station module")
+            return
+        end
+        if IsFootprintBlockedByWall(sx, sy, cellsX, cellsY, PendingRotationDeg, floor) then
+            UpdateStatusBanner("Cannot place inside a module wall")
             return
         end
         local pc = Core.GetLocalPlayerController()
@@ -2097,7 +2230,7 @@ local function HandleMapLeftClick(mx, my, isShift)
                 local rdy = item.dx * sinA + item.dy * cosA
                 local finalYaw = (item.yaw or 0.0) + PendingRotationDeg
                 local sx, sy = SnapWorldToMachineGrid(wx + rdx, wy + rdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
-                if IsPointOverAnyFloorModule(sx, sy, floor) then
+                if IsPointOverAnyFloorModule(sx, sy, floor) and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor) then
                     table.insert(staged, {
                         buildable = item.buildable,
                         floorIdx = SelectedFloorIdx,
@@ -2920,7 +3053,9 @@ local function OpenStationMap()
         end
     end
 
-    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, CommitPendingGhosts)
+    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, function()
+        ExecuteInGameThread(CommitPendingGhosts)
+    end)
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
         RefreshSelectionLayer()
@@ -3071,7 +3206,13 @@ local function EnsureMapKeybinds()
         end)
     end
 
-    if Key.C then
+    if Key.C and ModifierKey and ModifierKey.CONTROL then
+        RegisterKeyBind(Key.C, { ModifierKey.CONTROL }, function()
+            if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
+                ExecuteInGameThread(CopySelectedMachines)
+            end
+        end)
+    elseif Key.C then
         RegisterKeyBind(Key.C, function()
             if Core.IsValidObj(ActiveMapWin) and not WaitingForBuildMenuSelection and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
