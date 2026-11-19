@@ -82,6 +82,7 @@ local MapWinInViewport = false
 local MapUI = nil
 local CachedBorderCls = nil
 local EqolIssuingBuildCmd = false
+local CanvasRenderGen = 0
 
 local ALIGN_CENTER = { X = 0.5, Y = 0.5 }
 local function AddBorderFast(outer, canvas, x, y, w, h, col, zOrder)
@@ -672,6 +673,68 @@ local function InspectBuildMachineCommandLayout()
             end
         end)
         Core.Log("[StationMap] BuildFuncs: " .. table.concat(fnNames, ", "))
+
+        -- Inspect a real placed machine on the current floor to see exact GridLocation / Height / PlatformID / Rotation units
+        local refParts = {}
+        pcall(function()
+            local fl = CurrentFloors[SelectedFloorIdx] or CurrentFloors[1]
+            local sampleM = nil
+            if fl and fl.machines then
+                for _, me in ipairs(fl.machines) do
+                    if Core.IsValidObj(me.machine) and StationData.GetMachineCategory(me.machine) ~= "Conveyor" then
+                        sampleM = me
+                        break
+                    end
+                end
+            end
+            if sampleM and Core.IsValidObj(sampleM.machine) then
+                local m = sampleM.machine
+                table.insert(refParts, string.format("cls=%s local=(%.0f,%.0f,%.0f) yaw=%.0f",
+                    m:GetClass():GetFName():ToString(), sampleM.x or 0, sampleM.y or 0, sampleM.z or 0, sampleM.yaw or 0))
+                local c = m:GetClass()
+                local d = 0
+                local seenP = {}
+                while Core.IsValidObj(c) and d < 6 do
+                    d = d + 1
+                    if c.ForEachProperty then
+                        c:ForEachProperty(function(p)
+                            local pn = p:GetFName():ToString()
+                            if not seenP[pn] then
+                                seenP[pn] = true
+                                local low = pn:lower()
+                                if low:find("grid", 1, true) or low:find("height", 1, true) or low:find("plat", 1, true)
+                                    or low:find("rot", 1, true) or low:find("loc", 1, true) or low:find("config", 1, true)
+                                    or low == "id" or low:find("frame", 1, true)
+                                then
+                                    local okV, val = pcall(function() return m[pn] end)
+                                    if okV and val ~= nil then
+                                        if type(val) == "number" or type(val) == "boolean" or type(val) == "string" then
+                                            table.insert(refParts, pn .. "=" .. tostring(val))
+                                        elseif type(val) == "userdata" then
+                                            local okXY, vx, vy, vz = pcall(function()
+                                                if val.X ~= nil and val.Y ~= nil then
+                                                    local a, b, z = Core.GetFPVector(val)
+                                                    return a, b, z
+                                                end
+                                                return nil
+                                            end)
+                                            if okXY and vx ~= nil then
+                                                table.insert(refParts, string.format("%s=(%.1f,%.1f,%.1f)", pn, vx, vy, vz or 0))
+                                            elseif Core.IsValidObj(val) then
+                                                local okId, vid = pcall(function() return val.ID end)
+                                                table.insert(refParts, string.format("%s=%s(id=%s)", pn, val:GetClass():GetFName():ToString(), tostring(okId and vid or "?")))
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end)
+                    end
+                    c = c.GetSuperStruct and c:GetSuperStruct() or nil
+                end
+            end
+        end)
+        Core.Log("[StationMap] RefMachineProps: " .. table.concat(refParts, ", "))
     end
 
     CachedBuildCmdLayout = layout
@@ -1648,19 +1711,19 @@ RefreshStationMapCanvas = function()
             if me.y + 400.0 > bMaxY then bMaxY = me.y + 400.0 end
         end
     end
-    local padCm = 800.0
+    local padCm = 400.0
     local minCol = math.floor((bMinX - padCm - ViewTransform.gridOriginX) / CELL_CM)
     local maxCol = math.ceil((bMaxX + padCm - ViewTransform.gridOriginX) / CELL_CM)
     local minRow = math.floor((bMinY - padCm - ViewTransform.gridOriginY) / CELL_CM)
     local maxRow = math.ceil((bMaxY + padCm - ViewTransform.gridOriginY) / CELL_CM)
     -- Expand narrow axis symmetrically so tall or wide stations still show a balanced square field
-    if (maxCol - minCol) < 64 then
-        local extra = math.ceil((64 - (maxCol - minCol)) * 0.5)
+    if (maxCol - minCol) < 48 then
+        local extra = math.ceil((48 - (maxCol - minCol)) * 0.5)
         minCol = minCol - extra
         maxCol = maxCol + extra
     end
-    if (maxRow - minRow) < 48 then
-        local extra = math.ceil((48 - (maxRow - minRow)) * 0.5)
+    if (maxRow - minRow) < 40 then
+        local extra = math.ceil((40 - (maxRow - minRow)) * 0.5)
         minRow = minRow - extra
         maxRow = maxRow + extra
     end
@@ -1674,9 +1737,9 @@ RefreshStationMapCanvas = function()
     local totalRows = maxRow - minRow
     local maxDim = math.max(totalCols, totalRows)
     local stepCells = 1
-    if maxDim > 440 then
+    if maxDim > 260 then
         stepCells = 4
-    elseif maxDim > 220 then
+    elseif maxDim > 110 then
         stepCells = 2
     end
 
@@ -1760,6 +1823,11 @@ RefreshStationMapCanvas = function()
         end
     end
 
+    CanvasRenderGen = CanvasRenderGen + 1
+    local myRenderGen = CanvasRenderGen
+    local deferredConveyors = {}
+    local deferredPorts = {}
+
     -- 3. Collect & render placed machines on this floor once at BASE_CELL_PX (station-local coords only)
     local floorMachines = floor.machines or {}
 
@@ -1770,7 +1838,6 @@ RefreshStationMapCanvas = function()
         end
     end
     local seenUndergroundPairs = {}
-    local extraOccupiedBoxes = {}
 
     for _, me in ipairs(floorMachines) do
         local m = me.machine
@@ -1830,9 +1897,10 @@ RefreshStationMapCanvas = function()
             table.insert(RenderedMachines, recEntry)
             if cat == "Conveyor" then
                 table.insert(RenderedConveyors, recEntry)
+                table.insert(deferredConveyors, { mx = mx, my = my, pxW = pxW, pxH = pxH, myaw = myaw, sprite = sprite })
+            else
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
             end
-
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay)
 
             -- Underground belt enhancements: direction arrow on tile + dashed pair line + second endpoint tile
             local clsLow = clsKey and clsKey:lower() or ""
@@ -1858,7 +1926,6 @@ RefreshStationMapCanvas = function()
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
                         CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, omx, omy, pxW, pxH, myaw, cat, sprite, false, true, 10, false)
                         RenderDirectionChevron(outer, MapUI.MapCanvas, omx, omy, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
-                        table.insert(extraOccupiedBoxes, { x = uInfo.pairX, y = uInfo.pairY, halfW = 50.0, halfH = 50.0 })
                     end
                 end
             end
@@ -1948,15 +2015,7 @@ RefreshStationMapCanvas = function()
         end
     end
 
-    -- 3b. Render accessible & uncovered machine item ports (2/3 inside machine, 1/3 outside, hidden if external cell occupied)
-    local occupiedBoxes = {}
-    for _, rm in ipairs(RenderedMachines) do
-        table.insert(occupiedBoxes, { x = rm.x, y = rm.y, halfW = rm.halfW, halfH = rm.halfH })
-    end
-    for _, eb in ipairs(extraOccupiedBoxes) do
-        table.insert(occupiedBoxes, eb)
-    end
-
+    -- 3b. Collect ALL machine item ports (2/3 inside machine, 1/3 outside, always displayed even when overlapping belts/objects)
     local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
     local portHalfCm = 32.0
     local portsByKey = {}
@@ -1968,38 +2027,27 @@ RefreshStationMapCanvas = function()
         if not isTransportOnly and Core.IsValidObj(rm.machine) then
             local ports = StationData.GetMachineItemPorts(rm.machine, rm.x, rm.y, rm.yaw, rm.cellsX, rm.cellsY, CurrentFrameXform)
             for _, p in ipairs(ports) do
-                if not p.isConnectedBySim then
-                    local covered = false
-                    for _, ob in ipairs(occupiedBoxes) do
-                        if math.abs(p.adjX - ob.x) <= (ob.halfW - 4.0) and math.abs(p.adjY - ob.y) <= (ob.halfH - 4.0) then
-                            covered = true
-                            break
-                        end
-                    end
-                    if not covered then
-                        local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
-                        local existing = portsByKey[cellKey]
-                        if not existing then
-                            existing = {
-                                x = p.px,
-                                y = p.py,
-                                isInput = p.isInput == true,
-                                isOutput = p.isOutput == true,
-                                machineName = rm.displayName,
-                            }
-                            portsByKey[cellKey] = existing
-                        else
-                            if p.isInput then existing.isInput = true end
-                            if p.isOutput then existing.isOutput = true end
-                        end
-                    end
+                local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
+                local existing = portsByKey[cellKey]
+                if not existing then
+                    existing = {
+                        x = p.px,
+                        y = p.py,
+                        isInput = p.isInput == true,
+                        isOutput = p.isOutput == true,
+                        machineName = rm.displayName,
+                    }
+                    portsByKey[cellKey] = existing
+                else
+                    if p.isInput then existing.isInput = true end
+                    if p.isOutput then existing.isOutput = true end
                 end
             end
         end
     end
     for _, pe in pairs(portsByKey) do
         local pmx, pmy = WorldToBaseCanvas(pe.x, pe.y)
-        RenderUnconnectedItemPort(outer, MapUI.MapCanvas, pmx, pmy, portBadgeBasePx, 22)
+        table.insert(deferredPorts, { pmx = pmx, pmy = pmy })
         table.insert(RenderedPorts, {
             idx = #RenderedPorts + 1,
             x = pe.x,
@@ -2010,6 +2058,35 @@ RefreshStationMapCanvas = function()
             isOutput = pe.isOutput,
             machineName = pe.machineName,
         })
+    end
+
+    -- Stream deferred conveyor tiles and port badges progressively across frames to avoid open-map lag spikes
+    if #deferredConveyors > 0 or #deferredPorts > 0 then
+        local cIdx = 1
+        local pIdx = 1
+        local CONV_PER_FRAME = 24
+        local PORTS_PER_FRAME = 12
+        local function pumpDeferredBatch()
+            if myRenderGen ~= CanvasRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then
+                return
+            end
+            local cEnd = math.min(#deferredConveyors, cIdx + CONV_PER_FRAME - 1)
+            while cIdx <= cEnd do
+                local dc = deferredConveyors[cIdx]
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.MapCanvas, dc.mx, dc.my, dc.pxW, dc.pxH, dc.myaw, "Conveyor", dc.sprite, false, true, 10, false)
+                cIdx = cIdx + 1
+            end
+            local pEnd = math.min(#deferredPorts, pIdx + PORTS_PER_FRAME - 1)
+            while pIdx <= pEnd do
+                local dp = deferredPorts[pIdx]
+                RenderUnconnectedItemPort(outer, MapUI.MapCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22)
+                pIdx = pIdx + 1
+            end
+            if cIdx <= #deferredConveyors or pIdx <= #deferredPorts then
+                ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
+            end
+        end
+        ExecuteInGameThreadAfterFrames(1, pumpDeferredBatch)
     end
 
     -- 4. Render player markers & nametags on this floor (converted into station-local space)
@@ -2800,6 +2877,7 @@ local function SetStationMapCursorMode(pc, win, active)
 end
 
 local function DestroyStationMap()
+    CanvasRenderGen = CanvasRenderGen + 1
     MapWinVisible = false
     MapWinInViewport = false
     InteractionMode = "Select"
