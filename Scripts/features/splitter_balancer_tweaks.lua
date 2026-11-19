@@ -14,7 +14,7 @@ local HEIGHT_SCALE     = 2.0 / 3.0
 local ECC_PAWN         = 2   -- ECollisionChannel::ECC_Pawn (WorldStatic=0, WorldDynamic=1, Pawn=2, Visibility=3)
 local ECR_IGNORE       = 0   -- ECollisionResponse::ECR_Ignore
 local ECR_BLOCK        = 2   -- ECollisionResponse::ECR_Block
-local SCAN_PERIOD_IDLE = 0.85
+local SCAN_PERIOD_IDLE = 8.0
 
 local WALKTHROUGH_ACTOR_CLASSES = {
     "BP_Splitter_C",

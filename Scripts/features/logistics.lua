@@ -133,14 +133,36 @@ local function IsSelectingAnyKeybind()
     return false
 end
 
-local function UpdateAllHudKeyIndicators()
-    local keyStr = tostring(Core.Config.LogisticsKey or DEFAULT_KEY)
+local function GetFormattedKeybind(configKey, defaultKey)
+    local keyStr = tostring(Core.Config[configKey] or defaultKey or "")
     if keyStr == "None" or keyStr == "" then
         keyStr = "-"
     end
+    return keyStr
+end
+
+local function UpdateAllHudKeyIndicators()
     for addr, entry in pairs(HudKeyIndicators) do
-        if Core.IsValidObj(entry.Root) and Core.IsValidObj(entry.KeyText) then
-            pcall(function() entry.KeyText:SetText(Core.MakeText(keyStr)) end)
+        if Core.IsValidObj(entry.Root) then
+            if entry.Items then
+                for _, item in ipairs(entry.Items) do
+                    if Core.IsValidObj(item.Icon) then
+                        local kt = item.KeyText
+                        if not Core.IsValidObj(kt) then
+                            pcall(function()
+                                if Core.IsValidObj(item.Icon.WBP_InputKey) then
+                                    kt = item.Icon.WBP_InputKey.WBP_Text
+                                    item.KeyText = kt
+                                end
+                            end)
+                        end
+                        if Core.IsValidObj(kt) then
+                            local keyStr = GetFormattedKeybind(item.ConfigKey, item.DefaultKey)
+                            pcall(function() kt:SetText(Core.MakeText(keyStr)) end)
+                        end
+                    end
+                end
+            end
         else
             HudKeyIndicators[addr] = nil
         end
@@ -285,10 +307,7 @@ local function CheckAssemblerInventories(m, isRunning, machineStatus, inputs, ou
 end
 
 local function CollectStationLogisticsData(station, walkFrame)
-    local platforms = StationData.GetStationPlatforms(station)
-    if #platforms == 0 and Core.IsValidObj(walkFrame) then
-        platforms = { walkFrame }
-    end
+    local machines = StationData.GetStationMachines(station, walkFrame)
 
     local containerItems = {} -- itemKey -> { Item = uobj, Amount = number }
     local assemblers = {}
@@ -299,132 +318,130 @@ local function CollectStationLogisticsData(station, walkFrame)
 
     local seenMachines = {}
 
-    for _, plat in ipairs(platforms) do
-        local machines = StationData.GetFrameMachines(plat)
-        for _, m in ipairs(machines) do
-            local mAddr = m:GetAddress()
-            if not seenMachines[mAddr] then
-                seenMachines[mAddr] = true
-                local cat = StationData.GetMachineCategory(m)
+    for _, m in ipairs(machines) do
+        local mAddr = m:GetAddress()
+        if not seenMachines[mAddr] then
+            seenMachines[mAddr] = true
+            local cat = StationData.GetMachineCategory(m)
 
-                if cat == "Container" then
-                    local inv = StationData.GetContainerInventory(m)
-                    if Core.IsValidObj(inv) then
-                        local okSlots, slots = pcall(function() return inv:GetItemSlots() end)
-                        if okSlots and slots then
-                            StationData.ForEachArray(slots, function(_, elem)
-                                local st = Core.UnwrapStruct(elem)
-                                if st and Core.IsValidObj(st.Item) then
-                                    local amt = tonumber(st.Amount) or 0
-                                    if amt > 0 then
-                                        local k = GetItemKey(st.Item)
-                                        if not containerItems[k] then
-                                            containerItems[k] = { Item = st.Item, Amount = 0 }
-                                        end
-                                        containerItems[k].Amount = containerItems[k].Amount + amt
+            if cat == "Container" then
+                local inv = StationData.GetContainerInventory(m)
+                if Core.IsValidObj(inv) then
+                    local okSlots, slots = pcall(function() return inv:GetItemSlots() end)
+                    if okSlots and slots then
+                        StationData.ForEachArray(slots, function(_, elem)
+                            local st = Core.UnwrapStruct(elem)
+                            if st and Core.IsValidObj(st.Item) then
+                                local amt = tonumber(st.Amount) or 0
+                                if amt > 0 then
+                                    local k = GetItemKey(st.Item)
+                                    if not containerItems[k] then
+                                        containerItems[k] = { Item = st.Item, Amount = 0 }
                                     end
+                                    containerItems[k].Amount = containerItems[k].Amount + amt
                                 end
-                            end)
-                        end
-                    end
-                elseif cat == "Assembler" then
-                    local rec = nil
-                    pcall(function() rec = m.Recipe end)
-
-                    local bonusMult = 1.0
-                    pcall(function()
-                        local bm = Core.GetFPFloat(m.BonusMultiplier)
-                        if bm > 0.0001 then bonusMult = bm end
-                    end)
-
-                    local isRunning, machineStatus = GetAssemblerRunState(m)
-                    local craftSec = 1.0
-                    local inputs = {}
-                    local outputs = {}
-                    local hasMissingInputs, missingNames, isOutputFull = false, {}, false
-
-                    if Core.IsValidObj(rec) then
-                        local okSec, sec = pcall(function() return rec:GetCraftingSeconds() end)
-                        if okSec and type(sec) == "number" and sec > 0.0001 then
-                            craftSec = sec
-                        end
-
-                        -- Outputs
-                        local okOut, outStack = pcall(function() return rec.Output end)
-                        if okOut and outStack and Core.IsValidObj(outStack.Item) then
-                            local amt = tonumber(outStack.Amount) or 1
-                            local rate = (amt * 60.0 / craftSec) * bonusMult
-                            table.insert(outputs, { Item = outStack.Item, Rate = rate, CraftAmount = amt })
-                        else
-                            local okOuts, outs = pcall(function() return rec:GetOutputs() end)
-                            if okOuts and outs then
-                                StationData.ForEachArray(outs, function(_, elem)
-                                    local st = Core.UnwrapStruct(elem)
-                                    if st and Core.IsValidObj(st.Item) then
-                                        local amt = tonumber(st.Amount) or 1
-                                        local rate = (amt * 60.0 / craftSec) * bonusMult
-                                        table.insert(outputs, { Item = st.Item, Rate = rate, CraftAmount = amt })
-                                    end
-                                end)
                             end
-                        end
+                        end)
+                    end
+                end
+            elseif cat == "Assembler" then
+                local rec = nil
+                pcall(function() rec = m.Recipe end)
 
-                        -- Inputs
-                        local okIn, inArr = pcall(function() return rec.Inputs end)
-                        if okIn and inArr then
-                            StationData.ForEachArray(inArr, function(_, elem)
+                local bonusMult = 1.0
+                pcall(function()
+                    local bm = Core.GetFPFloat(m.BonusMultiplier)
+                    if bm > 0.0001 then bonusMult = bm end
+                end)
+
+                local isRunning, machineStatus = GetAssemblerRunState(m)
+                local craftSec = 1.0
+                local inputs = {}
+                local outputs = {}
+                local hasMissingInputs, missingNames, isOutputFull = false, {}, false
+
+                if Core.IsValidObj(rec) then
+                    local okSec, sec = pcall(function() return rec:GetCraftingSeconds() end)
+                    if okSec and type(sec) == "number" and sec > 0.0001 then
+                        craftSec = sec
+                    end
+
+                    -- Outputs
+                    local okOut, outStack = pcall(function() return rec.Output end)
+                    if okOut and outStack and Core.IsValidObj(outStack.Item) then
+                        local amt = tonumber(outStack.Amount) or 1
+                        local rate = (amt * 60.0 / craftSec) * bonusMult
+                        table.insert(outputs, { Item = outStack.Item, Rate = rate, CraftAmount = amt })
+                    else
+                        local okOuts, outs = pcall(function() return rec:GetOutputs() end)
+                        if okOuts and outs then
+                            StationData.ForEachArray(outs, function(_, elem)
                                 local st = Core.UnwrapStruct(elem)
                                 if st and Core.IsValidObj(st.Item) then
                                     local amt = tonumber(st.Amount) or 1
                                     local rate = (amt * 60.0 / craftSec) * bonusMult
-                                    table.insert(inputs, { Item = st.Item, Rate = rate, CraftAmount = amt })
+                                    table.insert(outputs, { Item = st.Item, Rate = rate, CraftAmount = amt })
                                 end
                             end)
                         end
+                    end
 
-                        hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
-
-                        -- Total Production reflects ONLY actual currently running output;
-                        -- stationProdRates also counts Output Full machines so backed-up producers don't report fake deficits.
-                        for _, outp in ipairs(outputs) do
-                            local k = GetItemKey(outp.Item)
-                            if k then
-                                if isRunning or isOutputFull then
-                                    stationProdRates[k] = (stationProdRates[k] or 0.0) + outp.Rate
-                                end
-                                if isRunning then
-                                    if not stationProdItems[k] then
-                                        stationProdItems[k] = { Item = outp.Item, Rate = 0.0 }
-                                    end
-                                    stationProdItems[k].Rate = stationProdItems[k].Rate + outp.Rate
-                                end
+                    -- Inputs
+                    local okIn, inArr = pcall(function() return rec.Inputs end)
+                    if okIn and inArr then
+                        StationData.ForEachArray(inArr, function(_, elem)
+                            local st = Core.UnwrapStruct(elem)
+                            if st and Core.IsValidObj(st.Item) then
+                                local amt = tonumber(st.Amount) or 1
+                                local rate = (amt * 60.0 / craftSec) * bonusMult
+                                table.insert(inputs, { Item = st.Item, Rate = rate, CraftAmount = amt })
                             end
-                        end
+                        end)
+                    end
 
-                        -- Demand counts running or input-starved machines (not output-full or unpowered)
-                        if isRunning or hasMissingInputs then
-                            for _, inp in ipairs(inputs) do
-                                local k = GetItemKey(inp.Item)
-                                if k then
-                                    stationConsRates[k] = (stationConsRates[k] or 0.0) + inp.Rate
+                    hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
+
+                    -- Total Production reflects ONLY actual currently running output;
+                    -- stationProdRates also counts Output Full machines so backed-up producers don't report fake deficits.
+                    for _, outp in ipairs(outputs) do
+                        local k = GetItemKey(outp.Item)
+                        if k then
+                            if isRunning or isOutputFull then
+                                stationProdRates[k] = (stationProdRates[k] or 0.0) + outp.Rate
+                            end
+                            if isRunning then
+                                if not stationProdItems[k] then
+                                    stationProdItems[k] = { Item = outp.Item, Rate = 0.0 }
                                 end
+                                stationProdItems[k].Rate = stationProdItems[k].Rate + outp.Rate
                             end
                         end
                     end
 
-                    table.insert(assemblers, {
-                        Machine = m,
-                        Name = StationData.GetMachineDisplayName(m),
-                        HasRecipe = Core.IsValidObj(rec),
-                        IsRunning = isRunning,
-                        MachineStatus = machineStatus,
-                        HasMissingInputs = hasMissingInputs,
-                        MissingInputNames = missingNames,
-                        IsOutputFull = isOutputFull,
-                        Inputs = inputs,
-                        Outputs = outputs,
-                    })
+                    -- Demand counts running or input-starved machines (not output-full or unpowered)
+                    if isRunning or hasMissingInputs then
+                        for _, inp in ipairs(inputs) do
+                            local k = GetItemKey(inp.Item)
+                            if k then
+                                stationConsRates[k] = (stationConsRates[k] or 0.0) + inp.Rate
+                            end
+                        end
+                    end
                 end
+
+                table.insert(assemblers, {
+                    Machine = m,
+                    Addr = mAddr,
+                    Name = StationData.GetMachineDisplayName(m),
+                    HasRecipe = Core.IsValidObj(rec),
+                    IsRunning = isRunning,
+                    MachineStatus = machineStatus,
+                    HasMissingInputs = hasMissingInputs,
+                    MissingInputNames = missingNames,
+                    IsOutputFull = isOutputFull,
+                    Inputs = inputs,
+                    Outputs = outputs,
+                })
             end
         end
     end
@@ -737,15 +754,124 @@ local function PopulateTotalProductionSection(ui, prodTotals)
     end
 end
 
+local function BuildMachineRow(ui, entry, info, prodRates, consRates)
+    local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
+    local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
+    local statusBar = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
+    local statusSize = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+    if not (Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(statusBar) and Core.IsValidObj(statusSize)) then
+        return nil
+    end
+
+    pcall(function()
+        rowBorder:SetBrushColor(STATUS_COLORS.RowBg)
+        rowBorder:SetPadding({ Left = 6.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
+        rowBorder:SetToolTipText(Core.MakeText(info.tooltipMsg))
+        statusBar:SetBrushColor(info.statusCol)
+        statusSize:SetWidthOverride(6.0)
+        statusSize:SetHeightOverride(28.0)
+    end)
+    statusSize:AddChild(statusBar)
+
+    local stSlot = rowHBox:AddChildToHorizontalBox(statusSize)
+    if Core.IsValidObj(stSlot) then
+        pcall(function()
+            stSlot:SetVerticalAlignment(2)
+            stSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
+        end)
+    end
+
+    local statusTxt = nil
+    local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+    if Core.IsValidObj(nameTxt) then
+        pcall(function()
+            nameTxt:SetSize(12)
+            nameTxt:SetText(Core.MakeText(entry.Name))
+        end)
+        local nameCol = Core.CreateRawWidget(PATHS.VerticalBoxClass, ui.Outer)
+        statusTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+        if Core.IsValidObj(nameCol) and Core.IsValidObj(statusTxt) then
+            pcall(function()
+                statusTxt:SetSize(9)
+                statusTxt:SetText(Core.MakeText(info.statusLabel or ""))
+                if Core.IsValidObj(statusTxt.TextBlock) then
+                    statusTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = info.statusCol, ColorUseRule = 0 })
+                end
+            end)
+            nameCol:AddChildToVerticalBox(nameTxt)
+            nameCol:AddChildToVerticalBox(statusTxt)
+        end
+        local nBox = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+        pcall(function() nBox:SetWidthOverride(130.0) end)
+        nBox:AddChild(Core.IsValidObj(nameCol) and nameCol or nameTxt)
+        local nSlot = rowHBox:AddChildToHorizontalBox(nBox)
+        if Core.IsValidObj(nSlot) then
+            pcall(function() nSlot:SetVerticalAlignment(2) end)
+        end
+    end
+
+    for _, inp in ipairs(entry.Inputs) do
+        local k = GetItemKey(inp.Item)
+        local pRate = prodRates[k] or 0.0
+        local cRate = consRates[k] or 0.0
+        local chipTint = (cRate > pRate + 0.001) and STATUS_COLORS.Red or nil
+        AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, inp.Item, inp.Rate, chipTint)
+    end
+
+    if #entry.Inputs > 0 and #entry.Outputs > 0 then
+        local arrowTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+        if Core.IsValidObj(arrowTxt) then
+            pcall(function()
+                arrowTxt:SetSize(13)
+                arrowTxt:SetText(Core.MakeText("→"))
+            end)
+            local aSlot = rowHBox:AddChildToHorizontalBox(arrowTxt)
+            if Core.IsValidObj(aSlot) then
+                pcall(function()
+                    aSlot:SetVerticalAlignment(2)
+                    aSlot:SetPadding({ Left = 2.0, Top = 0.0, Right = 10.0, Bottom = 0.0 })
+                end)
+            end
+        end
+    end
+
+    for _, outp in ipairs(entry.Outputs) do
+        AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, outp.Item, outp.Rate, STATUS_COLORS.Green)
+    end
+
+    rowBorder:AddChild(rowHBox)
+    local rSlot = ui.MachListBox:AddChildToVerticalBox(rowBorder)
+    if Core.IsValidObj(rSlot) then
+        pcall(function() rSlot:SetPadding({ Left = 0.0, Top = 2.0, Right = 0.0, Bottom = 2.0 }) end)
+    end
+    return {
+        RowBorder = rowBorder,
+        StatusBar = statusBar,
+        StatusTxt = statusTxt,
+    }
+end
+
 local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
     if not ui or not Core.IsValidObj(ui.Window) or not Core.IsValidObj(ui.MachListBox) then return end
 
     local computed = {}
     local sigParts = {}
+    local structParts = {}
     for idx, entry in ipairs(assemblers) do
         local statusCol, statusLabel, tooltipMsg, rowSig = ComputeAssemblerStatus(entry, prodRates, consRates)
         computed[idx] = { statusCol = statusCol, statusLabel = statusLabel, tooltipMsg = tooltipMsg }
         sigParts[idx] = rowSig
+        local inKeys = {}
+        for _, inp in ipairs(entry.Inputs) do
+            inKeys[#inKeys + 1] = string.format("%s=%.1f", GetItemKey(inp.Item) or "?", inp.Rate or 0.0)
+        end
+        local outKeys = {}
+        for _, outp in ipairs(entry.Outputs) do
+            outKeys[#outKeys + 1] = string.format("%s=%.1f", GetItemKey(outp.Item) or "?", outp.Rate or 0.0)
+        end
+        structParts[idx] = string.format("%s|%s|%s|%s",
+            tostring(entry.Addr or entry.Name), tostring(entry.HasRecipe),
+            table.concat(inKeys, ","), table.concat(outKeys, ","))
     end
     local sig = table.concat(sigParts, "||")
     if ui.LastMachinesSig == sig then return end
@@ -757,6 +883,36 @@ local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
         end)
     end
 
+    -- Fast in-place update when machine list & recipes haven't changed (avoids rebuilding thousands of widgets)
+    local structSig = table.concat(structParts, "||")
+    if ui.LastMachinesStructSig == structSig and ui.MachineRows and #ui.MachineRows == #assemblers and not ui.MachStreamActive then
+        local allOk = true
+        for idx, info in ipairs(computed) do
+            local rw = ui.MachineRows[idx]
+            if rw and Core.IsValidObj(rw.RowBorder) and Core.IsValidObj(rw.StatusBar) then
+                pcall(function()
+                    rw.RowBorder:SetToolTipText(Core.MakeText(info.tooltipMsg))
+                    rw.StatusBar:SetBrushColor(info.statusCol)
+                    if Core.IsValidObj(rw.StatusTxt) then
+                        rw.StatusTxt:SetText(Core.MakeText(info.statusLabel or ""))
+                        if Core.IsValidObj(rw.StatusTxt.TextBlock) then
+                            rw.StatusTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = info.statusCol, ColorUseRule = 0 })
+                        end
+                    end
+                end)
+            else
+                allOk = false
+                break
+            end
+        end
+        if allOk then return end
+    end
+
+    ui.LastMachinesStructSig = structSig
+    ui.MachStreamGen = (ui.MachStreamGen or 0) + 1
+    local myGen = ui.MachStreamGen
+    ui.MachineRows = {}
+
     local savedOffset = 0.0
     if Core.IsValidObj(ui.MachScroll) and ui.MachScroll.GetScrollOffset then
         pcall(function() savedOffset = tonumber(ui.MachScroll:GetScrollOffset()) or 0.0 end)
@@ -766,100 +922,43 @@ local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
         if ui.MachListBox.ClearChildren then ui.MachListBox:ClearChildren() end
     end)
 
-    for idx, entry in ipairs(assemblers) do
-        local info = computed[idx]
-        local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
-        local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
-        local statusBar = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
-        local statusSize = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+    local total = #assemblers
+    if total == 0 then
+        ui.MachStreamActive = false
+        return
+    end
 
-        if Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(statusBar) and Core.IsValidObj(statusSize) then
-            pcall(function()
-                rowBorder:SetBrushColor(STATUS_COLORS.RowBg)
-                rowBorder:SetPadding({ Left = 6.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
-                rowBorder:SetToolTipText(Core.MakeText(info.tooltipMsg))
-                statusBar:SetBrushColor(info.statusCol)
-                statusSize:SetWidthOverride(6.0)
-                statusSize:SetHeightOverride(28.0)
-            end)
-            statusSize:AddChild(statusBar)
-
-            local stSlot = rowHBox:AddChildToHorizontalBox(statusSize)
-            if Core.IsValidObj(stSlot) then
-                pcall(function()
-                    stSlot:SetVerticalAlignment(2)
-                    stSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
-                end)
+    -- Stream machine rows in time-budgeted batches so opening Logistics never freezes the game thread
+    ui.MachStreamActive = true
+    local nextIdx = 1
+    local function StreamBatch()
+        if ActiveLogisticsUI ~= ui or ui.MachStreamGen ~= myGen or not Core.IsValidObj(ui.Window) or not Core.IsValidObj(ui.MachListBox) then
+            return
+        end
+        local tStart = os.clock()
+        local builtThisFrame = 0
+        while nextIdx <= total do
+            local entry = assemblers[nextIdx]
+            local info = computed[nextIdx]
+            ui.MachineRows[nextIdx] = BuildMachineRow(ui, entry, info, prodRates, consRates)
+            nextIdx = nextIdx + 1
+            builtThisFrame = builtThisFrame + 1
+            if builtThisFrame >= 6 and (os.clock() - tStart) >= 0.005 then
+                break
             end
+        end
 
-            local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
-            if Core.IsValidObj(nameTxt) then
-                pcall(function()
-                    nameTxt:SetSize(12)
-                    nameTxt:SetText(Core.MakeText(entry.Name))
-                end)
-                local nameCol = Core.CreateRawWidget(PATHS.VerticalBoxClass, ui.Outer)
-                local statusTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
-                if Core.IsValidObj(nameCol) and Core.IsValidObj(statusTxt) then
-                    pcall(function()
-                        statusTxt:SetSize(9)
-                        statusTxt:SetText(Core.MakeText(info.statusLabel or ""))
-                        if Core.IsValidObj(statusTxt.TextBlock) then
-                            statusTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = info.statusCol, ColorUseRule = 0 })
-                        end
-                    end)
-                    nameCol:AddChildToVerticalBox(nameTxt)
-                    nameCol:AddChildToVerticalBox(statusTxt)
-                end
-                local nBox = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
-                pcall(function() nBox:SetWidthOverride(130.0) end)
-                nBox:AddChild(Core.IsValidObj(nameCol) and nameCol or nameTxt)
-                local nSlot = rowHBox:AddChildToHorizontalBox(nBox)
-                if Core.IsValidObj(nSlot) then
-                    pcall(function() nSlot:SetVerticalAlignment(2) end)
-                end
-            end
-
-            for _, inp in ipairs(entry.Inputs) do
-                local k = GetItemKey(inp.Item)
-                local pRate = prodRates[k] or 0.0
-                local cRate = consRates[k] or 0.0
-                local chipTint = (cRate > pRate + 0.001) and STATUS_COLORS.Red or nil
-                AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, inp.Item, inp.Rate, chipTint)
-            end
-
-            if #entry.Inputs > 0 and #entry.Outputs > 0 then
-                local arrowTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
-                if Core.IsValidObj(arrowTxt) then
-                    pcall(function()
-                        arrowTxt:SetSize(13)
-                        arrowTxt:SetText(Core.MakeText("→"))
-                    end)
-                    local aSlot = rowHBox:AddChildToHorizontalBox(arrowTxt)
-                    if Core.IsValidObj(aSlot) then
-                        pcall(function()
-                            aSlot:SetVerticalAlignment(2)
-                            aSlot:SetPadding({ Left = 2.0, Top = 0.0, Right = 10.0, Bottom = 0.0 })
-                        end)
-                    end
-                end
-            end
-
-            for _, outp in ipairs(entry.Outputs) do
-                AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, outp.Item, outp.Rate, STATUS_COLORS.Green)
-            end
-
-            rowBorder:AddChild(rowHBox)
-            local rSlot = ui.MachListBox:AddChildToVerticalBox(rowBorder)
-            if Core.IsValidObj(rSlot) then
-                pcall(function() rSlot:SetPadding({ Left = 0.0, Top = 2.0, Right = 0.0, Bottom = 2.0 }) end)
+        if nextIdx <= total then
+            ExecuteInGameThreadAfterFrames(1, StreamBatch)
+        else
+            ui.MachStreamActive = false
+            if Core.IsValidObj(ui.MachScroll) and ui.MachScroll.SetScrollOffset and savedOffset > 0.0 then
+                pcall(function() ui.MachScroll:SetScrollOffset(savedOffset) end)
             end
         end
     end
 
-    if Core.IsValidObj(ui.MachScroll) and ui.MachScroll.SetScrollOffset and savedOffset > 0.0 then
-        pcall(function() ui.MachScroll:SetScrollOffset(savedOffset) end)
-    end
+    StreamBatch()
 end
 
 local function RefreshLogisticsUI(ui)
@@ -897,11 +996,13 @@ local function StartLogisticsLivePoll(win, ui)
             return
         end
 
-        pcall(RefreshLogisticsUI, ui)
-        ExecuteInGameThreadWithDelay(500, PollTick)
+        if not ui.MachStreamActive then
+            pcall(RefreshLogisticsUI, ui)
+        end
+        ExecuteInGameThreadWithDelay(1500, PollTick)
     end
 
-    ExecuteInGameThreadWithDelay(500, PollTick)
+    ExecuteInGameThreadWithDelay(1500, PollTick)
 end
 
 local function OpenLogisticsWindow()
@@ -1227,6 +1328,88 @@ local function EnsureSettingsKeybindRow(menu)
     Core.Log("Injected Logistics keybind row into WBP_SettingsMenu_C")
 end
 
+local CachedHudIconTextures = {}
+
+local function FindHudIconTexture(kind, hud)
+    if Core.IsValidObj(CachedHudIconTextures[kind]) then
+        return CachedHudIconTextures[kind]
+    end
+
+    local pathsByKind = {
+        Logistics = {
+            "/Game/Materials/UI_Textures/T_MatSciIcon.T_MatSciIcon",
+            "/Game/Materials/Icons/T_MatSciIcon.T_MatSciIcon",
+            "/Game/Textures/Icons/T_MatSciIcon.T_MatSciIcon",
+            "/Game/Textures/T_MatSciIcon.T_MatSciIcon",
+        },
+        Power = {
+            "/Game/Materials/UI_Textures/T_PowerIcon.T_PowerIcon",
+            "/Game/Materials/Icons/T_PowerIcon.T_PowerIcon",
+            "/Game/Textures/Icons/T_PowerIcon.T_PowerIcon",
+            "/Game/Materials/UI_Textures/T_ElectricityIcon.T_ElectricityIcon",
+            "/Game/Materials/Icons/T_ElectricityIcon.T_ElectricityIcon",
+            "/Game/Materials/UI_Textures/T_EnergyIcon.T_EnergyIcon",
+            "/Game/Materials/Icons/T_EnergyIcon.T_EnergyIcon",
+        },
+        StationMap = {
+            "/Game/Materials/UI_Textures/T_StationMapIcon.T_StationMapIcon",
+            "/Game/Materials/UI_Textures/T_StationIcon.T_StationIcon",
+            "/Game/Materials/Icons/T_StationIcon.T_StationIcon",
+            "/Game/Materials/UI_Textures/T_MapIcon.T_MapIcon",
+            "/Game/Materials/Icons/T_MapIcon.T_MapIcon",
+        },
+    }
+
+    local tex = nil
+    for _, tPath in ipairs(pathsByKind[kind] or {}) do
+        local candidate = Core.FindOrLoadClass(tPath)
+        if Core.IsValidObj(candidate) then
+            tex = candidate
+            break
+        end
+    end
+
+    -- One-time scan of already-loaded Texture2Ds for power/station icons if direct paths missed
+    if not Core.IsValidObj(tex) and (kind == "Power" or kind == "StationMap") then
+        local okAll, allTex = pcall(FindAllOf, "Texture2D")
+        if okAll and allTex then
+            local patterns = (kind == "Power")
+                and { "powericon", "electric", "lightning", "energyicon", "bolt", "t_power" }
+                or { "stationicon", "mapicon", "radar", "blueprint", "gridicon" }
+            for _, t in ipairs(allTex) do
+                if Core.IsValidObj(t) then
+                    local okN, tn = pcall(function() return t:GetFName():ToString():lower() end)
+                    if okN and tn and tn:find("icon", 1, true) then
+                        for _, pat in ipairs(patterns) do
+                            if tn:find(pat, 1, true) then
+                                tex = t
+                                break
+                            end
+                        end
+                    end
+                end
+                if Core.IsValidObj(tex) then break end
+            end
+        end
+    end
+
+    -- Reliable fallbacks from existing HUD input icons
+    if not Core.IsValidObj(tex) and Core.IsValidObj(hud) then
+        if kind == "StationMap" and Core.IsValidObj(hud.MapInput) then
+            pcall(function() tex = hud.MapInput.Icon end)
+        elseif kind == "Power" and Core.IsValidObj(hud.BuildingInput) then
+            pcall(function() tex = hud.BuildingInput.Icon end)
+        elseif Core.IsValidObj(hud.ResearchInput) then
+            pcall(function() tex = hud.ResearchInput.Icon end)
+        end
+    end
+
+    if Core.IsValidObj(tex) then
+        CachedHudIconTextures[kind] = tex
+    end
+    return tex
+end
+
 local function EnsureHudKeybindIndicator(hud)
     if not Core.IsValidObj(hud) then return end
     local addr = hud:GetAddress()
@@ -1239,71 +1422,136 @@ local function EnsureHudKeybindIndicator(hud)
 
     local okPC, owningPC = pcall(function() return hud:GetOwningPlayer() end)
     local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
+    local outer = Core.GetWidgetOuter(hud)
+
+    -- Inspect Tab (InventoryInput) or B (BuildingInput) slot so spacing & shift match the top row exactly
+    local refWidget = nil
+    for _, prop in ipairs({ "InventoryInput", "BuildingInput", "DisassembleInput", "MapInput" }) do
+        local okW, w = pcall(function() return hud[prop] end)
+        if okW and Core.IsValidObj(w) and Core.IsValidObj(w.Slot) then
+            refWidget = w
+            break
+        end
+    end
+    local refSlot = Core.IsValidObj(refWidget) and refWidget.Slot or nil
+
+    local padL, padR, padT, padB = 4.0, 4.0, 0.0, 0.0
+    local nudgeX, nudgeY = 0.0, 0.0
+    local refVAlign = 2
+    if Core.IsValidObj(refSlot) then
+        pcall(function()
+            local p = refSlot.Padding
+            if p then
+                padL = tonumber(p.Left) or padL
+                padR = tonumber(p.Right) or padR
+                padT = tonumber(p.Top) or padT
+                padB = tonumber(p.Bottom) or padB
+            end
+            if refSlot.Nudge then
+                nudgeX = tonumber(refSlot.Nudge.X) or 0.0
+                nudgeY = tonumber(refSlot.Nudge.Y) or 0.0
+            end
+            if type(refSlot.VerticalAlignment) == "number" then
+                refVAlign = refSlot.VerticalAlignment
+            end
+        end)
+    end
+    if nudgeX == 0.0 and Core.IsValidObj(refWidget) then
+        pcall(function()
+            local rt = refWidget.RenderTransform
+            if rt and rt.Translation then
+                nudgeX = tonumber(rt.Translation.X) or 0.0
+            end
+        end)
+    end
+    -- On WBP_CharacterHUD_C, Row 0 (Tab, B, X) sits ~22px right of Row 1 columns (T, G, K);
+    -- shift our right-anchored host by the same amount when GridSlot.Nudge isn't explicitly set.
+    if math.abs(nudgeX) < 0.5 then
+        nudgeX = 22.0
+    end
+
+    -- Host inside a zero-width CanvasPanel in Row 0, Col 1 so our 3 icons extend cleanly to the left
+    -- of Tab without widening Col 0 / Col 1 or disturbing the bottom row (Y, M, T, G, K).
+    local hostCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
+    local iconsHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+    if not (Core.IsValidObj(hostCanvas) and Core.IsValidObj(iconsHBox)) then return end
+
+    local cSlot = hostCanvas:AddChildToCanvas(iconsHBox)
+    if Core.IsValidObj(cSlot) then
+        pcall(function()
+            cSlot:SetAnchors({ Minimum = { X = 1.0, Y = 0.5 }, Maximum = { X = 1.0, Y = 0.5 } })
+            cSlot:SetAlignment({ X = 1.0, Y = 0.5 })
+            cSlot:SetAutoSize(true)
+            cSlot:SetPosition({ X = nudgeX, Y = nudgeY })
+        end)
+    end
 
     local inputIconCls = "/Game/Blueprints/Widgets/HUDs/WBP_InputIcon.WBP_InputIcon_C"
-    local iconW = Core.CreateUserWidget(inputIconCls, hud, pc)
-    if not Core.IsValidObj(iconW) then return end
+    local defs = {
+        { Kind = "Power",      ConfigKey = "PowerOverviewKey", DefaultKey = "P" },
+        { Kind = "StationMap", ConfigKey = "StationMapKey",    DefaultKey = "N" },
+        { Kind = "Logistics",  ConfigKey = "LogisticsKey",     DefaultKey = DEFAULT_KEY },
+    }
 
-    local keyStr = tostring(Core.Config.LogisticsKey or DEFAULT_KEY)
-    if keyStr == "None" or keyStr == "" then keyStr = "-" end
+    local createdItems = {}
+    for _, def in ipairs(defs) do
+        local iconW = Core.CreateUserWidget(inputIconCls, hud, pc)
+        if Core.IsValidObj(iconW) then
+            local itemEntry = {
+                Kind = def.Kind,
+                ConfigKey = def.ConfigKey,
+                DefaultKey = def.DefaultKey,
+                Icon = iconW,
+                IconAddr = iconW:GetAddress(),
+                KeyText = nil,
+            }
 
-    local keyTxt = nil
-    local function ApplyMatSciIcon()
-        local tex = nil
-        for _, tPath in ipairs({
-            "/Game/Materials/UI_Textures/T_MatSciIcon.T_MatSciIcon",
-            "/Game/Materials/Icons/T_MatSciIcon.T_MatSciIcon",
-            "/Game/Textures/Icons/T_MatSciIcon.T_MatSciIcon",
-            "/Game/Textures/T_MatSciIcon.T_MatSciIcon",
-        }) do
-            local candidate = Core.FindOrLoadClass(tPath)
-            if Core.IsValidObj(candidate) then
-                tex = candidate
-                break
+            local function ApplyVisuals()
+                local tex = FindHudIconTexture(def.Kind, hud)
+                local keyStr = GetFormattedKeybind(def.ConfigKey, def.DefaultKey)
+                pcall(function()
+                    if Core.IsValidObj(tex) then
+                        iconW.Icon = tex
+                        if Core.IsValidObj(iconW.Image_82) then
+                            iconW.Image_82:SetBrushFromTexture(tex, false)
+                        end
+                    end
+                    if Core.IsValidObj(iconW.WBP_InputKey) and Core.IsValidObj(iconW.WBP_InputKey.WBP_Text) then
+                        itemEntry.KeyText = iconW.WBP_InputKey.WBP_Text
+                        itemEntry.KeyText:SetText(Core.MakeText(keyStr))
+                    end
+                    iconW:SetVisibility(0)
+                end)
             end
+
+            ApplyVisuals()
+            ExecuteInGameThreadAfterFrames(1, function()
+                if Core.IsValidObj(iconW) then ApplyVisuals() end
+            end)
+
+            local hSlot = iconsHBox:AddChildToHorizontalBox(iconW)
+            if Core.IsValidObj(hSlot) then
+                pcall(function()
+                    hSlot:SetPadding({ Left = padL, Top = padT, Right = padR, Bottom = padB })
+                    hSlot:SetVerticalAlignment(refVAlign)
+                end)
+            end
+            createdItems[#createdItems + 1] = itemEntry
         end
-        if not Core.IsValidObj(tex) and Core.IsValidObj(hud.ResearchInput) then
-            pcall(function() tex = hud.ResearchInput.Icon end)
-        end
+    end
+
+    if #createdItems == 0 then return end
+
+    local gSlot = container:AddChildToGrid(hostCanvas, 0, 1)
+    if Core.IsValidObj(gSlot) then
         pcall(function()
-            if Core.IsValidObj(tex) then
-                iconW.Icon = tex
-                if Core.IsValidObj(iconW.Image_82) then
-                    iconW.Image_82:SetBrushFromTexture(tex, false)
-                end
-            end
-            if Core.IsValidObj(iconW.WBP_InputKey) and Core.IsValidObj(iconW.WBP_InputKey.WBP_Text) then
-                keyTxt = iconW.WBP_InputKey.WBP_Text
-                keyTxt:SetText(Core.MakeText(keyStr))
-            end
-            iconW:SetVisibility(0)
+            gSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            gSlot:SetHorizontalAlignment(3) -- Right
+            gSlot:SetVerticalAlignment(0)   -- Fill
         end)
     end
 
-    ApplyMatSciIcon()
-    ExecuteInGameThreadAfterFrames(1, function()
-        if Core.IsValidObj(iconW) then ApplyMatSciIcon() end
-    end)
-
-    -- Place in Row 0, Column 1 (left of Tab, B, X on top row) with matching GridSlot padding
-    local targetRow, targetCol = 0, 1
-    local refSlot = nil
-    if Core.IsValidObj(hud.BuildingInput) and Core.IsValidObj(hud.BuildingInput.Slot) then
-        refSlot = hud.BuildingInput.Slot
-    elseif Core.IsValidObj(hud.MapInput) and Core.IsValidObj(hud.MapInput.Slot) then
-        refSlot = hud.MapInput.Slot
-    end
-
-    local gSlot = container:AddChildToGrid(iconW, targetRow, targetCol)
-    if Core.IsValidObj(gSlot) and Core.IsValidObj(refSlot) then
-        pcall(function()
-            gSlot:SetPadding(refSlot.Padding)
-            gSlot:SetHorizontalAlignment(refSlot.HorizontalAlignment)
-            gSlot:SetVerticalAlignment(refSlot.VerticalAlignment)
-        end)
-    end
-
-    HudKeyIndicators[addr] = { Root = iconW, IconAddr = iconW:GetAddress(), KeyText = keyTxt }
+    HudKeyIndicators[addr] = { Root = hostCanvas, Items = createdItems }
 end
 
 local HudIndicatorPollActive = false
@@ -1330,19 +1578,30 @@ local function StartHudIndicatorPoll()
             if Core.IsValidObj(entry.Root) then
                 anyValid = true
                 pcall(function() entry.Root:SetVisibility(targetVis) end)
+                if showIndicator and entry.Items then
+                    for _, item in ipairs(entry.Items) do
+                        if Core.IsValidObj(item.KeyText) then
+                            local keyStr = GetFormattedKeybind(item.ConfigKey, item.DefaultKey)
+                            if item.LastKeyStr ~= keyStr then
+                                item.LastKeyStr = keyStr
+                                pcall(function() item.KeyText:SetText(Core.MakeText(keyStr)) end)
+                            end
+                        end
+                    end
+                end
             else
                 HudKeyIndicators[addr] = nil
             end
         end
 
         if anyValid then
-            ExecuteInGameThreadWithDelay(250, Tick)
+            ExecuteInGameThreadWithDelay(500, Tick)
         else
             HudIndicatorPollActive = false
         end
     end
 
-    ExecuteInGameThreadWithDelay(250, Tick)
+    ExecuteInGameThreadWithDelay(500, Tick)
 end
 
 --------------------------------------------------------------------------------
@@ -1448,16 +1707,24 @@ function Feature.RegisterHooks()
             if not Core.IsValidObj(iconW) then return end
             local iconAddr = iconW:GetAddress()
             for _, entry in pairs(HudKeyIndicators) do
-                if entry.IconAddr == iconAddr then
-                    pcall(function()
-                        iconW:SetVisibility(0)
-                        if Core.IsValidObj(entry.KeyText) then
-                            local keyStr = tostring(Core.Config.LogisticsKey or DEFAULT_KEY)
-                            if keyStr == "None" or keyStr == "" then keyStr = "-" end
-                            entry.KeyText:SetText(Core.MakeText(keyStr))
+                if entry.Items then
+                    for _, item in ipairs(entry.Items) do
+                        if item.IconAddr == iconAddr then
+                            pcall(function()
+                                iconW:SetVisibility(0)
+                                local kt = item.KeyText
+                                if not Core.IsValidObj(kt) and Core.IsValidObj(iconW.WBP_InputKey) then
+                                    kt = iconW.WBP_InputKey.WBP_Text
+                                    item.KeyText = kt
+                                end
+                                if Core.IsValidObj(kt) then
+                                    local keyStr = GetFormattedKeybind(item.ConfigKey, item.DefaultKey)
+                                    kt:SetText(Core.MakeText(keyStr))
+                                end
+                            end)
+                            return
                         end
-                    end)
-                    break
+                    end
                 end
             end
         end

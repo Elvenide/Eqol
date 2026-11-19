@@ -1603,6 +1603,59 @@ function StationData.GetFrameMachines(frame)
     return out
 end
 
+local CachedStationMachines = { key = nil, time = 0, list = {} }
+
+function StationData.GetStationMachines(station, fallbackFrame)
+    local refObj = Core.IsValidObj(station) and station or fallbackFrame
+    if not Core.IsValidObj(refObj) then return {} end
+
+    local now = os.clock()
+    local cacheKey = tostring(refObj:GetAddress())
+    if CachedStationMachines.key == cacheKey and (now - CachedStationMachines.time) < 1.5 then
+        local validList = {}
+        for _, m in ipairs(CachedStationMachines.list) do
+            if Core.IsValidObj(m) then
+                validList[#validList + 1] = m
+            end
+        end
+        return validList
+    end
+
+    local out = {}
+    local seen = {}
+    if Core.IsValidObj(station) then
+        CollectMachinesFromContainer(station, out, seen)
+    end
+    if Core.IsValidObj(fallbackFrame) and (not Core.IsValidObj(station) or fallbackFrame:GetAddress() ~= station:GetAddress()) then
+        CollectMachinesFromContainer(fallbackFrame, out, seen)
+    end
+
+    -- Fallback: single FindAllOf("MachineObject") scan if direct container collection returned nothing
+    if #out == 0 then
+        local targetAddrs = {}
+        if Core.IsValidObj(station) then targetAddrs[station:GetAddress()] = true end
+        if Core.IsValidObj(fallbackFrame) then targetAddrs[fallbackFrame:GetAddress()] = true end
+        local okAll, allMachines = pcall(FindAllOf, "MachineObject")
+        if okAll and allMachines then
+            for _, m in ipairs(allMachines) do
+                if Core.IsValidObj(m) and m.GetFrame then
+                    local okF, mf = pcall(function() return m:GetFrame() end)
+                    if okF and Core.IsValidObj(mf) and targetAddrs[mf:GetAddress()] then
+                        local addr = m:GetAddress()
+                        if not seen[addr] then
+                            seen[addr] = true
+                            out[#out + 1] = m
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    CachedStationMachines = { key = cacheKey, time = now, list = out }
+    return out
+end
+
 function StationData.GetItemIconTexture(item)
     if not Core.IsValidObj(item) then return nil end
     for _, prop in ipairs({ "Icon", "Texture", "IconTexture" }) do
@@ -2949,11 +3002,13 @@ end
 
 function StationData.InvalidateMachineCache()
     CachedMachinesByFrame = {}
+    CachedStationMachines = { key = nil, time = 0, list = {} }
 end
 
 function StationData.InvalidateCaches()
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
+    CachedStationMachines = { key = nil, time = 0, list = {} }
     CachedFloorMap = nil
     CachedFootprintsByClass = {}
     CachedBlockBoundsByCls = {}

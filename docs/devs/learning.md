@@ -154,6 +154,10 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
   - Place `GhostPreviewCanvas` inside `bgPanZoom` (base-canvas space). Build the ghost widgets **once** per clipboard/rotation signature, and on mouse move update only `GhostPreviewSlot:SetPosition({ X = bx, Y = by })` — 0 widget allocations per frame even for 200+ ghosts.
 - **Viewport-Driven Lazy Streaming (Never Unload)**:
   - Start zoomed in around the player's position and only construct widgets for walls/machines that intersect the padded visible viewport (`~35%` / 6-cell margin), streaming within an `8–10ms/frame` budget. Once created, keep them permanently on the canvas so panning has zero pop-out or visual flicker.
+- **Never Call `GetFrameMachines()` in a Loop Over `GetStationPlatforms()`**:
+  - `StationData.GetStationPlatforms(station)` includes non-machine hull/room/module subobjects. Calling `GetFrameMachines(plat)` on each one triggers `FindAllOf("MachineObject")` for every subobject with 0 machines, causing a permanent freeze on large stations. Use `StationData.GetStationMachines(station, walkFrame)` instead (reads `station.Subobjects` directly in one O(N) pass, with at most a single `FindAllOf` fallback).
+- **Avoid Frequent Background `FindAllOf` Polls**:
+  - Running `FindAllOf` across many classes every `0.85s–1.5s` causes visible periodic frame drops. Prefer `NotifyOnNewObject` + O(1) property reads (`pc.Builder`, cached widget refs) and keep safety-net scans infrequent (`>= 8.0s`).
 
 ---
 
@@ -161,6 +165,11 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
 
 - **Custom Cursor Hotspot**:
   - *Main Sequence*'s custom white arrow cursor has its platform/Slate mouse coordinate (`AbsoluteToLocal(geom, GetMousePositionOnPlatform())`) aligned near the **bottom-left** of the cursor graphic. Shifting `ly = ly - 15.0` (with `0px` X offset) aligns hover tooltips, clicks, and box-select with the exact **top-left tip**.
+- **Single-Frame Mouse Scroll Polling**:
+  - `pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") })` is only true for a **single game frame**. Polling it with `ExecuteInGameThreadWithDelay(16, ...)` skips frames and feels insensitive. Always poll scroll input with `ExecuteInGameThreadAfterFrames(1, ...)` and also check `pc:GetInputAnalogKeyState({ KeyName = FName("MouseWheelAxis") })`.
+  - Any active builder on `pc.Builder` (`ConveyorBuilder`, `MachineBuilder`, `UndergroundBeltBuilder`, etc.) exposing `:AddRotation(delta)` can be rotated in O(1) without `FindAllOf`.
+- **HUD Top-Right Input Icons (`WBP_CharacterHUD_C.HUDInputContainer`)**:
+  - Row 0 (`Tab`, `B`, `X`) is shifted ~`22px` right relative to Row 1 (`Y`, `M`, `T`, `G`, `K`). Hosting custom station indicators (`Power`, `Station Map`, `Logistics`) inside a zero-width `CanvasPanel` in `(Row=0, Col=1)` with a right-anchored `HorizontalBox` (`Alignment = {1.0, 0.5}`, `AutoSize = true`, `Position.X = nudgeX`) aligns them evenly to the left of `Tab` without stretching GridPanel columns or shifting Row 1.
 - **In-Place HUD Version Text**:
   - The bottom-right version string (e.g. `0.1.0.109s`) is a standard `UTextBlock` discoverable via `FindAllOf("TextBlock")` matching `^[vV]?%d+%.%d+%.%d+`.
   - Editing it in-place with `tb:SetText(...)` and `tb.Slot:SetAutoSize(true)` preserves the exact vanilla font, size, color, and styling.

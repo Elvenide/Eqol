@@ -1,58 +1,41 @@
--- Eqol Feature: Scroll-to-Rotate Conveyor Belts
--- Allows rotating conveyor belts with the mouse scroll wheel in addition to R.
+-- Eqol Feature: Scroll-to-Rotate Station Machines
+-- Allows rotating any machine/conveyor builder on a station with the mouse scroll wheel in addition to R.
 
 local Core = require("core")
+local StationData = require("station_data")
 
 local Feature = {
     Name = "ConveyorScrollRotate",
 }
 
 local PollActive = false
-local ConveyorBuilderCls = nil
+local CachedStationCheck = { time = -999, inStation = false }
 
-local CachedBuilder = { time = -999, obj = nil }
-
-local function GetActiveConveyorBuilder(pc)
-    if not Core.IsValidObj(pc) then return nil end
-
-    if not Core.IsValidObj(ConveyorBuilderCls) then
-        ConveyorBuilderCls = Core.FindOrLoadClass("/Script/MainSequence.ConveyorBuilder")
+local function IsInStationCached(pc)
+    local now = os.clock()
+    if (now - CachedStationCheck.time) < 0.5 then
+        return CachedStationCheck.inStation
     end
-    if not Core.IsValidObj(ConveyorBuilderCls) then return nil end
+    CachedStationCheck.time = now
+    local inSt = StationData.IsPlayerInStation(pc)
+    CachedStationCheck.inStation = (inSt == true)
+    return CachedStationCheck.inStation
+end
+
+local function GetActiveStationBuilder(pc)
+    if not Core.IsValidObj(pc) then return nil end
 
     for _, prop in ipairs({ "ActiveBuilder", "CurrentBuilder", "Builder" }) do
         local ok, b = pcall(function() return pc[prop] end)
-        if ok and Core.IsValidObj(b) and b:IsA(ConveyorBuilderCls) then
-            return b
-        end
-    end
-
-    if Core.IsValidObj(CachedBuilder.obj) then
-        local okPrev, prev = pcall(function() return CachedBuilder.obj.bIsPreviewing or CachedBuilder.obj.bActive end)
-        if not okPrev or prev ~= false then
-            return CachedBuilder.obj
-        end
-    end
-
-    local now = os.clock()
-    if (now - CachedBuilder.time) < 1.5 then
-        return nil
-    end
-    CachedBuilder.time = now
-
-    local okAll, list = pcall(FindAllOf, "ConveyorBuilder")
-    if okAll and list then
-        for _, b in ipairs(list) do
-            if Core.IsValidObj(b) then
-                local okPrev, prev = pcall(function() return b.bIsPreviewing or b.bActive end)
-                if not okPrev or prev ~= false then
-                    CachedBuilder.obj = b
-                    return b
-                end
+        if ok and Core.IsValidObj(b) then
+            local hasAddRot = false
+            pcall(function() hasAddRot = (b.AddRotation ~= nil) end)
+            if hasAddRot then
+                return b
             end
         end
     end
-    CachedBuilder.obj = nil
+
     return nil
 end
 
@@ -60,27 +43,42 @@ local function StartScrollRotatePoll()
     if PollActive then return end
     PollActive = true
 
+    local kScrollUp = { KeyName = FName("MouseScrollUp") }
+    local kScrollDown = { KeyName = FName("MouseScrollDown") }
+    local kWheelAxis = { KeyName = FName("MouseWheelAxis") }
+
     local function Tick()
         local pc = Core.GetLocalPlayerController()
         if Core.IsValidObj(pc) and not pc.bShowMouseCursor then
-            local builder = GetActiveConveyorBuilder(pc)
-            if Core.IsValidObj(builder) then
-                local up, down = false, false
+            local builder = GetActiveStationBuilder(pc)
+            if Core.IsValidObj(builder) and IsInStationCached(pc) then
+                local delta = 0
                 pcall(function()
-                    up = pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") })
-                    down = pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollDown") })
+                    if pc:WasInputKeyJustPressed(kScrollUp) then
+                        delta = 1
+                    elseif pc:WasInputKeyJustPressed(kScrollDown) then
+                        delta = -1
+                    else
+                        local axis = pc:GetInputAnalogKeyState(kWheelAxis)
+                        if type(axis) == "number" then
+                            if axis > 0.01 then
+                                delta = 1
+                            elseif axis < -0.01 then
+                                delta = -1
+                            end
+                        end
+                    end
                 end)
-                if up then
-                    pcall(function() builder:AddRotation(1) end)
-                elseif down then
-                    pcall(function() builder:AddRotation(-1) end)
+                if delta ~= 0 then
+                    pcall(function() builder:AddRotation(delta) end)
                 end
             end
         end
-        ExecuteInGameThreadWithDelay(16, Tick)
+        -- Run every game frame so single-frame scroll events are never missed
+        ExecuteInGameThreadAfterFrames(1, Tick)
     end
 
-    ExecuteInGameThreadWithDelay(16, Tick)
+    ExecuteInGameThreadAfterFrames(1, Tick)
 end
 
 function Feature.Init()

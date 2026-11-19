@@ -4,6 +4,7 @@
 -- 2. Summary header progress bars (Production, Consumption, and Power Satisfaction) in WBP_PowerOverview.
 
 local Core = require("core")
+local StationData = require("station_data")
 
 local Feature = {
     Name = "PowerOverview",
@@ -252,13 +253,16 @@ local function TogglePowerOverview()
         return
     end
 
-    local isPiloting = Core.IsValidObj(playerObj.PilotedShip)
+    -- Prevent opening Power Management while on a ship (only supported on stations)
+    local inStation = StationData.IsPlayerInStation(pc)
+    if not inStation then
+        Core.Log("TogglePowerOverview: blocked (player is not on a station)")
+        return
+    end
+
     if not pc.CharacterInputEnabled then
-        -- Allow hotkey while piloting a spaceship unless cursor UI has focus
-        if not isPiloting or pc.bShowMouseCursor then
-            Core.Log("TogglePowerOverview: blocked (CharacterInputEnabled=false)")
-            return
-        end
+        Core.Log("TogglePowerOverview: blocked (CharacterInputEnabled=false)")
+        return
     end
 
     local frame, powerGrid = ResolvePlayerFrameAndGrid(playerObj)

@@ -17,13 +17,29 @@ local PATHS = {
 local KnownOnlinePlayers = {} -- playerKey -> { Name = string, IsOnline = bool }
 local InitializedSnapshot = false
 local PollActive = false
+local CachedAlertWidget = nil
 
 local function PushBuiltInAlert(messageStr)
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return false end
 
-    local okAlerts, alertWidgets = pcall(FindAllOf, "WBP_PlayerAlerts_C")
-    if not okAlerts or not alertWidgets or #alertWidgets == 0 then
+    local alertWidgets = nil
+    if Core.IsValidObj(CachedAlertWidget) and Core.IsValidObj(CachedAlertWidget.Container) then
+        alertWidgets = { CachedAlertWidget }
+    else
+        CachedAlertWidget = nil
+        local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
+        if okAlerts and found and #found > 0 then
+            alertWidgets = found
+            for _, w in ipairs(found) do
+                if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
+                    CachedAlertWidget = w
+                    break
+                end
+            end
+        end
+    end
+    if not alertWidgets or #alertWidgets == 0 then
         return false
     end
 
@@ -116,9 +132,9 @@ local function StartPoll()
     PollActive = true
     local function Tick()
         pcall(PollPlayerPresence)
-        ExecuteInGameThreadWithDelay(1000, Tick)
+        ExecuteInGameThreadWithDelay(2500, Tick)
     end
-    ExecuteInGameThreadWithDelay(1000, Tick)
+    ExecuteInGameThreadWithDelay(2500, Tick)
 end
 
 function Feature.Init()
