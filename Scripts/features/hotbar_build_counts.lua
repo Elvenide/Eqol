@@ -103,18 +103,36 @@ local function GetBuildableCostStacks(buildable)
         end)
     end
 
-    if buildable.GetBuildCost then
-        local ok, arr = pcall(function() return buildable:GetBuildCost() end)
-        if ok and arr then
-            collectFromArr(arr)
-            if #stacks > 0 then return stacks end
+    local function collectFromCostObj(val)
+        if not val then return end
+        collectFromArr(val)
+        if #stacks > 0 then return end
+        local st = Core.UnwrapStruct(val)
+        if st then
+            for _, subProp in ipairs({ "Items", "ItemStacks", "RequiredItems", "ItemsRequired", "Costs", "Ingredients" }) do
+                local okS, subArr = pcall(function() return st[subProp] end)
+                if okS and subArr then
+                    collectFromArr(subArr)
+                    if #stacks > 0 then return end
+                end
+            end
         end
     end
 
-    for _, prop in ipairs({ "BuildCost", "Cost", "Costs", "Ingredients", "RequiredItems" }) do
-        local ok, arr = pcall(function() return buildable[prop] end)
-        if ok and arr then
-            collectFromArr(arr)
+    for _, fnName in ipairs({ "GetBuildCost", "CostAsBuildingCost", "GetCost" }) do
+        if buildable[fnName] then
+            local ok, res = pcall(function() return buildable[fnName](buildable) end)
+            if ok and res then
+                collectFromCostObj(res)
+                if #stacks > 0 then return stacks end
+            end
+        end
+    end
+
+    for _, prop in ipairs({ "BuildCost", "ItemsRequired", "Cost", "Costs", "BuildingCost", "Ingredients", "RequiredItems" }) do
+        local ok, val = pcall(function() return buildable[prop] end)
+        if ok and val then
+            collectFromCostObj(val)
             if #stacks > 0 then return stacks end
         end
     end
@@ -561,42 +579,52 @@ local function RefreshHotbarCounts()
             TrackedHuds[addr] = nil
         else
             anyValid = true
-            local hudVisible = false
-            pcall(function()
-                hudVisible = (entry.Hud:IsInViewport() == true) and (entry.Hud:IsVisible() == true)
-            end)
-            if hudVisible then
-                local hotbarArr = GetHotbarBuildablesArray(pc, entry.Hud, entry.HotbarWidget)
-                for _, s in ipairs(entry.Slots) do
-                    if Core.IsValidObj(s.SlotWidget) and Core.IsValidObj(s.Badge) and Core.IsValidObj(s.Label) then
-                        local bld = ExtractSlotBuildable(s.SlotWidget, s.Index, hotbarArr)
-                        local count = Core.IsValidObj(bld) and ComputeCraftableCount(bld, inv, invCounts, hasCountsMap) or nil
-                        if count ~= nil then
-                            local txt = FormatCount(count)
-                            local isZero = (count == 0)
-                            if s.LastVis ~= 3 then
-                                s.LastVis = 3
-                                pcall(function() s.Badge:SetVisibility(3) end) -- HitTestInvisible
-                            end
-                            if s.LastText ~= txt then
-                                s.LastText = txt
-                                pcall(function() s.Label:SetText(Core.MakeText(txt)) end)
-                            end
-                            if s.LastZero ~= isZero then
-                                s.LastZero = isZero
-                                local col = isZero and COLOR_ZERO or COLOR_OK
-                                pcall(function()
-                                    if Core.IsValidObj(s.Label.TextBlock) then
-                                        s.Label.TextBlock:SetColorAndOpacity({ SpecifiedColor = col, ColorUseRule = 0 })
-                                    end
-                                end)
-                            end
-                        else
-                            if s.LastVis ~= 1 then
-                                s.LastVis = 1
-                                s.LastText = nil
-                                pcall(function() s.Badge:SetVisibility(1) end) -- Collapsed
-                            end
+            local hotbarArr = GetHotbarBuildablesArray(pc, entry.Hud, entry.HotbarWidget)
+            local diagDoneThisTick = false
+            for _, s in ipairs(entry.Slots) do
+                if Core.IsValidObj(s.SlotWidget) and Core.IsValidObj(s.Badge) and Core.IsValidObj(s.Label) then
+                    local bld = ExtractSlotBuildable(s.SlotWidget, s.Index, hotbarArr)
+                    local count = Core.IsValidObj(bld) and ComputeCraftableCount(bld, inv, invCounts, hasCountsMap) or nil
+                    if not DiagLogged and not diagDoneThisTick and s.Index == 1 then
+                        diagDoneThisTick = true
+                        DiagLogged = true
+                        local invN = 0
+                        for _ in pairs(invCounts) do invN = invN + 1 end
+                        local hbN = 0
+                        for _ in pairs(hotbarArr) do hbN = hbN + 1 end
+                        local bName = Core.IsValidObj(bld) and bld:GetFName():ToString() or "nil"
+                        local sProps = {}
+                        for _, pe in ipairs(CollectReflectedObjectProps(s.SlotWidget)) do
+                            if #sProps < 12 then sProps[#sProps + 1] = pe.name end
+                        end
+                        Core.Log(string.format("[HotbarCounts] RefreshDiag inv=%s(types=%d) hbArr=%d slot1Bld=%s count=%s slot1Props=[%s]",
+                            tostring(Core.IsValidObj(inv)), invN, hbN, bName, tostring(count), table.concat(sProps, ",")))
+                    end
+                    if count ~= nil then
+                        local txt = FormatCount(count)
+                        local isZero = (count == 0)
+                        if s.LastVis ~= 3 then
+                            s.LastVis = 3
+                            pcall(function() s.Badge:SetVisibility(3) end) -- HitTestInvisible
+                        end
+                        if s.LastText ~= txt then
+                            s.LastText = txt
+                            pcall(function() s.Label:SetText(Core.MakeText(txt)) end)
+                        end
+                        if s.LastZero ~= isZero then
+                            s.LastZero = isZero
+                            local col = isZero and COLOR_ZERO or COLOR_OK
+                            pcall(function()
+                                if Core.IsValidObj(s.Label.TextBlock) then
+                                    s.Label.TextBlock:SetColorAndOpacity({ SpecifiedColor = col, ColorUseRule = 0 })
+                                end
+                            end)
+                        end
+                    else
+                        if s.LastVis ~= 1 then
+                            s.LastVis = 1
+                            s.LastText = nil
+                            pcall(function() s.Badge:SetVisibility(1) end) -- Collapsed
                         end
                     end
                 end
