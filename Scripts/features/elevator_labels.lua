@@ -28,8 +28,8 @@ local PANEL_Z_ABOVE_STOP   = 156.0  -- cm along actor Up from stopPos (centered 
 local MAX_VIEW_DIST_SQ     = 3000.0 * 3000.0
 local ICON_PIXEL_SIZE      = 64.0
 local ICON_WORLD_SCALE     = 0.54   -- ~35 cm item icon centered inside blank gray plate
-local ELEVATOR_SCAN_PERIOD = 8.0
-local PORT_DATA_PERIOD     = 0.60
+local ELEVATOR_SCAN_PERIOD = 30.0
+local PORT_DATA_PERIOD     = 1.00
 
 local CachedElevActors = {} -- actorAddr -> AElevator
 local CachedObjToActor = {} -- elevObjAddr -> AElevator

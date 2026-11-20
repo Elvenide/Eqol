@@ -39,6 +39,73 @@ local function GetActiveStationBuilder(pc)
     return nil
 end
 
+local ConvBuilderDiagLogged = false
+
+local function IsConveyorBuilderPulling(builder)
+    if not Core.IsValidObj(builder) then return false end
+    local okCls, cn = pcall(function() return builder:GetClass():GetFName():ToString() end)
+    if not okCls or type(cn) ~= "string" or not cn:find("Conveyor", 1, true) then
+        return false
+    end
+
+    -- Check common state properties indicating a start point has been placed and the belt is being dragged out
+    for _, prop in ipairs({
+        "bIsPlacing", "bPlacing", "bHasStart", "bHasStartPoint", "bHasStartLocation",
+        "bIsDragging", "bDragging", "bBuildingBelt", "bIsBuilding", "bStarted",
+    }) do
+        local ok, v = pcall(function() return builder[prop] end)
+        if ok and v == true then
+            return true
+        end
+    end
+
+    for _, prop in ipairs({ "BuildStage", "Stage", "PlacementStage", "Step", "State", "BuildState" }) do
+        local ok, v = pcall(function() return builder[prop] end)
+        if ok and type(v) == "number" and v > 0 then
+            return true
+        end
+    end
+
+    for _, prop in ipairs({ "StartPoint", "StartLocation", "StartCell", "FirstPoint", "PathPoints", "BeltPoints", "PreviewBelts", "PreviewActors", "Segments" }) do
+        local ok, v = pcall(function() return builder[prop] end)
+        if ok and v ~= nil then
+            local okLen, len = pcall(function() return v.GetArrayNum and v:GetArrayNum() or #v end)
+            if okLen and type(len) == "number" and len > 0 then
+                return true
+            end
+        end
+    end
+
+    -- One-time concise property dump if we're scrolling on ConveyorBuilder so we can verify exact field names
+    if not ConvBuilderDiagLogged then
+        ConvBuilderDiagLogged = true
+        local parts = {}
+        pcall(function()
+            local cls = builder:GetClass()
+            while Core.IsValidObj(cls) do
+                local cName = cls:GetFName():ToString()
+                if cName == "Object" or cName == "Actor" then break end
+                cls:ForEachProperty(function(prop)
+                    local pn = prop:GetFName():ToString()
+                    local okV, val = pcall(function() return builder[pn] end)
+                    if okV and val ~= nil and (type(val) == "boolean" or type(val) == "number") then
+                        parts[#parts + 1] = pn .. "=" .. tostring(val)
+                    elseif okV and val ~= nil and type(val) == "userdata" then
+                        local okN, n = pcall(function() return val.GetArrayNum and val:GetArrayNum() end)
+                        if okN and type(n) == "number" then
+                            parts[#parts + 1] = pn .. "[" .. tostring(n) .. "]"
+                        end
+                    end
+                end)
+                cls = cls:GetSuperStruct()
+            end
+        end)
+        Core.Log("[ScrollRotate] ConveyorBuilder props: " .. table.concat(parts, ", "))
+    end
+
+    return false
+end
+
 local function StartScrollRotatePoll()
     if PollActive then return end
     PollActive = true
@@ -72,12 +139,13 @@ local function StartScrollRotatePoll()
                 if delta == 1 then
                     pcall(function() builder:AddRotation(1) end)
                 elseif delta == -1 then
-                    -- Main Sequence's AddRotation always steps +90 deg (+1 mod 4);
-                    -- calling it 3 times steps +270 deg == -90 deg (opposite direction).
+                    -- Normal placement has 4 orientations (+3 mod 4 == -1).
+                    -- While pulling out a conveyor belt, routing cycles through 3 modes (+2 mod 3 == -1).
+                    local steps = IsConveyorBuilderPulling(builder) and 2 or 3
                     pcall(function()
-                        builder:AddRotation(1)
-                        builder:AddRotation(1)
-                        builder:AddRotation(1)
+                        for _ = 1, steps do
+                            builder:AddRotation(1)
+                        end
                     end)
                 end
             end

@@ -644,19 +644,93 @@ local function ResetWorldCaches()
     NeedsEnvClean = false
 end
 
-local function StartPoll()
-    if PollActive then return end
-    PollActive = true
-    local function Tick()
-        local okTick, errTick = pcall(ScanAndApplyTweaks)
-        if not okTick and not LoggedKeys["tick_err"] then
-            LoggedKeys["tick_err"] = true
-            Core.Log("[SplitterBalancerTweaks] ScanAndApplyTweaks err: " .. tostring(errTick))
-        end
-        ExecuteInGameThreadWithDelay(math.floor(SCAN_PERIOD_IDLE * 1000), Tick)
+local StaggeredScanActive = false
+local StaggeredScanPending = false
+
+local function RunStaggeredScan()
+    if StaggeredScanActive then
+        StaggeredScanPending = true
+        return
     end
-    ExecuteInGameThreadWithDelay(250, Tick)
+    StaggeredScanActive = true
+    StaggeredScanPending = false
+
+    -- Build a flat list of single-class scan tasks so we never run 16 FindAllOf calls in one frame
+    local tasks = {}
+    for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
+        tasks[#tasks + 1] = { kind = "walk_actor", cls = clsShort }
+    end
+    for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
+        tasks[#tasks + 1] = { kind = "walk_sim", cls = simCls }
+    end
+    for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
+        tasks[#tasks + 1] = { kind = "ug_actor", cls = clsShort }
+    end
+
+    local simSeen = {}
+    local disabledCounts = {}
+    local idx = 1
+
+    local function Step()
+        if idx <= #tasks then
+            local t = tasks[idx]
+            idx = idx + 1
+            local ok, list = pcall(FindAllOf, t.cls)
+            if ok and list then
+                if t.kind == "walk_actor" then
+                    for _, actor in ipairs(list) do
+                        if Core.IsValidObj(actor) then
+                            EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
+                            EnsureTargetHeight(actor)
+                        end
+                    end
+                elseif t.kind == "walk_sim" then
+                    for _, s in ipairs(list) do
+                        if Core.IsValidObj(s) then
+                            local sAddr = s:GetAddress()
+                            if not simSeen[sAddr] then
+                                simSeen[sAddr] = true
+                                DisableSimCollider(s, disabledCounts)
+                            end
+                        end
+                    end
+                elseif t.kind == "ug_actor" then
+                    for _, actor in ipairs(list) do
+                        if Core.IsValidObj(actor) then
+                            EnsureTargetHeight(actor)
+                        end
+                    end
+                end
+            end
+            ExecuteInGameThreadAfterFrames(2, Step)
+        else
+            pcall(CleanTrackedEnvs)
+            StaggeredScanActive = false
+            if StaggeredScanPending then
+                StaggeredScanPending = false
+                ExecuteInGameThreadWithDelay(300, RunStaggeredScan)
+            end
+        end
+    end
+
+    ExecuteInGameThreadAfterFrames(1, Step)
 end
+
+local DebouncedScanScheduled = false
+local function ScheduleStaggeredScan(delayMs)
+    if DebouncedScanScheduled then return end
+    DebouncedScanScheduled = true
+    ExecuteInGameThreadWithDelay(delayMs or 400, function()
+        DebouncedScanScheduled = false
+        RunStaggeredScan()
+    end)
+end
+
+local UNDERGROUND_SIM_SET = {
+    BP_UndergroundBeltObject_C = true,
+    BP_UndergroundBeltObject_2_C = true,
+    BP_UndergroundBeltObject_3_C = true,
+}
 
 local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
@@ -672,6 +746,9 @@ local function RegisterMachineObjectHook()
                 end
             end)
             NeedsEnvClean = true
+            ScheduleStaggeredScan(350)
+        elseif UNDERGROUND_SIM_SET[clsName] then
+            ScheduleStaggeredScan(350)
         end
     end)
 end
@@ -679,7 +756,7 @@ end
 function Feature.Init()
     LastWorldAddr = GetCurrentWorldAddr()
     RegisterMachineObjectHook()
-    StartPoll()
+    ScheduleStaggeredScan(1500)
     Core.Log("[SplitterBalancerTweaks] Initialized.")
 end
 
@@ -689,11 +766,13 @@ function Feature.OnClientRestart()
         LastWorldAddr = curWorld
         ResetWorldCaches()
     end
+    ScheduleStaggeredScan(1800)
 end
 
 function Feature.OnMapLoad()
     LastWorldAddr = GetCurrentWorldAddr()
     ResetWorldCaches()
+    ScheduleStaggeredScan(2500)
 end
 
 function Feature.PruneCaches()

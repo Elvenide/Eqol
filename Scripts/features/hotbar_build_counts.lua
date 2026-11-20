@@ -233,42 +233,55 @@ local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarArr)
     return nil
 end
 
+local function CollectReflectedObjectProps(uobj)
+    local out = {}
+    if not Core.IsValidObj(uobj) then return out end
+    local seen = {}
+    pcall(function()
+        local cls = uobj:GetClass()
+        while Core.IsValidObj(cls) do
+            local cName = cls:GetFName():ToString()
+            if cName == "UserWidget" or cName == "Widget" or cName == "Object" then break end
+            cls:ForEachProperty(function(prop)
+                local pName = prop:GetFName():ToString()
+                if not seen[pName] then
+                    seen[pName] = true
+                    local okV, val = pcall(function() return uobj[pName] end)
+                    if okV and val ~= nil then
+                        out[#out + 1] = { name = pName, val = val }
+                    end
+                end
+            end)
+            cls = cls:GetSuperStruct()
+        end
+    end)
+    return out
+end
+
 local function FindAttachHostInSlot(slotWidget)
     if not Core.IsValidObj(slotWidget) then return nil, nil end
 
     local overlayCls = Core.FindOrLoadClass(PATHS.OverlayClass)
     local canvasCls = Core.FindOrLoadClass(PATHS.CanvasPanelClass)
+    local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetClass)
 
-    -- Prefer an Overlay or CanvasPanel inside the slot's WidgetTree so the label overlays the icon cleanly
-    local wt = nil
-    pcall(function() wt = slotWidget.WidgetTree end)
-    if Core.IsValidObj(wt) then
-        local root = nil
-        pcall(function() root = wt.RootWidget end)
-        if Core.IsValidObj(root) then
-            if Core.IsValidObj(overlayCls) and root:IsA(overlayCls) then
-                return root, "Overlay"
-            elseif Core.IsValidObj(canvasCls) and root:IsA(canvasCls) then
-                return root, "Canvas"
+    local bestOverlay, bestCanvas, bestPanel = nil, nil, nil
+    for _, entry in ipairs(CollectReflectedObjectProps(slotWidget)) do
+        local w = entry.val
+        if Core.IsValidObj(w) then
+            if not bestOverlay and Core.IsValidObj(overlayCls) and w:IsA(overlayCls) then
+                bestOverlay = w
+            elseif not bestCanvas and Core.IsValidObj(canvasCls) and w:IsA(canvasCls) then
+                bestCanvas = w
+            elseif not bestPanel and Core.IsValidObj(panelCls) and w:IsA(panelCls) then
+                bestPanel = w
             end
-        end
-        if wt.AllWidgets then
-            local bestOverlay, bestCanvas = nil, nil
-            StationData.ForEachArray(wt.AllWidgets, function(_, elem)
-                local w = Core.UnwrapArrayElem(elem)
-                if Core.IsValidObj(w) then
-                    if not bestOverlay and Core.IsValidObj(overlayCls) and w:IsA(overlayCls) then
-                        bestOverlay = w
-                    elseif not bestCanvas and Core.IsValidObj(canvasCls) and w:IsA(canvasCls) then
-                        bestCanvas = w
-                    end
-                end
-            end)
-            if Core.IsValidObj(bestOverlay) then return bestOverlay, "Overlay" end
-            if Core.IsValidObj(bestCanvas) then return bestCanvas, "Canvas" end
         end
     end
 
+    if Core.IsValidObj(bestOverlay) then return bestOverlay, "Overlay" end
+    if Core.IsValidObj(bestCanvas) then return bestCanvas, "Canvas" end
+    if Core.IsValidObj(bestPanel) then return bestPanel, "Panel" end
     return nil, nil
 end
 
@@ -315,6 +328,8 @@ local function AttachCountBadgeToSlot(slotWidget, hud, pc)
                 cSlot:SetPosition({ X = -3.0, Y = -2.0 })
             end)
         end
+    elseif hostKind == "Panel" then
+        pcall(function() host:AddChild(badge) end)
     end
 
     return badge, label
@@ -335,20 +350,18 @@ local function DiscoverHotbarSlots(hud)
         end
     end
 
-    -- Fallback: scan HUD WidgetTree.AllWidgets once for any widget whose class contains "Hotbar"
-    local hudWT = nil
-    pcall(function() hudWT = hud.WidgetTree end)
-    if not Core.IsValidObj(hotbarWidget) and Core.IsValidObj(hudWT) and hudWT.AllWidgets then
-        StationData.ForEachArray(hudWT.AllWidgets, function(_, elem)
-            if Core.IsValidObj(hotbarWidget) then return end
-            local w = Core.UnwrapArrayElem(elem)
+    -- Fallback: reflect properties on WBP_CharacterHUD_C for any Hotbar widget
+    if not Core.IsValidObj(hotbarWidget) then
+        for _, entry in ipairs(CollectReflectedObjectProps(hud)) do
+            local w = entry.val
             if Core.IsValidObj(w) then
                 local okN, cn = pcall(function() return w:GetClass():GetFName():ToString():lower() end)
-                if okN and cn and cn:find("hotbar", 1, true) and not cn:find("slot", 1, true) then
+                if okN and cn and cn:find("hotbar", 1, true) then
                     hotbarWidget = w
+                    break
                 end
             end
-        end)
+        end
     end
 
     local slots = {}
@@ -365,86 +378,65 @@ local function DiscoverHotbarSlots(hud)
     local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetClass)
 
     if Core.IsValidObj(hotbarWidget) then
-        -- 1. Check direct slot arrays on hotbarWidget
-        for _, prop in ipairs({ "Slots", "HotbarSlots", "SlotWidgets", "Buttons", "Items", "Entries" }) do
-            local ok, arr = pcall(function() return hotbarWidget[prop] end)
-            if ok and arr then
-                StationData.ForEachArray(arr, function(_, elem)
-                    addSlot(Core.UnwrapArrayElem(elem))
-                end)
+        local props = CollectReflectedObjectProps(hotbarWidget)
+        local propSummary = {}
+        local bestPanelChildren = nil
+        local directUserWidgets = {}
+
+        for _, entry in ipairs(props) do
+            local val = entry.val
+            if Core.IsValidObj(val) then
+                local cn = "?"
+                pcall(function() cn = val:GetClass():GetFName():ToString() end)
+                if #propSummary < 16 then
+                    propSummary[#propSummary + 1] = entry.name .. ":" .. cn
+                end
+                if Core.IsValidObj(panelCls) and val:IsA(panelCls) and val.GetAllChildren then
+                    local okCh, ch = pcall(function() return val:GetAllChildren() end)
+                    if okCh and ch then
+                        local uwList = {}
+                        StationData.ForEachArray(ch, function(_, ce)
+                            local cw = Core.UnwrapArrayElem(ce)
+                            if Core.IsValidObj(cw) and Core.IsValidObj(userWidgetCls) and cw:IsA(userWidgetCls) then
+                                uwList[#uwList + 1] = cw
+                            end
+                        end)
+                        if #uwList >= 4 and #uwList <= 16 and (not bestPanelChildren or #uwList > #bestPanelChildren) then
+                            bestPanelChildren = uwList
+                        end
+                    end
+                elseif Core.IsValidObj(userWidgetCls) and val:IsA(userWidgetCls) then
+                    directUserWidgets[#directUserWidgets + 1] = val
+                end
+            elseif type(val) == "userdata" then
+                local okLen, len = pcall(function() return val.GetArrayNum and val:GetArrayNum() end)
+                if okLen and type(len) == "number" and len >= 4 and len <= 16 then
+                    local arrList = {}
+                    StationData.ForEachArray(val, function(_, elem)
+                        local cw = Core.UnwrapArrayElem(elem)
+                        if Core.IsValidObj(cw) and Core.IsValidObj(userWidgetCls) and cw:IsA(userWidgetCls) then
+                            arrList[#arrList + 1] = cw
+                        end
+                    end)
+                    if #arrList >= 4 and (not bestPanelChildren or #arrList > #bestPanelChildren) then
+                        bestPanelChildren = arrList
+                    end
+                    if #propSummary < 16 then
+                        propSummary[#propSummary + 1] = string.format("%s[%d](uw=%d)", entry.name, len, #arrList)
+                    end
+                end
             end
-            if #slots > 0 then break end
         end
 
-        -- 2. Inspect every PanelWidget inside hotbarWidget.WidgetTree.AllWidgets and find
-        --    the container holding 4..12 UserWidget children (the hotbar slot widgets).
-        if #slots == 0 then
-            local hbWT = nil
-            pcall(function() hbWT = hotbarWidget.WidgetTree end)
-            local panelSummary = {}
-            if Core.IsValidObj(hbWT) and hbWT.AllWidgets then
-                local bestChildren = nil
-                StationData.ForEachArray(hbWT.AllWidgets, function(_, elem)
-                    local w = Core.UnwrapArrayElem(elem)
-                    if Core.IsValidObj(w) and Core.IsValidObj(panelCls) and w:IsA(panelCls) and w.GetAllChildren then
-                        local okCh, ch = pcall(function() return w:GetAllChildren() end)
-                        if okCh and ch then
-                            local uwList = {}
-                            StationData.ForEachArray(ch, function(_, ce)
-                                local cw = Core.UnwrapArrayElem(ce)
-                                if Core.IsValidObj(cw) and Core.IsValidObj(userWidgetCls) and cw:IsA(userWidgetCls) then
-                                    uwList[#uwList + 1] = cw
-                                end
-                            end)
-                            if #panelSummary < 8 then
-                                local pn = "?"
-                                local fn = "?"
-                                pcall(function() pn = w:GetFName():ToString() end)
-                                if uwList[1] then pcall(function() fn = uwList[1]:GetClass():GetFName():ToString() end) end
-                                panelSummary[#panelSummary + 1] = string.format("%s(uw=%d,%s)", pn, #uwList, fn)
-                            end
-                            if #uwList >= 4 and #uwList <= 16 then
-                                if not bestChildren or #uwList > #bestChildren then
-                                    bestChildren = uwList
-                                end
-                            end
-                        end
-                    end
-                end)
-                if bestChildren then
-                    for _, cw in ipairs(bestChildren) do addSlot(cw) end
-                end
-            end
+        if bestPanelChildren then
+            for _, cw in ipairs(bestPanelChildren) do addSlot(cw) end
+        elseif #directUserWidgets >= 4 then
+            for _, cw in ipairs(directUserWidgets) do addSlot(cw) end
+        end
 
-            -- 3. Also check direct UserWidget children in hotbarWidget.WidgetTree.AllWidgets
-            --    (in case slots are statically laid out inside the WidgetTree)
-            if #slots == 0 and Core.IsValidObj(hbWT) and hbWT.AllWidgets then
-                local byClass = {}
-                StationData.ForEachArray(hbWT.AllWidgets, function(_, elem)
-                    local w = Core.UnwrapArrayElem(elem)
-                    if Core.IsValidObj(w) and Core.IsValidObj(userWidgetCls) and w:IsA(userWidgetCls) then
-                        local okN, cn = pcall(function() return w:GetClass():GetFName():ToString() end)
-                        if okN and cn and cn ~= "" then
-                            byClass[cn] = byClass[cn] or {}
-                            byClass[cn][#byClass[cn] + 1] = w
-                        end
-                    end
-                end)
-                local bestList = nil
-                for _, list in pairs(byClass) do
-                    if #list >= 4 and #list <= 16 and (not bestList or #list > #bestList) then
-                        bestList = list
-                    end
-                end
-                if bestList then
-                    for _, cw in ipairs(bestList) do addSlot(cw) end
-                end
-            end
-
-            if #slots == 0 and not DiagLogged then
-                DiagLogged = true
-                Core.Log(string.format("[HotbarCounts] WBP_Hotbar_C panels=[%s]", table.concat(panelSummary, "; ")))
-            end
+        if #slots == 0 and not DiagLogged then
+            DiagLogged = true
+            Core.Log(string.format("[HotbarCounts] WBP_Hotbar_C reflected props=[%s]", table.concat(propSummary, ", ")))
         end
     end
 

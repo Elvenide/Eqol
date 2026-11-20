@@ -3339,14 +3339,42 @@ RefreshStationMapCanvas = function(machinesOnly)
         OnViewportChangedMachines = function()
             if myMachineGen ~= MachineRenderGen then return end
             local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRect()
+            local changedVis = false
             for _, pm in ipairs(pendingMachines) do
-                if not pm.rendered and not pm.removed then
+                if not pm.removed then
                     local me = pm.me
-                    if me.x >= vMinX and me.x <= vMaxX and me.y >= vMinY and me.y <= vMaxY then
-                        pm.rendered = true
-                        table.insert(visibleMachineQueue, me)
+                    local inView = (me.x >= vMinX and me.x <= vMaxX and me.y >= vMinY and me.y <= vMaxY)
+                    if not pm.rendered then
+                        if inView then
+                            pm.rendered = true
+                            pm.isCulled = false
+                            table.insert(visibleMachineQueue, me)
+                        end
+                    else
+                        local wantCulled = not inView
+                        if pm.isCulled ~= wantCulled then
+                            pm.isCulled = wantCulled
+                            local mAddr = pm.addr
+                            if not mAddr and Core.IsValidObj(me.machine) then
+                                mAddr = me.machine:GetAddress()
+                                pm.addr = mAddr
+                            end
+                            local wList = mAddr and RenderedMachineWidgets[mAddr] or nil
+                            if wList then
+                                local vis = wantCulled and 1 or 4 -- Collapsed vs SelfHitTestInvisible
+                                for _, w in ipairs(wList) do
+                                    if Core.IsValidObj(w) then
+                                        pcall(function() w:SetVisibility(vis) end)
+                                    end
+                                end
+                                changedVis = true
+                            end
+                        end
                     end
                 end
+            end
+            if changedVis and MapUI and Core.IsValidObj(MapUI.MachineInvBox) then
+                pcall(function() MapUI.MachineInvBox:InvalidateCache() end)
             end
             if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts) then
                 machinePumpRunning = true
@@ -4719,6 +4747,8 @@ local function OpenStationMap()
     local selectionCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local ghostPreviewCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local ghostPreviewSlot = nil
+    local mapInvBox = nil
+    local machineInvBox = nil
     local wheelScrollBox = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
     local wheelSpacer = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
     local iconPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
@@ -4752,7 +4782,18 @@ local function OpenStationMap()
         overlayCanvas:SetClipping(1)
         overlayCanvas:SetVisibility(4) -- SelfHitTestInvisible
 
-        local mcSlot = bgPanZoom:AddChildToCanvas(mapCanvas)
+        mapInvBox = Core.CreateRawWidget("/Script/UMG.InvalidationBox", outer)
+        local mapChild = mapCanvas
+        if Core.IsValidObj(mapInvBox) then
+            pcall(function()
+                mapInvBox:SetCanCache(true)
+                mapInvBox:SetClipping(0)
+                mapInvBox:SetVisibility(4)
+                mapInvBox:AddChild(mapCanvas)
+            end)
+            mapChild = mapInvBox
+        end
+        local mcSlot = bgPanZoom:AddChildToCanvas(mapChild)
         if Core.IsValidObj(mcSlot) then
             mcSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
             mcSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
@@ -4761,7 +4802,18 @@ local function OpenStationMap()
         if Core.IsValidObj(machineCanvas) then
             machineCanvas:SetClipping(0)
             machineCanvas:SetVisibility(4)
-            local machSlot = bgPanZoom:AddChildToCanvas(machineCanvas)
+            machineInvBox = Core.CreateRawWidget("/Script/UMG.InvalidationBox", outer)
+            local machChild = machineCanvas
+            if Core.IsValidObj(machineInvBox) then
+                pcall(function()
+                    machineInvBox:SetCanCache(true)
+                    machineInvBox:SetClipping(0)
+                    machineInvBox:SetVisibility(4)
+                    machineInvBox:AddChild(machineCanvas)
+                end)
+                machChild = machineInvBox
+            end
+            local machSlot = bgPanZoom:AddChildToCanvas(machChild)
             if Core.IsValidObj(machSlot) then
                 machSlot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
                 machSlot:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
@@ -5087,7 +5139,9 @@ local function OpenStationMap()
         MapBg = mapBg,
         BgPanZoom = bgPanZoom,
         MapCanvas = mapCanvas,
+        MapInvBox = mapInvBox,
         MachineCanvas = machineCanvas,
+        MachineInvBox = machineInvBox,
         SelectionCanvas = selectionCanvas,
         GhostPreviewCanvas = ghostPreviewCanvas,
         GhostPreviewSlot = ghostPreviewSlot,
@@ -5420,7 +5474,6 @@ function Feature.OnMapLoad()
     ResetSpriteCache()
     PendingGhosts = {}
     Clipboard = {}
-    ScheduleStationPrewarm()
 end
 
 function Feature.PruneCaches()
