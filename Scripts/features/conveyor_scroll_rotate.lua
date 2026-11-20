@@ -12,6 +12,7 @@ local PollActive = false
 local CachedStationCheck = { time = -999, inStation = false }
 local ConveyorPullingActive = false
 local LastConveyorBuilderAddr = nil
+local LastBuildCmdClock = -999.0
 
 local function IsConveyorBuilder(builder)
     if not Core.IsValidObj(builder) then return false end
@@ -124,20 +125,36 @@ end
 
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
+        "ScrollRotate_AddBuildCommand",
+        "/Script/MainSequence.DMSPlayerController:AddBuildCommand",
+        function()
+            -- Placing/committing pulled conveyor segments returns ConveyorBuilder to non-pulling mode
+            LastBuildCmdClock = os.clock()
+            ConveyorPullingActive = false
+        end
+    )
+    Core.TryRegisterHook(
         "ScrollRotate_ConfirmBuild",
         "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
         function()
-            local pc = Core.GetLocalPlayerController()
-            if not Core.IsValidObj(pc) then return end
-            local builder = GetActiveStationBuilder(pc)
-            if IsConveyorBuilder(builder) then
-                LastConveyorBuilderAddr = builder:GetAddress()
-                -- Conveyor building chains continuously on each ConfirmBuild click
-                -- until the player right-clicks or exits build mode.
-                ConveyorPullingActive = true
-            else
-                ConveyorPullingActive = false
-            end
+            local clickClock = os.clock()
+            ExecuteInGameThreadAfterFrames(1, function()
+                -- If AddBuildCommand fired from this ConfirmBuild, segments were committed (non-pulling).
+                -- Otherwise ConfirmBuild started or chained a conveyor preview segment (pulling).
+                if LastBuildCmdClock >= clickClock - 0.05 then
+                    ConveyorPullingActive = false
+                    return
+                end
+                local pc = Core.GetLocalPlayerController()
+                if not Core.IsValidObj(pc) then return end
+                local builder = GetActiveStationBuilder(pc)
+                if IsConveyorBuilder(builder) then
+                    LastConveyorBuilderAddr = builder:GetAddress()
+                    ConveyorPullingActive = true
+                else
+                    ConveyorPullingActive = false
+                end
+            end)
         end
     )
     Core.TryRegisterHook(

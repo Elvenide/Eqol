@@ -119,16 +119,43 @@ local function GetBuildableCostStacks(buildable)
 
     local function collectFromCostObj(val)
         if not val then return end
+        -- Single FItemStack struct ({ Item, Amount })
+        local stSingle = Core.UnwrapStruct(val)
+        if stSingle and Core.IsValidObj(stSingle.Item) then
+            local amt = tonumber(stSingle.Amount) or 0
+            if amt > 0 then
+                stacks[#stacks + 1] = { Item = stSingle.Item, Amount = amt }
+                return
+            end
+        end
         collectFromArr(val)
         if #stacks > 0 then return end
-        local st = Core.UnwrapStruct(val)
-        if st then
+        if stSingle then
             for _, subProp in ipairs({ "Items", "ItemStacks", "RequiredItems", "ItemsRequired", "Costs", "Ingredients", "Materials", "Resources" }) do
-                local okS, subArr = pcall(function() return st[subProp] end)
+                local okS, subArr = pcall(function() return stSingle[subProp] end)
                 if okS and subArr then
                     collectFromArr(subArr)
                     if #stacks > 0 then return end
                 end
+            end
+        end
+    end
+
+    -- 1. Verified UBuildable properties: ItemCost (when bUseItemCost) and ItemDetails.Recipe.Inputs (when bItemCostAsBuildingCost)
+    local okIC, itemCost = pcall(function() return buildable.ItemCost end)
+    if okIC and itemCost then
+        collectFromCostObj(itemCost)
+        if #stacks > 0 then return stacks end
+    end
+
+    local okID, itemDetails = pcall(function() return buildable.ItemDetails end)
+    if okID and Core.IsValidObj(itemDetails) then
+        local okRec, rec = pcall(function() return itemDetails.Recipe end)
+        if okRec and Core.IsValidObj(rec) then
+            local okIn, inArr = pcall(function() return rec.Inputs end)
+            if okIn and inArr then
+                collectFromArr(inArr)
+                if #stacks > 0 then return stacks end
             end
         end
     end
