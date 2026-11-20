@@ -169,7 +169,14 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
   - `pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") })` is only true for a **single game frame**. Polling it with `ExecuteInGameThreadWithDelay(16, ...)` skips frames and feels insensitive. Always poll scroll input with `ExecuteInGameThreadAfterFrames(1, ...)` and also check `pc:GetInputAnalogKeyState({ KeyName = FName("MouseWheelAxis") })`.
   - Any active builder on `pc.Builder` (`ConveyorBuilder`, `MachineBuilder`, `UndergroundBeltBuilder`, etc.) exposing `:AddRotation(delta)` can be rotated in O(1) without `FindAllOf`.
 - **HUD Top-Right Input Icons (`WBP_CharacterHUD_C.HUDInputContainer`)**:
-  - Row 0 (`Tab`, `B`, `X`) is shifted ~`22px` right relative to Row 1 (`Y`, `M`, `T`, `G`, `K`). Hosting custom station indicators (`Power`, `Station Map`, `Logistics`) inside a zero-width `CanvasPanel` in `(Row=0, Col=1)` with a right-anchored `HorizontalBox` (`Alignment = {1.0, 0.5}`, `AutoSize = true`, `Position.X = nudgeX`) aligns them evenly to the left of `Tab` without stretching GridPanel columns or shifting Row 1.
+  - Row 0 (`Tab`, `B`, `X`) is shifted ~`22px` right relative to Row 1 (`Y`, `M`, `T`, `G`, `K`). Hosting custom station indicators (`Power`, `Station Map`, `Logistics`) inside an unclipped `1×1` `SizeBox` wrapping a `CanvasPanel` in `(Row=0, Col=1)` with a right-anchored `HorizontalBox` (`Alignment = {1.0, 0.5}`, `AutoSize = true`, `Position.X = nudgeX`) aligns them evenly to the left of `Tab` without stretching Column 1 (`M`) or shifting Row 1.
+- **Bottom Hotbar (`WBP_Hotbar_C` / `WBP_HotbarSlot_C`) & `UBuildable` Costs**:
+  - `WBP_Hotbar_C.WidgetTree` is not exposed in shipping builds; discover its 10 `WBP_HotbarSlot_C` children via `ForEachProperty` on `WBP_Hotbar_C` (and attach overlays by wrapping `slot.Image_60` inside its parent `Border` with a new `UOverlay`).
+  - `HotbarBuildables` is indexed by key digit `0..9` in C++ (`1..10` in Lua): `ability0`/`ability10` maps to Lua index `1`, and `ability1..ability9` map to Lua indices `2..10` (`luaIdx = (num % 10) + 1`).
+  - `UBuildable` stores costs in `ItemCost` (`bUseItemCost`) and `ItemDetails.Recipe.Inputs` (`bItemCostAsBuildingCost`).
+- **Conveyor Belt Pulling & `AddRotation`**:
+  - `UBuilderBase::AddRotation` always steps `+1` regardless of sign. Normal 4-way placement wraps mod 4 (`1×` = `+90°`, `3×` = `-90°`); while pulling out a conveyor belt, routing wraps mod 3 (`1×` forward, `2×` backward).
+  - `ConfirmBuild` invokes `AddBuildCommand` directly in C++ (bypassing UE4SS UFunction hooks on `AddBuildCommand`); detect when pulled conveyor segments commit by hooking `NotifyOnNewObject("/Script/MainSequence.ConveyorBeltObject", ...)`.
 - **In-Place HUD Version Text**:
   - The bottom-right version string (e.g. `0.1.0.109s`) is a standard `UTextBlock` discoverable via `FindAllOf("TextBlock")` matching `^[vV]?%d+%.%d+%.%d+`.
   - Editing it in-place with `tb:SetText(...)` and `tb.Slot:SetAutoSize(true)` preserves the exact vanilla font, size, color, and styling.

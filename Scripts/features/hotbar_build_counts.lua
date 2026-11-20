@@ -308,14 +308,44 @@ local function ExtractSlotBuildable(slotWidget, hotbarData)
             if Core.IsValidObj(hit) then return hit end
             local num = tonumber(ms:match("(%d+)$"))
             if num then
-                local idx1 = (num == 0) and 10 or num
-                if Core.IsValidObj(hotbarData.byIndex[idx1]) then
-                    return hotbarData.byIndex[idx1]
+                -- HotbarBuildables is indexed by key digit 0..9 in C++ -> 1..10 in Lua:
+                -- key 0 (ability0 / ability10) = Lua index 1, key 1 (ability1) = Lua index 2, ..., key 9 (ability9) = Lua index 10.
+                local luaIdx = (num % 10) + 1
+                if Core.IsValidObj(hotbarData.byIndex[luaIdx]) then
+                    return hotbarData.byIndex[luaIdx]
                 end
             end
         end
     end
     return nil
+end
+
+local function IsPlayerInCreativeMode(pc)
+    if not Core.IsValidObj(pc) then return false end
+    local creativeProps = { "bCreative", "bCreativeMode", "bInCreative", "bBuildCreative" }
+
+    local function checkObj(obj)
+        if not Core.IsValidObj(obj) then return false end
+        for _, p in ipairs(creativeProps) do
+            local ok, v = pcall(function() return obj[p] end)
+            if ok and v == true then return true end
+        end
+        return false
+    end
+
+    if checkObj(pc.PlayerObject) or checkObj(pc) or checkObj(pc.Builder) then
+        return true
+    end
+
+    local worldSub = Core.GetWorldSubsystem(pc, Core.PATHS.WorldSubsystemClass)
+    if Core.IsValidObj(worldSub) then
+        local okW, dmsWorld = pcall(function() return worldSub:GetDMSWorld() end)
+        if okW and checkObj(dmsWorld) then
+            return true
+        end
+    end
+
+    return false
 end
 
 local function CollectReflectedObjectProps(uobj)
@@ -533,8 +563,12 @@ local function RefreshHotbarCounts()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return false end
 
-    local inv = GetPlayerInventory(pc)
-    local invCounts, hasCountsMap = BuildPlayerInventoryCounts(inv)
+    local isCreative = IsPlayerInCreativeMode(pc)
+    local inv, invCounts, hasCountsMap = nil, nil, false
+    if not isCreative then
+        inv = GetPlayerInventory(pc)
+        invCounts, hasCountsMap = BuildPlayerInventoryCounts(inv)
+    end
     local anyValid = false
 
     for addr, entry in pairs(TrackedHuds) do
@@ -546,18 +580,21 @@ local function RefreshHotbarCounts()
             for _, s in ipairs(entry.Slots) do
                 if Core.IsValidObj(s.SlotWidget) and Core.IsValidObj(s.Badge) and Core.IsValidObj(s.Label) then
                     local bld = ExtractSlotBuildable(s.SlotWidget, hotbarData)
-                    local count = Core.IsValidObj(bld) and ComputeCraftableCount(bld, inv, invCounts, hasCountsMap) or nil
-                    if not DiagLogged and Core.IsValidObj(bld) then
-                        DiagLogged = true
-                        local bName = bld:GetFName():ToString()
-                        local mapName = KeyToString(s.SlotWidget["Mapping Name"]) or "nil"
-                        local stacks = GetBuildableCostStacks(bld)
-                        Core.Log(string.format("[HotbarCounts] CostDiag map=%s bld=%s stacks=%d count=%s",
-                            mapName, bName, stacks and #stacks or 0, tostring(count)))
+                    local txt = nil
+                    local isZero = false
+                    if Core.IsValidObj(bld) then
+                        if isCreative then
+                            txt = "∞"
+                            isZero = false
+                        else
+                            local count = ComputeCraftableCount(bld, inv, invCounts, hasCountsMap)
+                            if count ~= nil then
+                                txt = FormatCount(count)
+                                isZero = (count == 0)
+                            end
+                        end
                     end
-                    if count ~= nil then
-                        local txt = FormatCount(count)
-                        local isZero = (count == 0)
+                    if txt ~= nil then
                         if s.LastVis ~= 3 then
                             s.LastVis = 3
                             pcall(function()
