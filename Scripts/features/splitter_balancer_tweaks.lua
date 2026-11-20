@@ -735,10 +735,16 @@ local UNDERGROUND_SIM_SET = {
 local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
     NewObjHookRegistered = true
-    pcall(NotifyOnNewObject, "/Script/MainSequence.DMSObject", function(obj)
+    local function HandleNewMachineObj(obj)
         if not Core.IsValidObj(obj) then return end
         local clsName = SafeClassName(obj)
-        if WALKTHROUGH_SIM_SET[clsName] then
+        local low = clsName:lower()
+        local isWalk = WALKTHROUGH_SIM_SET[clsName]
+            or low:find("splitter", 1, true) ~= nil
+            or low:find("beltbalancer", 1, true) ~= nil
+        local isUg = UNDERGROUND_SIM_SET[clsName]
+            or low:find("undergroundbelt", 1, true) ~= nil
+        if isWalk then
             EnsureSimCDODisabled(obj)
             pcall(function()
                 if obj.bColliderEnabled == true then
@@ -746,11 +752,15 @@ local function RegisterMachineObjectHook()
                 end
             end)
             NeedsEnvClean = true
-            ScheduleStaggeredScan(350)
-        elseif UNDERGROUND_SIM_SET[clsName] then
-            ScheduleStaggeredScan(350)
+            ScheduleStaggeredScan(300)
+            ExecuteInGameThreadWithDelay(1000, function() ScheduleStaggeredScan(50) end)
+        elseif isUg then
+            ScheduleStaggeredScan(300)
+            ExecuteInGameThreadWithDelay(1000, function() ScheduleStaggeredScan(50) end)
         end
-    end)
+    end
+    -- MachineObject is the true base class for newly built splitters, balancers, and underground belts
+    pcall(NotifyOnNewObject, "/Script/MainSequence.MachineObject", HandleNewMachineObj)
 end
 
 function Feature.Init()
