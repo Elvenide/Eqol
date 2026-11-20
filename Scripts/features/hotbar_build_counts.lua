@@ -89,15 +89,29 @@ end
 local function GetBuildableCostStacks(buildable)
     if not Core.IsValidObj(buildable) then return nil end
     local stacks = {}
+    local itemCls = Core.FindOrLoadClass("/Script/MainSequence.Item")
 
     local function collectFromArr(arr)
         if not arr then return end
-        StationData.ForEachArray(arr, function(_, elem)
+        StationData.ForEachArray(arr, function(rawKey, elem)
+            -- Case 1: TArray<FItemStack> ({ Item, Amount })
             local st = Core.UnwrapStruct(elem)
             if st and Core.IsValidObj(st.Item) then
                 local amt = tonumber(st.Amount) or 0
                 if amt > 0 then
                     stacks[#stacks + 1] = { Item = st.Item, Amount = amt }
+                    return
+                end
+            end
+            -- Case 2: TMap<UItem*, int32> (rawKey = UItem*, elem = int32)
+            local kObj = Core.UnwrapArrayElem(rawKey)
+            if Core.IsValidObj(kObj) and (not Core.IsValidObj(itemCls) or kObj:IsA(itemCls)) then
+                local vVal = elem
+                local okG, g = pcall(function() return elem and elem.get and elem:get() or elem end)
+                if okG and g ~= nil then vVal = g end
+                local amt = tonumber(vVal) or 0
+                if amt > 0 then
+                    stacks[#stacks + 1] = { Item = kObj, Amount = amt }
                 end
             end
         end)
@@ -109,7 +123,7 @@ local function GetBuildableCostStacks(buildable)
         if #stacks > 0 then return end
         local st = Core.UnwrapStruct(val)
         if st then
-            for _, subProp in ipairs({ "Items", "ItemStacks", "RequiredItems", "ItemsRequired", "Costs", "Ingredients" }) do
+            for _, subProp in ipairs({ "Items", "ItemStacks", "RequiredItems", "ItemsRequired", "Costs", "Ingredients", "Materials", "Resources" }) do
                 local okS, subArr = pcall(function() return st[subProp] end)
                 if okS and subArr then
                     collectFromArr(subArr)
@@ -129,7 +143,7 @@ local function GetBuildableCostStacks(buildable)
         end
     end
 
-    for _, prop in ipairs({ "BuildCost", "ItemsRequired", "Cost", "Costs", "BuildingCost", "Ingredients", "RequiredItems" }) do
+    for _, prop in ipairs({ "BuildCost", "ItemsRequired", "Cost", "Costs", "BuildingCost", "Ingredients", "RequiredItems", "Materials", "ResourceCost" }) do
         local ok, val = pcall(function() return buildable[prop] end)
         if ok and val then
             collectFromCostObj(val)
@@ -142,8 +156,27 @@ local function GetBuildableCostStacks(buildable)
         local okIn, inArr = pcall(function() return rec.Inputs end)
         if okIn and inArr then
             collectFromArr(inArr)
+            if #stacks > 0 then return stacks end
         end
     end
+
+    -- Generic fallback: inspect all reflected properties on this UBuildable for any cost array/map/struct
+    pcall(function()
+        local cls = buildable:GetClass()
+        while Core.IsValidObj(cls) and #stacks == 0 do
+            local cName = cls:GetFName():ToString()
+            if cName == "DataAsset" or cName == "PrimaryDataAsset" or cName == "Object" then break end
+            cls:ForEachProperty(function(prop)
+                if #stacks > 0 then return end
+                local pName = prop:GetFName():ToString()
+                local okV, val = pcall(function() return buildable[pName] end)
+                if okV and val ~= nil and type(val) == "userdata" then
+                    collectFromCostObj(val)
+                end
+            end)
+            cls = cls:GetSuperStruct()
+        end
+    end)
 
     return (#stacks > 0) and stacks or nil
 end
@@ -236,8 +269,9 @@ local function GetHotbarBuildablesData(pc, hud, hotbarWidget)
                         if okG and g ~= nil then kUnwrapped = g end
 
                         if type(kUnwrapped) == "number" then
+                            -- For TArray (1-based in Lua) or TMap<int32, UBuildable*>:
+                            -- store under exact numeric index (do NOT shift by +1!)
                             result.byIndex[kUnwrapped] = u
-                            result.byIndex[kUnwrapped + 1] = result.byIndex[kUnwrapped + 1] or u
                             result.byName[tostring(kUnwrapped)] = u
                         else
                             local ks = KeyToString(kUnwrapped)
@@ -307,7 +341,9 @@ local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarData)
             end
         end
 
-        -- Match WBP_HotbarSlot_C's "Mapping Name" against HotbarBuildables TMap keys
+        -- Match WBP_HotbarSlot_C's "Mapping Name" (e.g. "ability1".."ability10" / "ability0")
+        -- against HotbarBuildables keys; do NOT fall back to arbitrary ForEachProperty slotIndex
+        -- when Mapping Name is present, because ForEachProperty order != visual hotbar order!
         if hotbarData and hotbarData.byName then
             local okM, mapVal = pcall(function() return slotWidget["Mapping Name"] end)
             if okM and mapVal ~= nil then
@@ -322,6 +358,7 @@ local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarData)
                             return hotbarData.byIndex[idx1]
                         end
                     end
+                    return nil
                 end
             end
         end
@@ -644,8 +681,14 @@ local function RefreshHotbarCounts()
                             if #keys < 6 then keys[#keys + 1] = tostring(k) end
                         end
                         local mapName = KeyToString(s.SlotWidget["Mapping Name"]) or "nil"
-                        Core.Log(string.format("[HotbarCounts] RefreshDiag inv=%s(types=%d) hbCount=%d keys=[%s] slot%d(map=%s) bld=%s count=%s",
-                            tostring(Core.IsValidObj(inv)), invN, hotbarData.count, table.concat(keys, ","), s.Index, mapName, bName, tostring(count)))
+                        local bProps = {}
+                        if Core.IsValidObj(bld) and count == nil then
+                            for _, pe in ipairs(CollectReflectedObjectProps(bld)) do
+                                if #bProps < 16 then bProps[#bProps + 1] = pe.name end
+                            end
+                        end
+                        Core.Log(string.format("[HotbarCounts] RefreshDiag inv=%s(types=%d) hbCount=%d keys=[%s] slot%d(map=%s) bld=%s count=%s bldProps=[%s]",
+                            tostring(Core.IsValidObj(inv)), invN, hotbarData.count, table.concat(keys, ","), s.Index, mapName, bName, tostring(count), table.concat(bProps, ",")))
                     end
                     if count ~= nil then
                         local txt = FormatCount(count)

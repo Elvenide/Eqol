@@ -132,7 +132,9 @@ function Feature.RegisterHooks()
             local builder = GetActiveStationBuilder(pc)
             if IsConveyorBuilder(builder) then
                 LastConveyorBuilderAddr = builder:GetAddress()
-                ConveyorPullingActive = not ConveyorPullingActive
+                -- Conveyor building chains continuously on each ConfirmBuild click
+                -- until the player right-clicks or exits build mode.
+                ConveyorPullingActive = true
             else
                 ConveyorPullingActive = false
             end
