@@ -2254,15 +2254,43 @@ UpdateStatusBanner = function(textOverride)
     end
 end
 
+local APPLY_BG_ENABLED  = { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }
+local APPLY_BG_DISABLED = { R = 0.16, G = 0.18, B = 0.21, A = 0.75 }
+local APPLY_TXT_DISABLED = { R = 0.60, G = 0.64, B = 0.70, A = 0.85 }
+
 UpdateActionBar = function()
     if not MapUI then return end
     local pendingN = #PendingGhosts + CountTableKeys(PendingDeletes)
+    local canApply = (pendingN > 0) and (not ApplyInProgress)
     if Core.IsValidObj(MapUI.ApplyBtnText) then
         pcall(function()
             if pendingN > 0 then
                 MapUI.ApplyBtnText:SetText(Core.MakeText(string.format("Apply Changes (%d)", pendingN)))
             else
                 MapUI.ApplyBtnText:SetText(Core.MakeText("Apply Changes"))
+            end
+            if Core.IsValidObj(MapUI.ApplyBtnText.TextBlock) and MapUI.ApplyBtnText.TextBlock.SetColorAndOpacity then
+                MapUI.ApplyBtnText.TextBlock:SetColorAndOpacity({
+                    SpecifiedColor = canApply and COLORS.PlayerLocal or APPLY_TXT_DISABLED,
+                    ColorUseRule = 0,
+                })
+            end
+        end)
+    end
+    if Core.IsValidObj(MapUI.ApplyBtnWidget) then
+        pcall(function()
+            if MapUI.ApplyBtnWidget.SetBackgroundColour then
+                MapUI.ApplyBtnWidget:SetBackgroundColour(canApply and APPLY_BG_ENABLED or APPLY_BG_DISABLED)
+            end
+            if MapUI.ApplyBtnWidget.SetIsEnabled then
+                MapUI.ApplyBtnWidget:SetIsEnabled(canApply)
+            end
+        end)
+    end
+    if Core.IsValidObj(MapUI.ApplyBtn) then
+        pcall(function()
+            if MapUI.ApplyBtn.SetRenderOpacity then
+                MapUI.ApplyBtn:SetRenderOpacity(canApply and 1.0 or 0.55)
             end
         end)
     end
@@ -5023,14 +5051,14 @@ local function OpenStationMap()
     local floorFrame = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local floorInnerVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorSlotsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "^", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "↑", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         local total = #CurrentFloors
         if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
             FloorPageTopIdx = math.min(total, FloorPageTopIdx + 1)
             RebuildFloorButtons()
         end
     end)
-    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "v", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "↓", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
         if FloorPageTopIdx and FloorPageTopIdx > minTop then
             FloorPageTopIdx = math.max(minTop, FloorPageTopIdx - 1)
@@ -5078,14 +5106,17 @@ local function OpenStationMap()
         end
     end
 
-    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }, COLORS.PlayerLocal, function()
-        Core.Log(string.format("[StationMap] ApplyBtn pressed (pending=%d)", #PendingGhosts))
+    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, APPLY_BG_DISABLED, APPLY_TXT_DISABLED, function()
+        local pendingN = #PendingGhosts + CountTableKeys(PendingDeletes)
+        if pendingN == 0 or ApplyInProgress then return end
+        Core.Log(string.format("[StationMap] ApplyBtn pressed (pending=%d)", pendingN))
         ExecuteInGameThreadWithDelay(10, CommitPendingGhosts)
     end)
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
         PendingGhosts = {}
         PendingDeletes = {}
         SelectedGhosts = {}
+        UpdateActionBar()
         RefreshSelectionLayer()
     end)
 
@@ -5153,6 +5184,7 @@ local function OpenStationMap()
         FloorUpBtn = floorUpWrap,
         FloorDownBtn = floorDownWrap,
         ApplyBtn = applyWrap,
+        ApplyBtnWidget = applyBtn,
         ApplyBtnText = applyBtnText,
         DiscardBtn = discardWrap,
         CopyBtn = copyBtn,
