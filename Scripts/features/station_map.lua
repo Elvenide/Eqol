@@ -2964,10 +2964,10 @@ RefreshStationMapCanvas = function(machinesOnly)
                 staticPumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.008
+            local budgetEnd = os.clock() + 0.0030
             local addedGrid = false
             local gCount = 0
-            while gIdx <= #deferredGridLines and (gCount < 12 or os.clock() < budgetEnd) and gCount < 64 do
+            while gIdx <= #deferredGridLines and (gCount < 6 or os.clock() < budgetEnd) and gCount < 24 do
                 local dg = deferredGridLines[gIdx]
                 local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
                 if line and s then
@@ -2989,7 +2989,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
             end
             local wCount = 0
-            while wQueueIdx <= #visibleWallQueue and (wCount < 10 or os.clock() < budgetEnd) and wCount < 48 do
+            while wQueueIdx <= #visibleWallQueue and (wCount < 4 or os.clock() < budgetEnd) and wCount < 18 do
                 local dw = visibleWallQueue[wQueueIdx]
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
@@ -2997,7 +2997,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 wCount = wCount + 1
             end
             if gIdx <= #deferredGridLines or wQueueIdx <= #visibleWallQueue then
-                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+                ExecuteInGameThreadAfterFrames(2, pumpStaticBatch)
             else
                 staticPumpRunning = false
             end
@@ -3315,22 +3315,22 @@ RefreshStationMapCanvas = function(machinesOnly)
                 machinePumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.010
+            local budgetEnd = os.clock() + 0.0035
             local mCount = 0
-            while mQueueIdx <= #visibleMachineQueue and (mCount < 6 or os.clock() < budgetEnd) and mCount < 48 do
+            while mQueueIdx <= #visibleMachineQueue and (mCount < 3 or os.clock() < budgetEnd) and mCount < 14 do
                 processOneMachine(visibleMachineQueue[mQueueIdx])
                 mQueueIdx = mQueueIdx + 1
                 mCount = mCount + 1
             end
             local pCount = 0
-            while pIdx <= #deferredPorts and (pCount < 8 or os.clock() < budgetEnd) and pCount < 36 do
+            while pIdx <= #deferredPorts and (pCount < 4 or os.clock() < budgetEnd) and pCount < 16 do
                 local dp = deferredPorts[pIdx]
                 RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22, dp.outWidgets)
                 pIdx = pIdx + 1
                 pCount = pCount + 1
             end
             if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts then
-                ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
+                ExecuteInGameThreadAfterFrames(2, pumpMachineBatch)
             else
                 machinePumpRunning = false
             end

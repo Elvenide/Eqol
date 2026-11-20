@@ -136,12 +136,20 @@ local function StartScrollRotatePoll()
                         end
                     end
                 end)
-                if delta == 1 then
-                    pcall(function() builder:AddRotation(1) end)
-                elseif delta == -1 then
-                    -- Normal placement has 4 orientations (+3 mod 4 == -1).
-                    -- While pulling out a conveyor belt, routing cycles through 3 modes (+2 mod 3 == -1).
-                    local steps = IsConveyorBuilderPulling(builder) and 2 or 3
+                if delta ~= 0 then
+                    local pullingBelt = IsConveyorBuilderPulling(builder)
+                    local steps = 1
+                    if pullingBelt then
+                        -- While pulling out a conveyor belt, routing toggles between 2 elbow modes;
+                        -- calling AddRotation(1) once works for both scroll up and scroll down.
+                        steps = 1
+                    elseif delta == 1 then
+                        -- Reversed direction: Scroll Up rotates -90 deg (+3 mod 4)
+                        steps = 3
+                    else
+                        -- Reversed direction: Scroll Down rotates +90 deg (+1 mod 4)
+                        steps = 1
+                    end
                     pcall(function()
                         for _ = 1, steps do
                             builder:AddRotation(1)

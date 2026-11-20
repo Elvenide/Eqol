@@ -208,31 +208,6 @@ local function GetHotbarBuildablesArray(pc, hud, hotbarWidget)
     return list
 end
 
-local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarArr)
-    if Core.IsValidObj(slotWidget) then
-        for _, prop in ipairs({
-            "Buildable", "CurrentBuildable", "BoundBuildable", "AssignedBuildable",
-            "HotbarBuildable", "SelectedBuildable", "BuildObject",
-        }) do
-            local ok, v = pcall(function() return slotWidget[prop] end)
-            if ok and Core.IsValidObj(v) then
-                return v
-            end
-        end
-        if slotWidget.GetBuildable then
-            local ok, v = pcall(function() return slotWidget:GetBuildable() end)
-            if ok and Core.IsValidObj(v) then
-                return v
-            end
-        end
-    end
-
-    if hotbarArr and slotIndex and Core.IsValidObj(hotbarArr[slotIndex]) then
-        return hotbarArr[slotIndex]
-    end
-    return nil
-end
-
 local function CollectReflectedObjectProps(uobj)
     local out = {}
     if not Core.IsValidObj(uobj) then return out end
@@ -258,23 +233,81 @@ local function CollectReflectedObjectProps(uobj)
     return out
 end
 
+local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarArr)
+    if Core.IsValidObj(slotWidget) then
+        for _, prop in ipairs({
+            "Buildable", "CurrentBuildable", "BoundBuildable", "AssignedBuildable",
+            "HotbarBuildable", "SelectedBuildable", "BuildObject",
+        }) do
+            local ok, v = pcall(function() return slotWidget[prop] end)
+            if ok and Core.IsValidObj(v) then
+                return v
+            end
+        end
+        if slotWidget.GetBuildable then
+            local ok, v = pcall(function() return slotWidget:GetBuildable() end)
+            if ok and Core.IsValidObj(v) then
+                return v
+            end
+        end
+        -- Fallback: check any reflected property on slotWidget whose value is a UBuildable
+        local bldCls = Core.FindOrLoadClass(PATHS.BuildableClass)
+        if Core.IsValidObj(bldCls) then
+            for _, entry in ipairs(CollectReflectedObjectProps(slotWidget)) do
+                if Core.IsValidObj(entry.val) and entry.val:IsA(bldCls) then
+                    return entry.val
+                end
+            end
+        end
+    end
+
+    if hotbarArr and slotIndex and Core.IsValidObj(hotbarArr[slotIndex]) then
+        return hotbarArr[slotIndex]
+    end
+    return nil
+end
+
 local function FindAttachHostInSlot(slotWidget)
     if not Core.IsValidObj(slotWidget) then return nil, nil end
 
     local overlayCls = Core.FindOrLoadClass(PATHS.OverlayClass)
     local canvasCls = Core.FindOrLoadClass(PATHS.CanvasPanelClass)
     local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetClass)
+    local widgetCls = Core.FindOrLoadClass("/Script/UMG.Widget")
+
+    local outerParent = nil
+    pcall(function() outerParent = slotWidget:GetParent() end)
+    local outerParentAddr = Core.IsValidObj(outerParent) and outerParent:GetAddress() or nil
 
     local bestOverlay, bestCanvas, bestPanel = nil, nil, nil
-    for _, entry in ipairs(CollectReflectedObjectProps(slotWidget)) do
+    local function consider(w)
+        if not Core.IsValidObj(w) then return end
+        if outerParentAddr and w:GetAddress() == outerParentAddr then return end
+        if not bestOverlay and Core.IsValidObj(overlayCls) and w:IsA(overlayCls) then
+            bestOverlay = w
+        elseif not bestCanvas and Core.IsValidObj(canvasCls) and w:IsA(canvasCls) then
+            bestCanvas = w
+        elseif not bestPanel and Core.IsValidObj(panelCls) and w:IsA(panelCls) then
+            bestPanel = w
+        end
+    end
+
+    local props = CollectReflectedObjectProps(slotWidget)
+    for _, entry in ipairs(props) do
         local w = entry.val
         if Core.IsValidObj(w) then
-            if not bestOverlay and Core.IsValidObj(overlayCls) and w:IsA(overlayCls) then
-                bestOverlay = w
-            elseif not bestCanvas and Core.IsValidObj(canvasCls) and w:IsA(canvasCls) then
-                bestCanvas = w
-            elseif not bestPanel and Core.IsValidObj(panelCls) and w:IsA(panelCls) then
-                bestPanel = w
+            consider(w)
+            -- Walk GetParent() on child widgets inside WBP_HotbarSlot_C to reach its
+            -- internal root Overlay / CanvasPanel even when the root wasn't marked IsVariable.
+            if Core.IsValidObj(widgetCls) and w:IsA(widgetCls) and w.GetParent then
+                local cur = w
+                for _ = 1, 4 do
+                    local okP, p = pcall(function() return cur:GetParent() end)
+                    if not okP or not Core.IsValidObj(p) then break end
+                    if outerParentAddr and p:GetAddress() == outerParentAddr then break end
+                    consider(p)
+                    cur = p
+                end
             end
         end
     end
