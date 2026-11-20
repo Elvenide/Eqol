@@ -133,6 +133,7 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
   - **Setting `CurrentFloors[idx].machines = nil`**: Previously triggered a legacy world-coordinate fallback that generated 100k grid lines and froze the game.
   - **Wiping `CachedFloorMap = nil` inside `InvalidateMachineCache()`**: Forces a ~470ms full platform + 853-wall-collider rebuild on the next map open. Only clear `CachedMachinesByFrame = {}` when refreshing machines.
   - **Calling `DestroyStationMap()` from `WBP_WindowBase_C`'s `CloseWindow` delegate**: Destroys the cached window when clicking the `X` button; call `CloseStationMap()` instead and re-add `ActiveMapWin:AddToViewport(50)` on reopen if needed.
+  - **`NotifyOnNewObject("/Script/MainSequence.DMSObject", ...)` does NOT catch newly built machines**: Station machines (`BP_ConveyorBeltObject_C`, `BP_SplitterObject_C`, `BPO_BeltBalancer_*_C`, `BP_UndergroundBeltObject_C`, etc.) inherit from `/Script/MainSequence.MachineObject` (and specific subclasses like `/Script/MainSequence.ConveyorBeltObject`), not `DMSObject`. Always hook `"/Script/MainSequence.MachineObject"` (or the specific machine subclass) when watching for newly constructed machines.
 
 ### Empty / Dead Stubs
 - `DMSPlayerController:AddBuildMachineCommand` — Completely empty no-op stub (use `AddBuildCommand`).
