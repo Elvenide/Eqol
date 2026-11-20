@@ -183,8 +183,25 @@ local function ComputeCraftableCount(buildable, inv, invCounts, hasCountsMap)
     return minCount
 end
 
-local function GetHotbarBuildablesArray(pc, hud, hotbarWidget)
-    local list = {}
+local function KeyToString(k)
+    if k == nil then return nil end
+    if type(k) == "string" then return k end
+    if type(k) == "number" then return tostring(k) end
+    local unwrapped = k
+    local okG, g = pcall(function() return k.get and k:get() or k end)
+    if okG and g ~= nil then unwrapped = g end
+    if type(unwrapped) == "string" then return unwrapped end
+    if type(unwrapped) == "number" then return tostring(unwrapped) end
+    local okS, s = pcall(function()
+        if unwrapped.ToString then return unwrapped:ToString() end
+        return tostring(unwrapped)
+    end)
+    if okS and type(s) == "string" and s ~= "" then return s end
+    return nil
+end
+
+local function GetHotbarBuildablesData(pc, hud, hotbarWidget)
+    local result = { byName = {}, byIndex = {}, count = 0 }
     local sources = {}
     if Core.IsValidObj(hotbarWidget) then sources[#sources + 1] = hotbarWidget end
     if Core.IsValidObj(hud) then sources[#sources + 1] = hud end
@@ -197,33 +214,54 @@ local function GetHotbarBuildablesArray(pc, hud, hotbarWidget)
         for _, prop in ipairs({ "HotbarBuildables", "Hotbar", "HotbarItems", "Buildables" }) do
             local ok, arr = pcall(function() return src[prop] end)
             if ok and arr then
-                local found = {}
-                local idx = 0
-                StationData.ForEachArray(arr, function(i, elem)
-                    idx = idx + 1
+                local foundCount = 0
+                StationData.ForEachArray(arr, function(rawKey, elem)
                     local u = Core.UnwrapArrayElem(elem)
-                    if Core.IsValidObj(u) then
-                        found[i] = u
-                    else
+                    if not Core.IsValidObj(u) then
                         local st = Core.UnwrapStruct(elem)
                         if st then
                             for _, fName in ipairs({ "Buildable", "Item", "Object" }) do
                                 local okF, v = pcall(function() return st[fName] end)
                                 if okF and Core.IsValidObj(v) then
-                                    found[i] = v
+                                    u = v
                                     break
                                 end
                             end
                         end
                     end
+                    if Core.IsValidObj(u) then
+                        foundCount = foundCount + 1
+                        local kUnwrapped = rawKey
+                        local okG, g = pcall(function() return rawKey and rawKey.get and rawKey:get() or rawKey end)
+                        if okG and g ~= nil then kUnwrapped = g end
+
+                        if type(kUnwrapped) == "number" then
+                            result.byIndex[kUnwrapped] = u
+                            result.byIndex[kUnwrapped + 1] = result.byIndex[kUnwrapped + 1] or u
+                            result.byName[tostring(kUnwrapped)] = u
+                        else
+                            local ks = KeyToString(kUnwrapped)
+                            if ks and ks ~= "" then
+                                result.byName[ks] = u
+                                result.byName[ks:lower()] = u
+                                local num = tonumber(ks:match("(%d+)$"))
+                                if num then
+                                    -- Hotbar0 is slot 10, Hotbar1..9 are slots 1..9
+                                    local idx1 = (num == 0) and 10 or num
+                                    result.byIndex[idx1] = u
+                                end
+                            end
+                        end
+                    end
                 end)
-                if idx > 0 then
-                    return found
+                if foundCount > 0 then
+                    result.count = foundCount
+                    return result
                 end
             end
         end
     end
-    return list
+    return result
 end
 
 local function CollectReflectedObjectProps(uobj)
@@ -251,7 +289,7 @@ local function CollectReflectedObjectProps(uobj)
     return out
 end
 
-local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarArr)
+local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarData)
     if Core.IsValidObj(slotWidget) then
         for _, prop in ipairs({
             "Buildable", "CurrentBuildable", "BoundBuildable", "AssignedBuildable",
@@ -268,19 +306,29 @@ local function ExtractSlotBuildable(slotWidget, slotIndex, hotbarArr)
                 return v
             end
         end
-        -- Fallback: check any reflected property on slotWidget whose value is a UBuildable
-        local bldCls = Core.FindOrLoadClass(PATHS.BuildableClass)
-        if Core.IsValidObj(bldCls) then
-            for _, entry in ipairs(CollectReflectedObjectProps(slotWidget)) do
-                if Core.IsValidObj(entry.val) and entry.val:IsA(bldCls) then
-                    return entry.val
+
+        -- Match WBP_HotbarSlot_C's "Mapping Name" against HotbarBuildables TMap keys
+        if hotbarData and hotbarData.byName then
+            local okM, mapVal = pcall(function() return slotWidget["Mapping Name"] end)
+            if okM and mapVal ~= nil then
+                local ms = KeyToString(mapVal)
+                if ms and ms ~= "" then
+                    local hit = hotbarData.byName[ms] or hotbarData.byName[ms:lower()]
+                    if Core.IsValidObj(hit) then return hit end
+                    local num = tonumber(ms:match("(%d+)$"))
+                    if num then
+                        local idx1 = (num == 0) and 10 or num
+                        if Core.IsValidObj(hotbarData.byIndex[idx1]) then
+                            return hotbarData.byIndex[idx1]
+                        end
+                    end
                 end
             end
         end
     end
 
-    if hotbarArr and slotIndex and Core.IsValidObj(hotbarArr[slotIndex]) then
-        return hotbarArr[slotIndex]
+    if hotbarData and hotbarData.byIndex and slotIndex and Core.IsValidObj(hotbarData.byIndex[slotIndex]) then
+        return hotbarData.byIndex[slotIndex]
     end
     return nil
 end
@@ -579,26 +627,25 @@ local function RefreshHotbarCounts()
             TrackedHuds[addr] = nil
         else
             anyValid = true
-            local hotbarArr = GetHotbarBuildablesArray(pc, entry.Hud, entry.HotbarWidget)
-            local diagDoneThisTick = false
+            local hotbarData = GetHotbarBuildablesData(pc, entry.Hud, entry.HotbarWidget)
+            local firstBldLogged = false
             for _, s in ipairs(entry.Slots) do
                 if Core.IsValidObj(s.SlotWidget) and Core.IsValidObj(s.Badge) and Core.IsValidObj(s.Label) then
-                    local bld = ExtractSlotBuildable(s.SlotWidget, s.Index, hotbarArr)
+                    local bld = ExtractSlotBuildable(s.SlotWidget, s.Index, hotbarData)
                     local count = Core.IsValidObj(bld) and ComputeCraftableCount(bld, inv, invCounts, hasCountsMap) or nil
-                    if not DiagLogged and not diagDoneThisTick and s.Index == 1 then
-                        diagDoneThisTick = true
+                    if not DiagLogged and not firstBldLogged and (Core.IsValidObj(bld) or s.Index == #entry.Slots) then
+                        firstBldLogged = true
                         DiagLogged = true
                         local invN = 0
                         for _ in pairs(invCounts) do invN = invN + 1 end
-                        local hbN = 0
-                        for _ in pairs(hotbarArr) do hbN = hbN + 1 end
                         local bName = Core.IsValidObj(bld) and bld:GetFName():ToString() or "nil"
-                        local sProps = {}
-                        for _, pe in ipairs(CollectReflectedObjectProps(s.SlotWidget)) do
-                            if #sProps < 12 then sProps[#sProps + 1] = pe.name end
+                        local keys = {}
+                        for k, _ in pairs(hotbarData.byName) do
+                            if #keys < 6 then keys[#keys + 1] = tostring(k) end
                         end
-                        Core.Log(string.format("[HotbarCounts] RefreshDiag inv=%s(types=%d) hbArr=%d slot1Bld=%s count=%s slot1Props=[%s]",
-                            tostring(Core.IsValidObj(inv)), invN, hbN, bName, tostring(count), table.concat(sProps, ",")))
+                        local mapName = KeyToString(s.SlotWidget["Mapping Name"]) or "nil"
+                        Core.Log(string.format("[HotbarCounts] RefreshDiag inv=%s(types=%d) hbCount=%d keys=[%s] slot%d(map=%s) bld=%s count=%s",
+                            tostring(Core.IsValidObj(inv)), invN, hotbarData.count, table.concat(keys, ","), s.Index, mapName, bName, tostring(count)))
                     end
                     if count ~= nil then
                         local txt = FormatCount(count)

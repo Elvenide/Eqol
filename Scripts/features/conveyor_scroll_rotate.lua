@@ -94,9 +94,9 @@ local function StartScrollRotatePoll()
                     local pullingBelt = ConveyorPullingActive and IsConveyorBuilder(builder)
                     local steps = 1
                     if pullingBelt then
-                        -- While pulling out a conveyor belt, routing toggles via 1x AddRotation(1)
-                        -- for both scroll up and scroll down.
-                        steps = 1
+                        -- While pulling out a conveyor belt, routing cycles through 3 modes:
+                        -- Scroll Down = +1 mod 3, Scroll Up = +2 mod 3 (-1, opposite direction).
+                        steps = (delta == 1) and 2 or 1
                     elseif delta == 1 then
                         -- Scroll Up rotates -90 deg (+3 mod 4)
                         steps = 3
