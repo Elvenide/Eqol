@@ -12,7 +12,8 @@ local PollActive = false
 local CachedStationCheck = { time = -999, inStation = false }
 local ConveyorPullingActive = false
 local LastConveyorBuilderAddr = nil
-local LastBuildCmdClock = -999.0
+local LastBeltSpawnClock = -999.0
+local BeltSpawnHookRegistered = false
 
 local function IsConveyorBuilder(builder)
     if not Core.IsValidObj(builder) then return false end
@@ -124,24 +125,28 @@ local function StartScrollRotatePoll()
 end
 
 function Feature.RegisterHooks()
-    Core.TryRegisterHook(
-        "ScrollRotate_AddBuildCommand",
-        "/Script/MainSequence.DMSPlayerController:AddBuildCommand",
-        function()
-            -- Placing/committing pulled conveyor segments returns ConveyorBuilder to non-pulling mode
-            LastBuildCmdClock = os.clock()
-            ConveyorPullingActive = false
-        end
-    )
+    if not BeltSpawnHookRegistered then
+        BeltSpawnHookRegistered = true
+        pcall(NotifyOnNewObject, "/Script/MainSequence.DMSObject", function(obj)
+            if not Core.IsValidObj(obj) then return end
+            local okN, cn = pcall(function() return obj:GetClass():GetFName():ToString() end)
+            if okN and type(cn) == "string" and cn:find("ConveyorBeltObject", 1, true) then
+                -- Real conveyor belt simulation objects are spawned when pulled segments are committed,
+                -- returning ConveyorBuilder to its non-pulling single-tile state.
+                LastBeltSpawnClock = os.clock()
+                ConveyorPullingActive = false
+            end
+        end)
+    end
     Core.TryRegisterHook(
         "ScrollRotate_ConfirmBuild",
         "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
         function()
             local clickClock = os.clock()
-            ExecuteInGameThreadAfterFrames(1, function()
-                -- If AddBuildCommand fired from this ConfirmBuild, segments were committed (non-pulling).
-                -- Otherwise ConfirmBuild started or chained a conveyor preview segment (pulling).
-                if LastBuildCmdClock >= clickClock - 0.05 then
+            ExecuteInGameThreadAfterFrames(2, function()
+                -- If real ConveyorBeltObject(s) were spawned by this ConfirmBuild, the pulled segments
+                -- were committed and ConveyorBuilder is back in non-pulling mode.
+                if LastBeltSpawnClock >= clickClock - 0.05 then
                     ConveyorPullingActive = false
                     return
                 end

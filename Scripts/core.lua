@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.10"
+Core.VERSION = "0.1.11"
 
 Core.PATHS = {
     PlayerControllerClass = "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C",
