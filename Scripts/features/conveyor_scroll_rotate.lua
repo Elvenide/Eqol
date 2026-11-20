@@ -127,15 +127,12 @@ end
 function Feature.RegisterHooks()
     if not BeltSpawnHookRegistered then
         BeltSpawnHookRegistered = true
-        pcall(NotifyOnNewObject, "/Script/MainSequence.DMSObject", function(obj)
+        pcall(NotifyOnNewObject, "/Script/MainSequence.ConveyorBeltObject", function(obj)
             if not Core.IsValidObj(obj) then return end
-            local okN, cn = pcall(function() return obj:GetClass():GetFName():ToString() end)
-            if okN and type(cn) == "string" and cn:find("ConveyorBeltObject", 1, true) then
-                -- Real conveyor belt simulation objects are spawned when pulled segments are committed,
-                -- returning ConveyorBuilder to its non-pulling single-tile state.
-                LastBeltSpawnClock = os.clock()
-                ConveyorPullingActive = false
-            end
+            -- Real ConveyorBeltObject instances are spawned when pulled belt segments are committed,
+            -- returning ConveyorBuilder to its non-pulling single-tile state.
+            LastBeltSpawnClock = os.clock()
+            ConveyorPullingActive = false
         end)
     end
     Core.TryRegisterHook(
@@ -143,7 +140,7 @@ function Feature.RegisterHooks()
         "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
         function()
             local clickClock = os.clock()
-            ExecuteInGameThreadAfterFrames(2, function()
+            ExecuteInGameThreadWithDelay(80, function()
                 -- If real ConveyorBeltObject(s) were spawned by this ConfirmBuild, the pulled segments
                 -- were committed and ConveyorBuilder is back in non-pulling mode.
                 if LastBeltSpawnClock >= clickClock - 0.05 then

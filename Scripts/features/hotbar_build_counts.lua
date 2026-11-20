@@ -1,6 +1,6 @@
 -- Eqol Feature: Hotbar Craftable Count Labels
--- Step 1: Attach a visible hard-coded "1" badge onto each WBP_HotbarSlot_C to confirm
--- rendering & positioning before wiring live buildable cost counts.
+-- Displays a numeric label on each bottom-hotbar buildable slot showing how many of
+-- that machine can be built with the resources currently in the player's inventory.
 
 local Core = require("core")
 local StationData = require("station_data")
@@ -16,13 +16,307 @@ local PATHS = {
     BorderClass      = "/Script/UMG.Border",
     PanelWidgetClass = "/Script/UMG.PanelWidget",
     ContentWidgetCls = "/Script/UMG.ContentWidget",
+    ItemClass        = "/Script/MainSequence.Item",
 }
 
 local COLOR_OK = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
+local COLOR_ZERO = { R = 0.96, G = 0.36, B = 0.32, A = 1.0 }
 local BG_BADGE = { R = 0.02, G = 0.03, B = 0.05, A = 0.78 }
 
-local TrackedHuds = {}
+local TrackedHuds = {} -- hudAddr -> { Hud, HotbarWidget, Slots = { ... } }
+local PollActive = false
 local DiagLogged = false
+
+local function GetItemKey(item)
+    if not Core.IsValidObj(item) then return nil end
+    local ok, n = pcall(function() return item:GetFName():ToString() end)
+    if ok and type(n) == "string" and n ~= "" then
+        return n
+    end
+    return tostring(item:GetAddress())
+end
+
+local function KeyToString(k)
+    if k == nil then return nil end
+    if type(k) == "string" then return k end
+    if type(k) == "number" then return tostring(k) end
+    local unwrapped = k
+    local okG, g = pcall(function() return k.get and k:get() or k end)
+    if okG and g ~= nil then unwrapped = g end
+    if type(unwrapped) == "string" then return unwrapped end
+    if type(unwrapped) == "number" then return tostring(unwrapped) end
+    local okS, s = pcall(function()
+        if unwrapped.ToString then return unwrapped:ToString() end
+        return tostring(unwrapped)
+    end)
+    if okS and type(s) == "string" and s ~= "" then return s end
+    return nil
+end
+
+local function FormatCount(n)
+    if n >= 10000 then
+        return string.format("%.0fk", n / 1000.0)
+    elseif n >= 1000 then
+        return string.format("%.1fk", n / 1000.0)
+    end
+    return tostring(math.floor(n))
+end
+
+local function GetPlayerInventory(pc)
+    if not Core.IsValidObj(pc) then return nil end
+    local playerObj = pc.PlayerObject
+    if Core.IsValidObj(playerObj) then
+        if playerObj.GetInventory then
+            local ok, inv = pcall(function() return playerObj:GetInventory() end)
+            if ok and Core.IsValidObj(inv) then return inv end
+        end
+        for _, prop in ipairs({ "Inventory", "PlayerInventory", "CharacterInventory" }) do
+            local ok, inv = pcall(function() return playerObj[prop] end)
+            if ok and Core.IsValidObj(inv) then return inv end
+        end
+    end
+    if pc.GetInventory then
+        local ok, inv = pcall(function() return pc:GetInventory() end)
+        if ok and Core.IsValidObj(inv) then return inv end
+    end
+    return nil
+end
+
+local function BuildPlayerInventoryCounts(inv)
+    local counts = {}
+    if not Core.IsValidObj(inv) then return counts, false end
+    local okSlots, slots = pcall(function() return inv:GetItemSlots() end)
+    if not okSlots or not slots then
+        return counts, false
+    end
+    StationData.ForEachArray(slots, function(_, elem)
+        local st = Core.UnwrapStruct(elem)
+        if st then
+            local okI, item = pcall(function() return st.Item end)
+            local okA, amt = pcall(function() return st.Amount end)
+            if okI and Core.IsValidObj(item) and okA then
+                local n = tonumber(amt) or 0
+                if n > 0 then
+                    local k = GetItemKey(item)
+                    if k then
+                        counts[k] = (counts[k] or 0) + n
+                    end
+                end
+            end
+        end
+    end)
+    return counts, true
+end
+
+local function TryExtractSingleStack(val, stacks)
+    if not val then return false end
+    local st = Core.UnwrapStruct(val)
+    if not st then return false end
+    local okI, item = pcall(function() return st.Item end)
+    local okA, amt = pcall(function() return st.Amount end)
+    if okI and Core.IsValidObj(item) and okA then
+        local n = tonumber(amt) or 0
+        if n > 0 then
+            stacks[#stacks + 1] = { Item = item, Amount = n }
+            return true
+        end
+    end
+    return false
+end
+
+local function GetBuildableCostStacks(buildable)
+    if not Core.IsValidObj(buildable) then return nil end
+    local stacks = {}
+    local itemCls = Core.FindOrLoadClass(PATHS.ItemClass)
+
+    local function collectFromArr(arr)
+        if not arr then return end
+        StationData.ForEachArray(arr, function(rawKey, elem)
+            if TryExtractSingleStack(elem, stacks) then
+                return
+            end
+            -- TMap<UItem*, int32>
+            local kObj = Core.UnwrapArrayElem(rawKey)
+            if Core.IsValidObj(kObj) and (not Core.IsValidObj(itemCls) or kObj:IsA(itemCls)) then
+                local vVal = elem
+                local okG, g = pcall(function() return elem and elem.get and elem:get() or elem end)
+                if okG and g ~= nil then vVal = g end
+                local amt = tonumber(vVal) or 0
+                if amt > 0 then
+                    stacks[#stacks + 1] = { Item = kObj, Amount = amt }
+                end
+            end
+        end)
+    end
+
+    local function collectFromCostObj(val)
+        if not val then return end
+        if TryExtractSingleStack(val, stacks) then return end
+        collectFromArr(val)
+        if #stacks > 0 then return end
+        local st = Core.UnwrapStruct(val)
+        if st then
+            for _, subProp in ipairs({ "Items", "ItemStacks", "RequiredItems", "ItemsRequired", "Costs", "Ingredients" }) do
+                local okS, subArr = pcall(function() return st[subProp] end)
+                if okS and subArr then
+                    collectFromArr(subArr)
+                    if #stacks > 0 then return end
+                end
+            end
+        end
+    end
+
+    -- 1. Verified UBuildable properties: ItemCost & ItemDetails.Recipe.Inputs
+    local okIC, itemCost = pcall(function() return buildable.ItemCost end)
+    if okIC and itemCost then
+        collectFromCostObj(itemCost)
+        if #stacks > 0 then return stacks end
+    end
+
+    local okID, itemDetails = pcall(function() return buildable.ItemDetails end)
+    if okID and Core.IsValidObj(itemDetails) then
+        local okRec, rec = pcall(function() return itemDetails.Recipe end)
+        if okRec and Core.IsValidObj(rec) then
+            local okIn, inArr = pcall(function() return rec.Inputs end)
+            if okIn and inArr then
+                collectFromArr(inArr)
+                if #stacks > 0 then return stacks end
+            end
+        end
+        -- If bItemCostAsBuildingCost or no recipe inputs, check if ItemDetails itself is the item consumed
+        local okUse, useItem = pcall(function() return buildable.bUseItemCost end)
+        if okUse and useItem == true then
+            stacks[#stacks + 1] = { Item = itemDetails, Amount = 1 }
+            return stacks
+        end
+    end
+
+    -- 2. Fallback UFunctions / properties
+    for _, fnName in ipairs({ "GetBuildCost", "CostAsBuildingCost" }) do
+        local okFn, fn = pcall(function() return buildable[fnName] end)
+        if okFn and fn then
+            local ok, res = pcall(function() return fn(buildable) end)
+            if ok and res then
+                collectFromCostObj(res)
+                if #stacks > 0 then return stacks end
+            end
+        end
+    end
+
+    for _, prop in ipairs({ "BuildCost", "ItemsRequired", "Cost", "BuildingCost" }) do
+        local ok, val = pcall(function() return buildable[prop] end)
+        if ok and val then
+            collectFromCostObj(val)
+            if #stacks > 0 then return stacks end
+        end
+    end
+
+    return (#stacks > 0) and stacks or nil
+end
+
+local function ComputeCraftableCount(buildable, inv, invCounts, hasCountsMap)
+    local stacks = GetBuildableCostStacks(buildable)
+    if not stacks or #stacks == 0 then return nil end
+
+    local neededByKey = {}
+    local itemByKey = {}
+    for _, st in ipairs(stacks) do
+        local k = GetItemKey(st.Item)
+        if k then
+            neededByKey[k] = (neededByKey[k] or 0) + st.Amount
+            itemByKey[k] = st.Item
+        end
+    end
+
+    local minCount = math.huge
+    for k, reqAmt in pairs(neededByKey) do
+        if reqAmt > 0 then
+            local have = 0
+            if hasCountsMap then
+                have = invCounts[k] or 0
+            elseif Core.IsValidObj(inv) and inv.GetItemAmount then
+                local okA, a = pcall(function() return inv:GetItemAmount(itemByKey[k]) end)
+                if okA and type(a) == "number" then have = a end
+            end
+            local c = math.floor(have / reqAmt)
+            if c < minCount then minCount = c end
+            if minCount == 0 then break end
+        end
+    end
+
+    if minCount == math.huge then return nil end
+    return minCount
+end
+
+local function GetHotbarBuildablesData(pc, hud, hotbarWidget)
+    local result = { byName = {}, byIndex = {}, count = 0 }
+    local sources = {}
+    if Core.IsValidObj(hotbarWidget) then sources[#sources + 1] = hotbarWidget end
+    if Core.IsValidObj(hud) then sources[#sources + 1] = hud end
+    if Core.IsValidObj(pc) then
+        if Core.IsValidObj(pc.PlayerObject) then sources[#sources + 1] = pc.PlayerObject end
+        sources[#sources + 1] = pc
+    end
+
+    for _, src in ipairs(sources) do
+        for _, prop in ipairs({ "HotbarBuildables", "Hotbar", "HotbarItems", "Buildables" }) do
+            local ok, arr = pcall(function() return src[prop] end)
+            if ok and arr then
+                local foundCount = 0
+                StationData.ForEachArray(arr, function(rawKey, elem)
+                    local u = Core.UnwrapArrayElem(elem)
+                    if Core.IsValidObj(u) then
+                        foundCount = foundCount + 1
+                        local kUnwrapped = rawKey
+                        local okG, g = pcall(function() return rawKey and rawKey.get and rawKey:get() or rawKey end)
+                        if okG and g ~= nil then kUnwrapped = g end
+
+                        if type(kUnwrapped) == "number" then
+                            result.byIndex[kUnwrapped] = u
+                            result.byName[tostring(kUnwrapped)] = u
+                        else
+                            local ks = KeyToString(kUnwrapped)
+                            if ks and ks ~= "" then
+                                result.byName[ks] = u
+                                result.byName[ks:lower()] = u
+                                local num = tonumber(ks:match("(%d+)$"))
+                                if num then
+                                    local idx1 = (num == 0) and 10 or num
+                                    result.byIndex[idx1] = u
+                                end
+                            end
+                        end
+                    end
+                end)
+                if foundCount > 0 then
+                    result.count = foundCount
+                    return result
+                end
+            end
+        end
+    end
+    return result
+end
+
+local function ExtractSlotBuildable(slotWidget, hotbarData)
+    if not Core.IsValidObj(slotWidget) or not hotbarData then return nil end
+    local okM, mapVal = pcall(function() return slotWidget["Mapping Name"] end)
+    if okM and mapVal ~= nil then
+        local ms = KeyToString(mapVal)
+        if ms and ms ~= "" then
+            local hit = hotbarData.byName[ms] or hotbarData.byName[ms:lower()]
+            if Core.IsValidObj(hit) then return hit end
+            local num = tonumber(ms:match("(%d+)$"))
+            if num then
+                local idx1 = (num == 0) and 10 or num
+                if Core.IsValidObj(hotbarData.byIndex[idx1]) then
+                    return hotbarData.byIndex[idx1]
+                end
+            end
+        end
+    end
+    return nil
+end
 
 local function CollectReflectedObjectProps(uobj)
     local out = {}
@@ -49,8 +343,8 @@ local function CollectReflectedObjectProps(uobj)
     return out
 end
 
-local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
-    if not Core.IsValidObj(slotWidget) then return nil, nil, "invalid" end
+local function AttachBadgeToSlot(slotWidget, pc)
+    if not Core.IsValidObj(slotWidget) then return nil, nil end
 
     local overlayCls = Core.FindOrLoadClass(PATHS.OverlayClass)
     local canvasCls = Core.FindOrLoadClass(PATHS.CanvasPanelClass)
@@ -60,11 +354,9 @@ local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
     pcall(function() outerParent = slotWidget:GetParent() end)
     local outerParentAddr = Core.IsValidObj(outerParent) and outerParent:GetAddress() or nil
 
-    -- Inspect Image_60 (the icon inside WBP_HotbarSlot_C) and its parent chain
     local img = nil
     pcall(function() img = slotWidget.Image_60 end)
 
-    local chainNames = {}
     local targetOverlay = nil
     local targetCanvas = nil
     local imgDirectParent = nil
@@ -75,9 +367,6 @@ local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
             local okP, p = pcall(function() return cur:GetParent() end)
             if not okP or not Core.IsValidObj(p) then break end
             if outerParentAddr and p:GetAddress() == outerParentAddr then break end
-            local pCls = "?"
-            pcall(function() pCls = p:GetClass():GetFName():ToString() end)
-            chainNames[#chainNames + 1] = pCls
             if step == 1 then imgDirectParent = p end
             if not targetOverlay and Core.IsValidObj(overlayCls) and p:IsA(overlayCls) then
                 targetOverlay = p
@@ -88,43 +377,27 @@ local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
         end
     end
 
-    if logChain then
-        Core.Log(string.format("[HotbarCounts] Slot1 Image_60=%s parentChain=[%s]",
-            tostring(Core.IsValidObj(img)), table.concat(chainNames, " -> ")))
-    end
-
     local outer = Core.GetWidgetOuter(slotWidget)
     local badge = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local label = Core.CreateUserWidget(PATHS.WBPTextClass, slotWidget, pc)
     if not (Core.IsValidObj(badge) and Core.IsValidObj(label)) then
-        return nil, nil, "create_failed"
+        return nil, nil
     end
 
-    local function ApplyHardcodedText()
-        pcall(function()
-            badge:SetBrushColor(BG_BADGE)
-            badge:SetPadding({ Left = 4.0, Top = 1.0, Right = 4.0, Bottom = 1.0 })
-            badge:SetVisibility(3) -- HitTestInvisible (visible!)
-            label:SetSize(11)
-            label:SetText(Core.MakeText("1"))
-            label:SetVisibility(3)
-            if Core.IsValidObj(label.TextBlock) then
-                label.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLOR_OK, ColorUseRule = 0 })
-                label.TextBlock:SetVisibility(3)
-            end
-        end)
-    end
-
-    pcall(function() badge:AddChild(label) end)
-    ApplyHardcodedText()
-    -- Re-apply 1 frame later in case WBP_Text_C:Construct overrides text/size
-    ExecuteInGameThreadAfterFrames(1, function()
-        if Core.IsValidObj(badge) and Core.IsValidObj(label) then
-            ApplyHardcodedText()
+    pcall(function()
+        badge:SetBrushColor(BG_BADGE)
+        badge:SetPadding({ Left = 4.0, Top = 1.0, Right = 4.0, Bottom = 1.0 })
+        badge:SetVisibility(1) -- Collapsed until a bound buildable count is computed
+        label:SetSize(11)
+        label:SetText(Core.MakeText(""))
+        label:SetVisibility(3)
+        if Core.IsValidObj(label.TextBlock) then
+            label.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLOR_OK, ColorUseRule = 0 })
+            label.TextBlock:SetVisibility(3)
         end
+        badge:AddChild(label)
     end)
 
-    -- 1. Prefer attaching directly to an Overlay inside the slot
     if Core.IsValidObj(targetOverlay) then
         local oSlot = targetOverlay:AddChildToOverlay(badge)
         if Core.IsValidObj(oSlot) then
@@ -134,10 +407,9 @@ local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
                 oSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 3.0, Bottom = 2.0 })
             end)
         end
-        return badge, label, "Overlay"
+        return badge, label
     end
 
-    -- 2. Or a CanvasPanel inside the slot
     if Core.IsValidObj(targetCanvas) then
         local cSlot = targetCanvas:AddChildToCanvas(badge)
         if Core.IsValidObj(cSlot) then
@@ -148,11 +420,9 @@ local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
                 cSlot:SetPosition({ X = -3.0, Y = -2.0 })
             end)
         end
-        return badge, label, "Canvas"
+        return badge, label
     end
 
-    -- 3. If Image_60 sits directly inside a single-child ContentWidget (Border / SizeBox),
-    --    wrap Image_60 + badge together inside a new Overlay so the badge overlays the icon cleanly!
     if Core.IsValidObj(img) and Core.IsValidObj(imgDirectParent)
         and Core.IsValidObj(contentCls) and imgDirectParent:IsA(contentCls)
     then
@@ -173,11 +443,11 @@ local function AttachHardcodedBadgeToSlot(slotWidget, pc, logChain)
                 end
                 imgDirectParent:SetContent(wrapOverlay)
             end)
-            return badge, label, "WrappedOverlay"
+            return badge, label
         end
     end
 
-    return nil, nil, "no_host"
+    return nil, nil
 end
 
 local function DiscoverHotbarSlots(hud)
@@ -259,6 +529,91 @@ local function DiscoverHotbarSlots(hud)
     return hotbarWidget, slots
 end
 
+local function RefreshHotbarCounts()
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then return false end
+
+    local inv = GetPlayerInventory(pc)
+    local invCounts, hasCountsMap = BuildPlayerInventoryCounts(inv)
+    local anyValid = false
+
+    for addr, entry in pairs(TrackedHuds) do
+        if not Core.IsValidObj(entry.Hud) then
+            TrackedHuds[addr] = nil
+        else
+            anyValid = true
+            local hotbarData = GetHotbarBuildablesData(pc, entry.Hud, entry.HotbarWidget)
+            for _, s in ipairs(entry.Slots) do
+                if Core.IsValidObj(s.SlotWidget) and Core.IsValidObj(s.Badge) and Core.IsValidObj(s.Label) then
+                    local bld = ExtractSlotBuildable(s.SlotWidget, hotbarData)
+                    local count = Core.IsValidObj(bld) and ComputeCraftableCount(bld, inv, invCounts, hasCountsMap) or nil
+                    if not DiagLogged and Core.IsValidObj(bld) then
+                        DiagLogged = true
+                        local bName = bld:GetFName():ToString()
+                        local mapName = KeyToString(s.SlotWidget["Mapping Name"]) or "nil"
+                        local stacks = GetBuildableCostStacks(bld)
+                        Core.Log(string.format("[HotbarCounts] CostDiag map=%s bld=%s stacks=%d count=%s",
+                            mapName, bName, stacks and #stacks or 0, tostring(count)))
+                    end
+                    if count ~= nil then
+                        local txt = FormatCount(count)
+                        local isZero = (count == 0)
+                        if s.LastVis ~= 3 then
+                            s.LastVis = 3
+                            pcall(function()
+                                s.Badge:SetVisibility(3)
+                                s.Label:SetVisibility(3)
+                                s.Label:SetSize(11)
+                            end)
+                        end
+                        if s.LastText ~= txt then
+                            s.LastText = txt
+                            pcall(function() s.Label:SetText(Core.MakeText(txt)) end)
+                        end
+                        if s.LastZero ~= isZero then
+                            s.LastZero = isZero
+                            local col = isZero and COLOR_ZERO or COLOR_OK
+                            pcall(function()
+                                if Core.IsValidObj(s.Label.TextBlock) then
+                                    s.Label.TextBlock:SetColorAndOpacity({ SpecifiedColor = col, ColorUseRule = 0 })
+                                    s.Label.TextBlock:SetVisibility(3)
+                                end
+                            end)
+                        end
+                    else
+                        if s.LastVis ~= 1 then
+                            s.LastVis = 1
+                            s.LastText = nil
+                            pcall(function() s.Badge:SetVisibility(1) end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return anyValid
+end
+
+local function StartPoll()
+    if PollActive then return end
+    PollActive = true
+    local function Tick()
+        local ok, anyValid = pcall(RefreshHotbarCounts)
+        if not ok then
+            Core.Log("[HotbarCounts] RefreshHotbarCounts error: " .. tostring(anyValid))
+            PollActive = false
+            return
+        end
+        if anyValid then
+            ExecuteInGameThreadWithDelay(500, Tick)
+        else
+            PollActive = false
+        end
+    end
+    ExecuteInGameThreadWithDelay(250, Tick)
+end
+
 local function EnsureHudHotbarTracked(hud)
     if not Core.IsValidObj(hud) then return end
     local addr = hud:GetAddress()
@@ -272,20 +627,30 @@ local function EnsureHudHotbarTracked(hud)
     local hotbarWidget, rawSlots = DiscoverHotbarSlots(hud)
     if #rawSlots == 0 then return end
 
-    local attachedCount = 0
-    local firstMode = "?"
-    for i, slotW in ipairs(rawSlots) do
-        local badge, label, mode = AttachHardcodedBadgeToSlot(slotW, pc, (i == 1 and not DiagLogged))
-        if i == 1 then firstMode = mode end
+    local trackedSlots = {}
+    for _, slotW in ipairs(rawSlots) do
+        local badge, label = AttachBadgeToSlot(slotW, pc)
         if Core.IsValidObj(badge) and Core.IsValidObj(label) then
-            attachedCount = attachedCount + 1
+            trackedSlots[#trackedSlots + 1] = {
+                SlotWidget = slotW,
+                Badge = badge,
+                Label = label,
+                LastText = nil,
+                LastZero = nil,
+                LastVis = 1,
+            }
         end
     end
 
-    DiagLogged = true
-    TrackedHuds[addr] = { Hud = hud }
-    Core.Log(string.format("[HotbarCounts] Step1 hardcoded '1': attached %d/%d slots (mode=%s)",
-        attachedCount, #rawSlots, tostring(firstMode)))
+    if #trackedSlots > 0 then
+        TrackedHuds[addr] = {
+            Hud = hud,
+            HotbarWidget = hotbarWidget,
+            Slots = trackedSlots,
+        }
+        Core.Log(string.format("[HotbarCounts] Attached %d/%d hotbar count labels", #trackedSlots, #rawSlots))
+        StartPoll()
+    end
 end
 
 local function TryAttachExistingHuds()
