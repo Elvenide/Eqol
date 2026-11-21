@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.25"
+Core.VERSION = "0.1.26"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -443,6 +443,22 @@ end
 
 function Core.GetToggleableFeatures()
     return FeatureToggles
+end
+
+function Core.RegisterToggleableOption(opts)
+    if type(opts) ~= "table" or not opts.Name then return end
+    if FeatureToggleByName[opts.Name] then return end
+    local cfgKey = "Enable_" .. opts.Name
+    Core.ReadConfig({ [cfgKey] = true })
+    local entry = {
+        Name        = opts.Name,
+        DisplayName = opts.DisplayName or opts.Name,
+        Description = opts.Description or "",
+        ConfigKey   = cfgKey,
+        Feature     = { OnToggle = opts.OnToggle },
+    }
+    table.insert(FeatureToggles, entry)
+    FeatureToggleByName[opts.Name] = entry
 end
 
 function Core.RegisterFeature(feature)
@@ -1019,6 +1035,7 @@ function Core.IsGameplayInputAllowed(opts)
         if not allowSelfWindow then
             return false
         end
+        return true
     end
 
     if opts.AllowCursorUI == true then

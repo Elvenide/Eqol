@@ -1,6 +1,7 @@
 -- Eqol Feature: Eqol Settings Tab
--- Adds an "Eqol Settings" tab to the native WBP_SettingsMenu_C screen with one checkbox
--- per toggleable Eqol feature, persisted automatically to config.json.
+-- Adds an "Eqol Settings" tab to the native WBP_SettingsMenu_C screen with one clickable
+-- toggle card per Eqol feature, persisted automatically to config.json.
+-- Cards are built lazily on first tab click so opening Pause / Settings (Esc) has zero hitch.
 
 local Core = require("core")
 
@@ -23,8 +24,11 @@ local PATHS = {
 }
 
 local COLORS = {
-    TabNormalBg     = { R = 0.08, G = 0.10, B = 0.13, A = 0.90 },
-    TabActiveBg     = { R = 0.85, G = 0.56, B = 0.08, A = 0.96 },
+    Transparent     = { R = 0.00, G = 0.00, B = 0.00, A = 0.00 },
+    TabLineActive   = { R = 0.95, G = 0.65, B = 0.12, A = 1.00 },
+    TabLineInactive = { R = 0.72, G = 0.76, B = 0.80, A = 0.55 },
+    TabTextActive   = { R = 0.95, G = 0.65, B = 0.12, A = 1.00 },
+    TabTextInactive = { R = 0.94, G = 0.95, B = 0.97, A = 0.95 },
     RowBg           = { R = 0.04, G = 0.05, B = 0.08, A = 0.65 },
     CheckOnBg       = { R = 0.85, G = 0.56, B = 0.08, A = 0.96 },
     CheckOffBg      = { R = 0.10, G = 0.12, B = 0.16, A = 0.95 },
@@ -34,7 +38,7 @@ local COLORS = {
     HeaderText      = { R = 0.95, G = 0.70, B = 0.22, A = 1.00 },
 }
 
-local InjectedMenus = {} -- menuAddr -> { Menu, Switcher, EqolIndex, TabBtn, TabPage, Rows = { ... } }
+local InjectedMenus = {} -- menuAddr -> menuState
 local DiagLogged = false
 
 local function SafeIsA(obj, cls)
@@ -44,9 +48,9 @@ local function SafeIsA(obj, cls)
 end
 
 local function FindTabBarInTree(rootPanel, panelCls, btnCls, userWidgetCls, switcherAddr, depth, visited)
-    if not Core.IsValidObj(rootPanel) or depth > 5 then return nil, nil end
+    if not Core.IsValidObj(rootPanel) or depth > 5 then return nil, nil, nil end
     local addr = rootPanel:GetAddress()
-    if addr == switcherAddr or visited[addr] then return nil, nil end
+    if addr == switcherAddr or visited[addr] then return nil, nil, nil end
     visited[addr] = true
 
     if SafeIsA(rootPanel, panelCls) and rootPanel.GetAllChildren then
@@ -70,29 +74,28 @@ local function FindTabBarInTree(rootPanel, panelCls, btnCls, userWidgetCls, swit
                     end
                 end
                 if #btns >= 2 and #btns <= 8 then
-                    return rootPanel, btns[#btns]
+                    return rootPanel, btns[#btns], btns
                 end
                 if #uws >= 2 and #uws <= 8 then
-                    -- Check if these UserWidgets are tab buttons (e.g., WBP_TabButton_C / WBP_Button_C)
                     local cn = ""
                     pcall(function() cn = uws[1]:GetClass():GetFName():ToString():lower() end)
                     if cn:find("button", 1, true) or cn:find("tab", 1, true) then
-                        return rootPanel, uws[#uws]
+                        return rootPanel, uws[#uws], uws
                     end
                 end
                 for _, cp in ipairs(childPanels) do
-                    local tb, rb = FindTabBarInTree(cp, panelCls, btnCls, userWidgetCls, switcherAddr, depth + 1, visited)
-                    if Core.IsValidObj(tb) then return tb, rb end
+                    local tb, rb, sibs = FindTabBarInTree(cp, panelCls, btnCls, userWidgetCls, switcherAddr, depth + 1, visited)
+                    if Core.IsValidObj(tb) then return tb, rb, sibs end
                 end
             end
         end
     end
-    return nil, nil
+    return nil, nil, nil
 end
 
 local function FindSettingsSwitcherAndTabBar(menu)
     if not Core.IsValidObj(menu) or not Core.IsValidObj(menu.ControlSettings) then
-        return nil, nil, nil
+        return nil, nil, nil, nil
     end
 
     local switcherCls = Core.FindOrLoadClass(PATHS.WidgetSwitcherCls)
@@ -103,7 +106,6 @@ local function FindSettingsSwitcherAndTabBar(menu)
     local switcher = nil
     local topAncestor = menu.ControlSettings
 
-    -- 1. Walk up from menu.ControlSettings to find the exact UWidgetSwitcher and its parent container
     local cur = menu.ControlSettings
     for _ = 1, 6 do
         if not cur.GetParent then break end
@@ -116,18 +118,17 @@ local function FindSettingsSwitcherAndTabBar(menu)
         cur = p
     end
 
-    -- 2. Search from switcher's parent (and topAncestor) for the tab strip PanelWidget holding the tab buttons
-    local tabBar, refTabBtn = nil, nil
+    local tabBar, refTabBtn, siblingTabs = nil, nil, nil
     local switcherAddr = Core.IsValidObj(switcher) and switcher:GetAddress() or nil
     local visited = {}
     if Core.IsValidObj(switcher) and switcher.GetParent then
         local okSP, sp = pcall(function() return switcher:GetParent() end)
         if okSP and Core.IsValidObj(sp) then
-            tabBar, refTabBtn = FindTabBarInTree(sp, panelCls, btnCls, userWidgetCls, switcherAddr, 0, visited)
+            tabBar, refTabBtn, siblingTabs = FindTabBarInTree(sp, panelCls, btnCls, userWidgetCls, switcherAddr, 0, visited)
         end
     end
     if not Core.IsValidObj(tabBar) and Core.IsValidObj(topAncestor) then
-        tabBar, refTabBtn = FindTabBarInTree(topAncestor, panelCls, btnCls, userWidgetCls, switcherAddr, 0, visited)
+        tabBar, refTabBtn, siblingTabs = FindTabBarInTree(topAncestor, panelCls, btnCls, userWidgetCls, switcherAddr, 0, visited)
     end
 
     if not DiagLogged then
@@ -136,36 +137,50 @@ local function FindSettingsSwitcherAndTabBar(menu)
         local tbName = Core.IsValidObj(tabBar) and tabBar:GetFName():ToString() or "nil"
         local rbName = Core.IsValidObj(refTabBtn) and refTabBtn:GetFName():ToString() or "nil"
         Core.Log(string.format("[EqolSettings] Discovered switcher=%s tabBar=%s refBtn=%s", swName, tbName, rbName))
-        if not Core.IsValidObj(tabBar) and Core.IsValidObj(switcher) and switcher.GetParent then
-            local parts = {}
-            pcall(function()
-                local sp = switcher:GetParent()
-                if Core.IsValidObj(sp) and sp.GetAllChildren then
-                    local ch = sp:GetAllChildren()
-                    local len = ch.GetArrayNum and ch:GetArrayNum() or #ch
-                    for i = 1, len do
-                        local cw = Core.UnwrapArrayElem(ch[i])
-                        if Core.IsValidObj(cw) then
-                            parts[#parts + 1] = cw:GetFName():ToString() .. ":" .. cw:GetClass():GetFName():ToString()
-                        end
-                    end
-                end
-            end)
-            Core.Log("[EqolSettings] Switcher parent children: " .. table.concat(parts, ", "))
-        end
     end
 
-    return switcher, tabBar, refTabBtn
+    return switcher, tabBar, refTabBtn, siblingTabs or {}
+end
+
+local function SetEqolTabVisualActive(menuState, isActive)
+    if not menuState then return end
+    if Core.IsValidObj(menuState.TabLine) then
+        pcall(function()
+            menuState.TabLine:SetBrushColor(isActive and COLORS.TabLineActive or COLORS.TabLineInactive)
+        end)
+    end
+    if Core.IsValidObj(menuState.TabTxt) and Core.IsValidObj(menuState.TabTxt.TextBlock) then
+        pcall(function()
+            menuState.TabTxt.TextBlock:SetColorAndOpacity({
+                SpecifiedColor = isActive and COLORS.TabTextActive or COLORS.TabTextInactive,
+                ColorUseRule = 0,
+            })
+        end)
+    end
+    -- Deselect vanilla WBP_CleanTab siblings when Eqol Settings tab becomes active
+    if isActive and menuState.SiblingTabs then
+        for _, sib in ipairs(menuState.SiblingTabs) do
+            if Core.IsValidObj(sib) then
+                pcall(function()
+                    if sib.SetSelected then
+                        sib:SetSelected(false)
+                    elseif sib.SetActive then
+                        sib:SetActive(false)
+                    elseif sib.Deselect then
+                        sib:Deselect()
+                    end
+                end)
+            end
+        end
+    end
 end
 
 local function ApplyCheckboxVisual(rowState)
     if not rowState then return end
     local enabled = Core.IsFeatureEnabled(rowState.Name)
-    if Core.IsValidObj(rowState.CheckBtn) then
+    if Core.IsValidObj(rowState.CheckBoxBg) then
         pcall(function()
-            if rowState.CheckBtn.SetBackgroundColour then
-                rowState.CheckBtn:SetBackgroundColour(enabled and COLORS.CheckOnBg or COLORS.CheckOffBg)
-            end
+            rowState.CheckBoxBg:SetBrushColor(enabled and COLORS.CheckOnBg or COLORS.CheckOffBg)
         end)
     end
     if Core.IsValidObj(rowState.CheckMark) then
@@ -197,56 +212,61 @@ local function SyncAllCheckboxes(menuState)
 end
 
 local function BuildFeatureRow(menu, pc, outer, featEntry)
+    -- Full-card clickable Overlay: full-bleed WBP_Button_C behind HitTestInvisible card content
+    local cardOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
+    local cardBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
     local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
     local chkSize = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-    local chkOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
-    local chkBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
+    local chkBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local chkMark = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
     local textCol = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local titleTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
     local descTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
 
-    if not (Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(chkSize)
-        and Core.IsValidObj(chkOverlay) and Core.IsValidObj(chkBtn) and Core.IsValidObj(chkMark)
-        and Core.IsValidObj(textCol) and Core.IsValidObj(titleTxt) and Core.IsValidObj(descTxt)) then
+    if not (Core.IsValidObj(cardOverlay) and Core.IsValidObj(cardBtn) and Core.IsValidObj(rowBorder)
+        and Core.IsValidObj(rowHBox) and Core.IsValidObj(chkSize) and Core.IsValidObj(chkBg)
+        and Core.IsValidObj(chkMark) and Core.IsValidObj(textCol)
+        and Core.IsValidObj(titleTxt) and Core.IsValidObj(descTxt)) then
         return nil, nil
     end
 
     local rowState = {
-        Name      = featEntry.Name,
-        CheckBtn  = chkBtn,
-        CheckMark = chkMark,
-        TitleTxt  = titleTxt,
-        DescTxt   = descTxt,
+        Name       = featEntry.Name,
+        CardBtn    = cardBtn,
+        CheckBoxBg = chkBg,
+        CheckMark  = chkMark,
+        TitleTxt   = titleTxt,
+        DescTxt    = descTxt,
     }
 
     pcall(function()
-        rowBorder:SetBrushColor(COLORS.RowBg)
+        if cardBtn.SetBackgroundColour then
+            cardBtn:SetBackgroundColour(COLORS.RowBg)
+        end
+        cardBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+
+        rowBorder:SetBrushColor(COLORS.Transparent)
         rowBorder:SetPadding({ Left = 12.0, Top = 8.0, Right = 12.0, Bottom = 8.0 })
+        rowBorder:SetVisibility(3) -- HitTestInvisible so clicks anywhere on card hit cardBtn
+        rowHBox:SetVisibility(3)
 
         chkSize:SetWidthOverride(26.0)
         chkSize:SetHeightOverride(26.0)
-        chkBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-
-        local bSlot = chkOverlay:AddChildToOverlay(chkBtn)
-        if Core.IsValidObj(bSlot) then
-            bSlot:SetHorizontalAlignment(0) -- Fill
-            bSlot:SetVerticalAlignment(0)   -- Fill
-        end
-        local mSlot = chkOverlay:AddChildToOverlay(chkMark)
-        if Core.IsValidObj(mSlot) then
-            mSlot:SetHorizontalAlignment(2) -- Center
-            mSlot:SetVerticalAlignment(2)   -- Center
-        end
-        chkSize:AddChild(chkOverlay)
+        chkSize:SetVisibility(3)
+        chkBg:SetHorizontalAlignment(2) -- Center
+        chkBg:SetVerticalAlignment(2)   -- Center
+        chkBg:SetVisibility(3)
+        chkBg:AddChild(chkMark)
+        chkSize:AddChild(chkBg)
 
         local cSlot = rowHBox:AddChildToHorizontalBox(chkSize)
         if Core.IsValidObj(cSlot) then
-            cSlot:SetVerticalAlignment(2) -- Center
+            cSlot:SetVerticalAlignment(2)
             cSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 14.0, Bottom = 0.0 })
         end
 
+        textCol:SetVisibility(3)
         textCol:AddChildToVerticalBox(titleTxt)
         if featEntry.Description and featEntry.Description ~= "" then
             textCol:AddChildToVerticalBox(descTxt)
@@ -254,25 +274,40 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
 
         local tSlot = rowHBox:AddChildToHorizontalBox(textCol)
         if Core.IsValidObj(tSlot) then
-            tSlot:SetVerticalAlignment(2) -- Center
+            tSlot:SetVerticalAlignment(2)
             tSlot:SetSize({ Value = 1.0, SizeRule = 1 })
         end
 
         rowBorder:AddChild(rowHBox)
+
+        local bSlot = cardOverlay:AddChildToOverlay(cardBtn)
+        if Core.IsValidObj(bSlot) then
+            bSlot:SetHorizontalAlignment(0) -- Fill
+            bSlot:SetVerticalAlignment(0)   -- Fill
+        end
+        local rSlot = cardOverlay:AddChildToOverlay(rowBorder)
+        if Core.IsValidObj(rSlot) then
+            rSlot:SetHorizontalAlignment(0) -- Fill
+            rSlot:SetVerticalAlignment(0)   -- Fill
+        end
     end)
 
     local function ApplyTextDefaults()
         pcall(function()
-            chkMark:SetVisibility(3) -- HitTestInvisible so clicks reach chkBtn
+            chkMark:SetVisibility(3)
             chkMark:SetSize(14)
             if Core.IsValidObj(chkMark.TextBlock) then chkMark.TextBlock:SetVisibility(3) end
 
+            titleTxt:SetVisibility(3)
             titleTxt:SetSize(13)
             titleTxt:SetText(Core.MakeText(featEntry.DisplayName or featEntry.Name))
+            if Core.IsValidObj(titleTxt.TextBlock) then titleTxt.TextBlock:SetVisibility(3) end
 
+            descTxt:SetVisibility(3)
             descTxt:SetSize(10)
             descTxt:SetText(Core.MakeText(featEntry.Description or ""))
             if Core.IsValidObj(descTxt.TextBlock) and descTxt.TextBlock.SetColorAndOpacity then
+                descTxt.TextBlock:SetVisibility(3)
                 descTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.DescText, ColorUseRule = 0 })
             end
         end)
@@ -281,11 +316,11 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
 
     ApplyTextDefaults()
     ExecuteInGameThreadAfterFrames(1, function()
-        if Core.IsValidObj(chkBtn) then ApplyTextDefaults() end
+        if Core.IsValidObj(cardBtn) then ApplyTextDefaults() end
     end)
 
-    -- Never do heavy work synchronously inside WBP_Button_C click hook (see learning.md §6)
-    Core.RegisterWBPButtonClick(chkBtn, function()
+    -- Never do heavy work synchronously inside WBP_Button_C click hook (learning.md §6)
+    Core.RegisterWBPButtonClick(cardBtn, function()
         ExecuteInGameThreadWithDelay(10, function()
             local nextVal = not Core.IsFeatureEnabled(featEntry.Name)
             Core.SetFeatureEnabled(featEntry.Name, nextVal)
@@ -293,35 +328,21 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
         end)
     end)
 
-    return rowBorder, rowState
+    return cardOverlay, rowState
 end
 
-local function EnsureEqolSettingsTab(menu)
-    if not Core.IsValidObj(menu) then return end
-    local menuAddr = menu:GetAddress()
-    local existing = InjectedMenus[menuAddr]
-    if existing and Core.IsValidObj(existing.TabBtn) and Core.IsValidObj(existing.TabPage) then
-        SyncAllCheckboxes(existing)
-        return
-    end
+local function PopulateEqolPageLazy(menuState)
+    if not menuState or menuState.PagePopulated then return end
+    if not (Core.IsValidObj(menuState.Menu) and Core.IsValidObj(menuState.PageVBox)) then return end
+    menuState.PagePopulated = true
 
-    local switcher, tabBar, refTabBtn = FindSettingsSwitcherAndTabBar(menu)
-    if not (Core.IsValidObj(switcher) and Core.IsValidObj(tabBar)) then
-        return
-    end
-
+    local menu = menuState.Menu
     local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
     local outer = Core.GetWidgetOuter(menu)
+    local pageVBox = menuState.PageVBox
 
-    -- Build the Eqol Settings ScrollBox page
-    local pageScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
-    local pageVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local headerTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
     local subTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
-    if not (Core.IsValidObj(pageScroll) and Core.IsValidObj(pageVBox)) then
-        return
-    end
-
     if Core.IsValidObj(headerTxt) then
         local hSlot = pageVBox:AddChildToVerticalBox(headerTxt)
         if Core.IsValidObj(hSlot) then
@@ -346,7 +367,7 @@ local function EnsureEqolSettingsTab(menu)
             end
             if Core.IsValidObj(subTxt) then
                 subTxt:SetSize(10)
-                subTxt:SetText(Core.MakeText("Enable or disable individual Eqol features. Changes apply immediately and are saved automatically."))
+                subTxt:SetText(Core.MakeText("Click any feature card to enable or disable it. Changes apply immediately and save automatically."))
                 if Core.IsValidObj(subTxt.TextBlock) and subTxt.TextBlock.SetColorAndOpacity then
                     subTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.DescText, ColorUseRule = 0 })
                 end
@@ -357,8 +378,8 @@ local function EnsureEqolSettingsTab(menu)
     ExecuteInGameThreadAfterFrames(1, ApplyHeaderText)
 
     local rows = {}
-    local features = Core.GetToggleableFeatures()
-    for _, featEntry in ipairs(features) do
+    menuState.Rows = rows
+    for _, featEntry in ipairs(Core.GetToggleableFeatures()) do
         local rowWidget, rowState = BuildFeatureRow(menu, pc, outer, featEntry)
         if Core.IsValidObj(rowWidget) and rowState then
             local rSlot = pageVBox:AddChildToVerticalBox(rowWidget)
@@ -368,7 +389,69 @@ local function EnsureEqolSettingsTab(menu)
             rows[#rows + 1] = rowState
         end
     end
+end
 
+local function HookSiblingTabButtons(menuState)
+    if not menuState or not menuState.SiblingTabs then return end
+    local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
+    for _, sib in ipairs(menuState.SiblingTabs) do
+        if Core.IsValidObj(sib) then
+            local sibBtn = nil
+            if SafeIsA(sib, btnCls) then
+                sibBtn = sib
+            else
+                for _, prop in ipairs({ "WBP_Button", "Button", "TabButton", "Button_0" }) do
+                    local okB, b = pcall(function() return sib[prop] end)
+                    if okB and SafeIsA(b, btnCls) then
+                        sibBtn = b
+                        break
+                    end
+                end
+            end
+            if Core.IsValidObj(sibBtn) then
+                Core.RegisterWBPButtonClick(sibBtn, function()
+                    ExecuteInGameThreadWithDelay(10, function()
+                        SetEqolTabVisualActive(menuState, false)
+                    end)
+                end)
+            end
+        end
+    end
+end
+
+local function EnsureEqolSettingsTab(menu)
+    if not Core.IsValidObj(menu) then return end
+    local menuAddr = menu:GetAddress()
+    local existing = InjectedMenus[menuAddr]
+    if existing and Core.IsValidObj(existing.TabBtn) and Core.IsValidObj(existing.TabPage) then
+        -- Sync active tab highlight in case user switched back to a vanilla tab
+        local isEqolActive = false
+        if Core.IsValidObj(existing.Switcher) and existing.Switcher.GetActiveWidgetIndex then
+            pcall(function()
+                isEqolActive = (tonumber(existing.Switcher:GetActiveWidgetIndex()) == existing.EqolIndex)
+            end)
+        end
+        SetEqolTabVisualActive(existing, isEqolActive)
+        if existing.PagePopulated then
+            SyncAllCheckboxes(existing)
+        end
+        return
+    end
+
+    local switcher, tabBar, refTabBtn, siblingTabs = FindSettingsSwitcherAndTabBar(menu)
+    if not (Core.IsValidObj(switcher) and Core.IsValidObj(tabBar)) then
+        return
+    end
+
+    local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
+    local outer = Core.GetWidgetOuter(menu)
+
+    -- Create only the lightweight empty ScrollBox shell now (lazy-populate rows on tab click so Esc has 0ms hitch!)
+    local pageScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
+    local pageVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
+    if not (Core.IsValidObj(pageScroll) and Core.IsValidObj(pageVBox)) then
+        return
+    end
     pcall(function() pageScroll:AddChild(pageVBox) end)
     pcall(function() switcher:AddChild(pageScroll) end)
 
@@ -381,29 +464,53 @@ local function EnsureEqolSettingsTab(menu)
         end
     end)
 
-    -- Build the "Eqol Settings" tab button matching existing tab buttons
-    local tabBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
-    local tabTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
+    -- Build a clean tab button matching WBP_CleanTab_C (transparent bg + bottom underline bar + equal column fill)
     local tabOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
-    if not (Core.IsValidObj(tabBtn) and Core.IsValidObj(tabTxt) and Core.IsValidObj(tabOverlay)) then
+    local tabBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
+    local tabVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
+    local tabTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
+    local tabLineSize = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+    local tabLine = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    if not (Core.IsValidObj(tabOverlay) and Core.IsValidObj(tabBtn) and Core.IsValidObj(tabVBox)
+        and Core.IsValidObj(tabTxt) and Core.IsValidObj(tabLineSize) and Core.IsValidObj(tabLine)) then
         return
     end
 
     pcall(function()
         if tabBtn.SetBackgroundColour then
-            tabBtn:SetBackgroundColour(COLORS.TabNormalBg)
+            tabBtn:SetBackgroundColour(COLORS.Transparent)
         end
-        tabBtn:SetContentPadding({ Left = 10.0, Top = 4.0, Right = 10.0, Bottom = 4.0 })
+        tabBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+
+        tabVBox:SetVisibility(3) -- HitTestInvisible
+        local tSlot = tabVBox:AddChildToVerticalBox(tabTxt)
+        if Core.IsValidObj(tSlot) then
+            tSlot:SetHorizontalAlignment(2) -- Center
+            tSlot:SetVerticalAlignment(2)   -- Center
+            tSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+            tSlot:SetPadding({ Left = 8.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
+        end
+
+        tabLineSize:SetHeightOverride(2.0)
+        tabLineSize:SetVisibility(3)
+        tabLine:SetBrushColor(COLORS.TabLineInactive)
+        tabLine:SetVisibility(3)
+        tabLineSize:AddChild(tabLine)
+        local lSlot = tabVBox:AddChildToVerticalBox(tabLineSize)
+        if Core.IsValidObj(lSlot) then
+            lSlot:SetHorizontalAlignment(0) -- Fill
+            lSlot:SetVerticalAlignment(3)   -- Bottom
+        end
+
         local bSlot = tabOverlay:AddChildToOverlay(tabBtn)
         if Core.IsValidObj(bSlot) then
             bSlot:SetHorizontalAlignment(0)
             bSlot:SetVerticalAlignment(0)
         end
-        local tSlot = tabOverlay:AddChildToOverlay(tabTxt)
-        if Core.IsValidObj(tSlot) then
-            tSlot:SetHorizontalAlignment(2)
-            tSlot:SetVerticalAlignment(2)
-            tSlot:SetPadding({ Left = 10.0, Top = 4.0, Right = 10.0, Bottom = 4.0 })
+        local vSlot = tabOverlay:AddChildToOverlay(tabVBox)
+        if Core.IsValidObj(vSlot) then
+            vSlot:SetHorizontalAlignment(0)
+            vSlot:SetVerticalAlignment(0)
         end
     end)
 
@@ -411,10 +518,10 @@ local function EnsureEqolSettingsTab(menu)
         pcall(function()
             tabTxt:SetVisibility(3)
             tabTxt:SetSize(13)
-            tabTxt:SetText(Core.MakeText("Eqol Settings"))
+            tabTxt:SetText(Core.MakeText("Eqol"))
             if Core.IsValidObj(tabTxt.TextBlock) then
                 tabTxt.TextBlock:SetVisibility(3)
-                tabTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.TitleText, ColorUseRule = 0 })
+                tabTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.TabTextInactive, ColorUseRule = 0 })
             end
         end)
     end
@@ -436,6 +543,9 @@ local function EnsureEqolSettingsTab(menu)
                 targetRow, targetCol = refRow + 1, refCol
             end
             addedSlot = tabBar:AddChildToGrid(tabOverlay, targetRow, targetCol)
+            if tabBar.SetColumnFill then
+                tabBar:SetColumnFill(targetCol, 1.0)
+            end
         elseif tabBar.AddChildToHorizontalBox then
             addedSlot = tabBar:AddChildToHorizontalBox(tabOverlay)
         elseif tabBar.AddChildToVerticalBox then
@@ -448,24 +558,31 @@ local function EnsureEqolSettingsTab(menu)
     if Core.IsValidObj(addedSlot) and Core.IsValidObj(refTabBtn) and Core.IsValidObj(refTabBtn.Slot) then
         pcall(function()
             addedSlot:SetPadding(refTabBtn.Slot.Padding)
-            addedSlot:SetHorizontalAlignment(refTabBtn.Slot.HorizontalAlignment)
+            addedSlot:SetHorizontalAlignment(0) -- Fill equal column width
             addedSlot:SetVerticalAlignment(refTabBtn.Slot.VerticalAlignment)
         end)
     end
 
     local menuState = {
-        Menu      = menu,
-        Switcher  = switcher,
-        EqolIndex = eqolIdx,
-        TabBtn    = tabBtn,
-        TabPage   = pageScroll,
-        Rows      = rows,
+        Menu          = menu,
+        Switcher      = switcher,
+        EqolIndex     = eqolIdx,
+        TabBtn        = tabBtn,
+        TabTxt        = tabTxt,
+        TabLine       = tabLine,
+        TabPage       = pageScroll,
+        PageVBox      = pageVBox,
+        SiblingTabs   = siblingTabs,
+        PagePopulated = false,
+        Rows          = {},
     }
     InjectedMenus[menuAddr] = menuState
+    HookSiblingTabButtons(menuState)
 
     Core.RegisterWBPButtonClick(tabBtn, function()
         ExecuteInGameThreadWithDelay(10, function()
             if Core.IsValidObj(switcher) and Core.IsValidObj(pageScroll) then
+                PopulateEqolPageLazy(menuState)
                 pcall(function()
                     if switcher.SetActiveWidget then
                         switcher:SetActiveWidget(pageScroll)
@@ -473,12 +590,11 @@ local function EnsureEqolSettingsTab(menu)
                         switcher:SetActiveWidgetIndex(eqolIdx)
                     end
                 end)
+                SetEqolTabVisualActive(menuState, true)
                 SyncAllCheckboxes(menuState)
             end
         end)
     end)
-
-    Core.Log(string.format("[EqolSettings] Injected Eqol Settings tab (idx=%d, features=%d)", eqolIdx, #rows))
 end
 
 --------------------------------------------------------------------------------
