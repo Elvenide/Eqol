@@ -410,7 +410,43 @@ local TELEM_PANEL  = { R = 0.0150, G = 0.0180, B = 0.0240, A = 0.74 }
 local TELEM_WHITE  = { R = 0.9400, G = 0.9500, B = 0.9800, A = 1.00 }
 local TELEM_MUTED  = { R = 0.6800, G = 0.7200, B = 0.7800, A = 0.90 }
 
-local BOOST_BAR_H = 160.0
+local BOOST_BAR_H = 134.0
+local WING_CARD_W = 188.0
+local WING_CARD_H = 176.0
+
+local function ReadNumericOrFixed(val)
+    if type(val) == "number" then return val end
+    if val ~= nil then
+        local okV, raw = pcall(function() return val.Value end)
+        if okV and type(raw) == "number" then
+            return raw / 65536.0
+        end
+    end
+    return nil
+end
+
+local function IsShipActivelyBoosting(shipObj, pc)
+    if Core.IsValidObj(shipObj) then
+        local okB, bBoosting = pcall(function() return shipObj.bBoosting end)
+        if okB and type(bBoosting) == "boolean" then
+            if not bBoosting then return false end
+            local okC, rawCharge = pcall(function() return shipObj.BoostCharge end)
+            if okC and rawCharge ~= nil then
+                local charge = ReadNumericOrFixed(rawCharge)
+                if charge ~= nil and charge <= 0.001 then
+                    return false
+                end
+            end
+            return true
+        end
+    end
+    -- Fallback only if bBoosting property is unavailable
+    if Core.IsValidObj(pc) and KEY_SPACE and pc.IsInputKeyDown then
+        local okK, down = pcall(function() return pc:IsInputKeyDown(KEY_SPACE) == true end)
+        if okK then return down end
+    end
+    return false
+end
 
 local function SetWBPTextCol(w, col)
     if not Core.IsValidObj(w) or not col then return end
@@ -645,8 +681,11 @@ local function EnsureShipLegend(pc)
         return sb
     end
 
-    -- Left-Center 3rd-Person Telemetry Wing (seamlessly connected right next to the left-center HUD bracket)
-    local leftWing = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+    -- Left-Center 3rd-Person Telemetry Card (unified 188x176 card beside left-center HUD bracket)
+    local leftWing = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
+    local leftCardBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
+    local leftOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+    local leftInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
     local boostFillSlot = nil
     local boostFillBorder = nil
     local boostLabelTxt = nil
@@ -654,10 +693,25 @@ local function EnsureShipLegend(pc)
     local fuelUseTxt = nil
     local fuelAvailTxt = nil
 
-    if Core.IsValidObj(leftWing) then
-        pcall(function() leftWing:SetVisibility(1) end) -- Collapsed until 3rd-person active
+    if Core.IsValidObj(leftWing) and Core.IsValidObj(leftCardBg) and Core.IsValidObj(leftOuterV) and Core.IsValidObj(leftInnerH) then
+        pcall(function()
+            leftWing:SetWidthOverride(WING_CARD_W)
+            leftWing:SetHeightOverride(WING_CARD_H)
+            leftWing:SetVisibility(1) -- Collapsed until 3rd-person active
+            leftCardBg:SetBrushColor(TELEM_PANEL)
+            leftCardBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            leftCardBg:SetVisibility(3)
+            leftOuterV:SetVisibility(3)
+            leftInnerH:SetVisibility(3)
+        end)
 
-        -- Vertical smooth boost progress bar
+        local topLine = makeHairline(TELEM_GOLD, 2.0)
+        if Core.IsValidObj(topLine) then
+            local tlS = leftOuterV:AddChildToVerticalBox(topLine)
+            if Core.IsValidObj(tlS) then pcall(function() tlS:SetHorizontalAlignment(0) end) end
+        end
+
+        -- Left column inside card: Vertical smooth boost progress bar + BOOST micro-label
         local boostColVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
         local boostTrackSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
         local boostTrackBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
@@ -709,34 +763,20 @@ local function EnsureShipLegend(pc)
                 end
             end
 
-            local bColSlot = leftWing:AddChildToHorizontalBox(boostColVBox)
+            local bColSlot = leftInnerH:AddChildToHorizontalBox(boostColVBox)
             if Core.IsValidObj(bColSlot) then pcall(function() bColSlot:SetVerticalAlignment(2) end) end
         end
 
-        -- Speed, movement direction & fuel panel right next to boost bar
-        local infoPanel = Core.CreateRawWidget("/Script/UMG.Border", outer)
-        local infoOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        -- Right column inside card: Speed, movement direction & fuel readouts
         local infoInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
-        if Core.IsValidObj(infoPanel) and Core.IsValidObj(infoOuterV) and Core.IsValidObj(infoInnerV) then
-            pcall(function()
-                infoPanel:SetBrushColor(TELEM_PANEL)
-                infoPanel:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                infoPanel:SetVisibility(3)
-                infoOuterV:SetVisibility(3)
-                infoInnerV:SetVisibility(3)
-            end)
-
-            local topLine = makeHairline(TELEM_GOLD, 2.0)
-            if Core.IsValidObj(topLine) then
-                local tlS = infoOuterV:AddChildToVerticalBox(topLine)
-                if Core.IsValidObj(tlS) then pcall(function() tlS:SetHorizontalAlignment(0) end) end
-            end
+        if Core.IsValidObj(infoInnerV) then
+            pcall(function() infoInnerV:SetVisibility(3) end)
 
             speedTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
             if Core.IsValidObj(speedTxt) then
                 pcall(function()
                     speedTxt:SetVisibility(3)
-                    speedTxt:SetSize(14)
+                    speedTxt:SetSize(15)
                     speedTxt:SetText(Core.MakeText("0 m/s"))
                 end)
                 SetWBPTextCol(speedTxt, TELEM_GOLD)
@@ -744,7 +784,7 @@ local function EnsureShipLegend(pc)
                 if Core.IsValidObj(spS) then
                     pcall(function()
                         spS:SetHorizontalAlignment(1)
-                        spS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 6.0 })
+                        spS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 10.0 })
                     end)
                 end
             end
@@ -761,7 +801,7 @@ local function EnsureShipLegend(pc)
                 if Core.IsValidObj(fuS) then
                     pcall(function()
                         fuS:SetHorizontalAlignment(1)
-                        fuS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 3.0 })
+                        fuS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 })
                     end)
                 end
             end
@@ -778,73 +818,84 @@ local function EnsureShipLegend(pc)
                 if Core.IsValidObj(faS) then pcall(function() faS:SetHorizontalAlignment(1) end) end
             end
 
-            local inS = infoOuterV:AddChildToVerticalBox(infoInnerV)
-            if Core.IsValidObj(inS) then
+            local ivSlot = leftInnerH:AddChildToHorizontalBox(infoInnerV)
+            if Core.IsValidObj(ivSlot) then
                 pcall(function()
-                    inS:SetPadding({ Left = 10.0, Top = 8.0, Right = 12.0, Bottom = 8.0 })
-                    inS:SetHorizontalAlignment(1)
-                end)
-            end
-
-            local botLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
-            if Core.IsValidObj(botLine) then
-                local blS = infoOuterV:AddChildToVerticalBox(botLine)
-                if Core.IsValidObj(blS) then pcall(function() blS:SetHorizontalAlignment(0) end) end
-            end
-
-            pcall(function() infoPanel:AddChild(infoOuterV) end)
-            local ipSlot = leftWing:AddChildToHorizontalBox(infoPanel)
-            if Core.IsValidObj(ipSlot) then
-                pcall(function()
-                    ipSlot:SetVerticalAlignment(2)
-                    ipSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                    ivSlot:SetVerticalAlignment(2)
+                    ivSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+                    ivSlot:SetPadding({ Left = 12.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
                 end)
             end
         end
+
+        local lBodySlot = leftOuterV:AddChildToVerticalBox(leftInnerH)
+        if Core.IsValidObj(lBodySlot) then
+            pcall(function()
+                lBodySlot:SetSize({ Value = 1.0, SizeRule = 1 })
+                lBodySlot:SetHorizontalAlignment(0)
+                lBodySlot:SetVerticalAlignment(0)
+                lBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 10.0, Bottom = 10.0 })
+            end)
+        end
+
+        local botLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
+        if Core.IsValidObj(botLine) then
+            local blS = leftOuterV:AddChildToVerticalBox(botLine)
+            if Core.IsValidObj(blS) then pcall(function() blS:SetHorizontalAlignment(0) end) end
+        end
+
+        pcall(function()
+            leftCardBg:AddChild(leftOuterV)
+            leftWing:AddChild(leftCardBg)
+        end)
 
         local lwSlot = rootOverlay:AddChildToOverlay(leftWing)
         if Core.IsValidObj(lwSlot) then
             pcall(function()
                 lwSlot:SetHorizontalAlignment(1) -- Left
-                lwSlot:SetVerticalAlignment(2)   -- Center (aligned with left-center HUD bracket)
-                lwSlot:SetPadding({ Left = 28.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                lwSlot:SetVerticalAlignment(2)   -- Center (beside left-center HUD bracket)
+                lwSlot:SetPadding({ Left = 48.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
             end)
         end
     end
 
-    -- Right-Center 3rd-Person Hull Wing (seamlessly connected right next to the right-center HUD bracket)
-    local rightWing = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+    -- Right-Center 3rd-Person Hull Card (identical unified 188x176 card beside right-center HUD bracket)
+    local rightWing = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
+    local rightCardBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
+    local rightOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+    local rightInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
     local hullValTxt = nil
     local hullTitleTxt = nil
     local hullSegs = {} -- [1]=bottom, [2]=middle, [3]=top
 
-    if Core.IsValidObj(rightWing) then
-        pcall(function() rightWing:SetVisibility(1) end) -- Collapsed until 3rd-person active
+    if Core.IsValidObj(rightWing) and Core.IsValidObj(rightCardBg) and Core.IsValidObj(rightOuterV) and Core.IsValidObj(rightInnerH) then
+        pcall(function()
+            rightWing:SetWidthOverride(WING_CARD_W)
+            rightWing:SetHeightOverride(WING_CARD_H)
+            rightWing:SetVisibility(1) -- Collapsed until 3rd-person active
+            rightCardBg:SetBrushColor(TELEM_PANEL)
+            rightCardBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            rightCardBg:SetVisibility(3)
+            rightOuterV:SetVisibility(3)
+            rightInnerH:SetVisibility(3)
+        end)
 
-        -- Hull numeric readout card to the left of the 3 vertical segments
-        local hullPanel = Core.CreateRawWidget("/Script/UMG.Border", outer)
-        local hullOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local hTopLine = makeHairline(TELEM_GOLD, 2.0)
+        if Core.IsValidObj(hTopLine) then
+            local htS = rightOuterV:AddChildToVerticalBox(hTopLine)
+            if Core.IsValidObj(htS) then pcall(function() htS:SetHorizontalAlignment(0) end) end
+        end
+
+        -- Left column inside card: HULL label & numeric integrity readout
         local hullInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
-        if Core.IsValidObj(hullPanel) and Core.IsValidObj(hullOuterV) and Core.IsValidObj(hullInnerV) then
-            pcall(function()
-                hullPanel:SetBrushColor(TELEM_PANEL)
-                hullPanel:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                hullPanel:SetVisibility(3)
-                hullOuterV:SetVisibility(3)
-                hullInnerV:SetVisibility(3)
-            end)
-
-            local hTopLine = makeHairline(TELEM_GOLD, 2.0)
-            if Core.IsValidObj(hTopLine) then
-                local htS = hullOuterV:AddChildToVerticalBox(hTopLine)
-                if Core.IsValidObj(htS) then pcall(function() htS:SetHorizontalAlignment(0) end) end
-            end
+        if Core.IsValidObj(hullInnerV) then
+            pcall(function() hullInnerV:SetVisibility(3) end)
 
             hullTitleTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
             if Core.IsValidObj(hullTitleTxt) then
                 pcall(function()
                     hullTitleTxt:SetVisibility(3)
-                    hullTitleTxt:SetSize(9)
+                    hullTitleTxt:SetSize(10)
                     hullTitleTxt:SetText(Core.MakeText("HULL"))
                 end)
                 SetWBPTextCol(hullTitleTxt, TELEM_MUTED)
@@ -852,7 +903,7 @@ local function EnsureShipLegend(pc)
                 if Core.IsValidObj(htlS) then
                     pcall(function()
                         htlS:SetHorizontalAlignment(3) -- Right
-                        htlS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 2.0 })
+                        htlS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 })
                     end)
                 end
             end
@@ -861,7 +912,7 @@ local function EnsureShipLegend(pc)
             if Core.IsValidObj(hullValTxt) then
                 pcall(function()
                     hullValTxt:SetVisibility(3)
-                    hullValTxt:SetSize(13)
+                    hullValTxt:SetSize(15)
                     hullValTxt:SetText(Core.MakeText("--/--"))
                 end)
                 SetWBPTextCol(hullValTxt, TELEM_GOLD)
@@ -869,31 +920,17 @@ local function EnsureShipLegend(pc)
                 if Core.IsValidObj(hvS) then pcall(function() hvS:SetHorizontalAlignment(3) end) end
             end
 
-            local hiS = hullOuterV:AddChildToVerticalBox(hullInnerV)
-            if Core.IsValidObj(hiS) then
-                pcall(function()
-                    hiS:SetPadding({ Left = 12.0, Top = 8.0, Right = 10.0, Bottom = 8.0 })
-                    hiS:SetHorizontalAlignment(3)
-                end)
-            end
-
-            local hBotLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
-            if Core.IsValidObj(hBotLine) then
-                local hbS = hullOuterV:AddChildToVerticalBox(hBotLine)
-                if Core.IsValidObj(hbS) then pcall(function() hbS:SetHorizontalAlignment(0) end) end
-            end
-
-            pcall(function() hullPanel:AddChild(hullOuterV) end)
-            local hpSlot = rightWing:AddChildToHorizontalBox(hullPanel)
+            local hpSlot = rightInnerH:AddChildToHorizontalBox(hullInnerV)
             if Core.IsValidObj(hpSlot) then
                 pcall(function()
                     hpSlot:SetVerticalAlignment(2)
-                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
+                    hpSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 12.0, Bottom = 0.0 })
                 end)
             end
         end
 
-        -- 3 distinct separated vertical hull rectangles (top = [3], middle = [2], bottom = [1])
+        -- Right column inside card: 3 distinct separated vertical hull rectangles (top=[3], mid=[2], bot=[1])
         local segsVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
         if Core.IsValidObj(segsVBox) then
             pcall(function() segsVBox:SetVisibility(3) end)
@@ -903,7 +940,7 @@ local function EnsureShipLegend(pc)
                 if Core.IsValidObj(segSb) and Core.IsValidObj(segBdr) then
                     pcall(function()
                         segSb:SetWidthOverride(12.0)
-                        segSb:SetHeightOverride(48.0)
+                        segSb:SetHeightOverride(44.0)
                         segSb:SetVisibility(3)
                         segBdr:SetBrushColor(TELEM_GREEN)
                         segBdr:SetVisibility(3)
@@ -919,16 +956,37 @@ local function EnsureShipLegend(pc)
                     end
                 end
             end
-            local svSlot = rightWing:AddChildToHorizontalBox(segsVBox)
+            local svSlot = rightInnerH:AddChildToHorizontalBox(segsVBox)
             if Core.IsValidObj(svSlot) then pcall(function() svSlot:SetVerticalAlignment(2) end) end
         end
+
+        local rBodySlot = rightOuterV:AddChildToVerticalBox(rightInnerH)
+        if Core.IsValidObj(rBodySlot) then
+            pcall(function()
+                rBodySlot:SetSize({ Value = 1.0, SizeRule = 1 })
+                rBodySlot:SetHorizontalAlignment(0)
+                rBodySlot:SetVerticalAlignment(0)
+                rBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 10.0, Bottom = 10.0 })
+            end)
+        end
+
+        local hBotLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
+        if Core.IsValidObj(hBotLine) then
+            local hbS = rightOuterV:AddChildToVerticalBox(hBotLine)
+            if Core.IsValidObj(hbS) then pcall(function() hbS:SetHorizontalAlignment(0) end) end
+        end
+
+        pcall(function()
+            rightCardBg:AddChild(rightOuterV)
+            rightWing:AddChild(rightCardBg)
+        end)
 
         local rwSlot = rootOverlay:AddChildToOverlay(rightWing)
         if Core.IsValidObj(rwSlot) then
             pcall(function()
                 rwSlot:SetHorizontalAlignment(3) -- Right
-                rwSlot:SetVerticalAlignment(2)   -- Center (aligned with right-center HUD bracket)
-                rwSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 28.0, Bottom = 0.0 })
+                rwSlot:SetVerticalAlignment(2)   -- Center (beside right-center HUD bracket)
+                rwSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 48.0, Bottom = 0.0 })
             end)
         end
     end
@@ -1164,40 +1222,6 @@ local function StartPilotLegendPoll()
     ExecuteInGameThreadWithDelay(500, Tick)
 end
 
-local function ReadNumericOrFixed(val)
-    if type(val) == "number" then return val end
-    if val ~= nil then
-        local okV, raw = pcall(function() return val.Value end)
-        if okV and type(raw) == "number" then
-            return raw / 65536.0
-        end
-    end
-    return nil
-end
-
-local function IsShipActivelyBoosting(shipObj, pc)
-    if Core.IsValidObj(shipObj) then
-        local okB, bBoosting = pcall(function() return shipObj.bBoosting end)
-        if okB and type(bBoosting) == "boolean" then
-            if not bBoosting then return false end
-            local okC, rawCharge = pcall(function() return shipObj.BoostCharge end)
-            if okC and rawCharge ~= nil then
-                local charge = ReadNumericOrFixed(rawCharge)
-                if charge ~= nil and charge <= 0.001 then
-                    return false
-                end
-            end
-            return true
-        end
-    end
-    -- Fallback only if bBoosting property is unavailable
-    if Core.IsValidObj(pc) and KEY_SPACE and pc.IsInputKeyDown then
-        local okK, down = pcall(function() return pc:IsInputKeyDown(KEY_SPACE) == true end)
-        if okK then return down end
-    end
-    return false
-end
-
 local ScrollPollGen = 0
 
 -- On-demand frame-synchronized scroll/MMB/boost loop: runs ONLY while IsThirdPerson is active (learning.md §8)
@@ -1321,7 +1345,7 @@ local function ToggleShipPerspective()
     if not Core.IsFeatureEnabled("ShipCamera") then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
-    local shipActor = GetPilotedShipActor(pc)
+    local shipActor, shipObj = GetPilotedShipActor(pc)
     if not Core.IsValidObj(shipActor) then return end
 
     IsThirdPerson = not IsThirdPerson
@@ -1331,6 +1355,7 @@ local function ToggleShipPerspective()
     ApplyShipCameraState(pc, true)
     UpdateShipLegend()
     if IsThirdPerson then
+        pcall(UpdateShipTelemetry, shipActor, shipObj, pc)
         StartScrollPoll()
     end
 end
