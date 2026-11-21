@@ -29,6 +29,9 @@ It adds UI tools, overlays, hotkeys, and ergonomics (such as the Station Map, Po
    - Whenever you discover something significant about *Main Sequence* internals (e.g., a native RPC's exact parameter convention, an empty/stub UFunction, a UE4SS crash trigger, a struct memory layout, or a major UMG/Slate optimization), **update `docs/devs/learning.md`** and keep its Table of Contents accurate.
 5. **Auto-Increment Patch Version on Every Commit**:
    - On every commit, automatically increment the patch version in `Core.VERSION` inside `Scripts/core.lua` (e.g., `0.1.0` → `0.1.1` → `0.1.2`) and include `Scripts/core.lua` in the commit so the in-game HUD version bar always reflects the exact build.
+6. **Conventional Commits Required**:
+   - Every commit MUST follow [Conventional Commits](https://www.conventionalcommits.org/) syntax: `<type>(<optional scope>): <description>` (e.g., `feat(station-map): add modification cost overlay`, `fix(ship-camera): allow toggle when cursor is visible`, `docs: add MSCoreManager install option`, `ci: automate GitHub Releases on main`).
+   - Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `style`, `chore`, `ci`. Use `!` after the type/scope (e.g., `feat!: ...`) or a `BREAKING CHANGE:` footer for breaking changes. Automated GitHub Release changelogs are generated directly from these commits via `git-cliff`.
 
 ---
 

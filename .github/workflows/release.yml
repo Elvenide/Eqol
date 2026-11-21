@@ -1,0 +1,90 @@
+name: Automated Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Eqol version from Scripts/core.lua
+        id: version
+        run: |
+          VERSION=$(grep -oP 'Core\.VERSION\s*=\s*"\K[^"]+' Scripts/core.lua | head -n 1)
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract Core.VERSION from Scripts/core.lua" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists; skipping release creation."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate Conventional Commits changelog
+        id: changelog
+        if: steps.version.outputs.exists == 'false'
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --unreleased --tag ${{ steps.version.outputs.tag }} --strip all
+        env:
+          OUTPUT: CHANGELOG_RELEASE.md
+
+      - name: Package Eqol mod zip
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE="dist/Eqol"
+          mkdir -p "${STAGE}"
+          cp -r Scripts "${STAGE}/Scripts"
+          cp README.md "${STAGE}/README.md"
+          if [ -d docs ]; then
+            mkdir -p "${STAGE}/docs"
+            cp docs/*.md "${STAGE}/docs/" || true
+          fi
+          touch "${STAGE}/enabled.txt"
+          (cd dist && zip -r "../Eqol-v${VERSION}.zip" Eqol)
+          ls -lh "Eqol-v${VERSION}.zip"
+
+      - name: Build GitHub Release notes
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          {
+            echo "## Eqol v${VERSION}"
+            echo ""
+            echo "📖 **[Getting Started & Installation Guide](https://github.com/${{ github.repository }}/blob/main/docs/get-started.md)** (supports automated install via [MSCoreManager](https://github.com/xxalex3xx97/MSCore/releases/latest) or manual UE4SS setup)"
+            echo ""
+            echo "## What's Changed"
+            echo ""
+            if [ -s CHANGELOG_RELEASE.md ]; then
+              cat CHANGELOG_RELEASE.md
+            else
+              echo "- Maintenance and polish updates."
+            fi
+          } > RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Eqol v${{ steps.version.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          files: Eqol-v${{ steps.version.outputs.version }}.zip
+          make_latest: true

@@ -1,5 +1,5 @@
 -- Eqol Feature: Ship 3rd-Person Perspective & Scroll Zoom
--- Configurable keybind (default V) to toggle 1st/3rd person while piloting a ship,
+-- Configurable keybind (default H) to toggle 1st/3rd person while piloting a ship,
 -- plus mouse scroll wheel to adjust 3rd-person camera distance.
 
 local Core = require("core")
@@ -7,7 +7,7 @@ local Core = require("core")
 local Feature = {
     Name        = "ShipCamera",
     DisplayName = "Ship 3rd-Person Camera & Zoom",
-    Description = "Hotkey (default V) for 3rd-person ship perspective with scroll-wheel zoom.",
+    Description = "Hotkey (default H) for 3rd-person ship perspective with scroll-wheel zoom.",
 }
 
 local MIN_ARM_DIST = 600.0
@@ -33,23 +33,85 @@ local function EnsureScrollKeyTables()
     end
 end
 
-local function FindShipCameraComponents(shipActor)
-    local springArm = nil
-    for _, prop in ipairs({ "SpringArm", "CameraBoom", "ThirdPersonSpringArm", "ExternalSpringArm" }) do
-        local ok, comp = pcall(function() return shipActor[prop] end)
-        if ok and Core.IsValidObj(comp) then
-            springArm = comp
-            break
+local CachedSpringArmCls = nil
+local CachedCameraCls = nil
+
+local function FindFirstComponentOfClass(actor, clsPath, cachedCls)
+    if not Core.IsValidObj(actor) or not actor.K2_GetComponentsByClass then return nil, cachedCls end
+    local cls = cachedCls
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(clsPath)
+    end
+    if not Core.IsValidObj(cls) then return nil, cls end
+    local found = nil
+    pcall(function()
+        local arr = actor:K2_GetComponentsByClass(cls)
+        if arr then
+            local len = arr.GetArrayNum and arr:GetArrayNum() or #arr
+            for i = 1, len do
+                local c = Core.UnwrapArrayElem(arr[i])
+                if Core.IsValidObj(c) then
+                    found = c
+                    break
+                end
+            end
+        end
+    end)
+    return found, cls
+end
+
+local function FindShipCameraComponents(shipActor, pc)
+    local actorsToCheck = {}
+    local seen = {}
+    local function addActor(a)
+        if Core.IsValidObj(a) then
+            local addr = a:GetAddress()
+            if not seen[addr] then
+                seen[addr] = true
+                actorsToCheck[#actorsToCheck + 1] = a
+            end
         end
     end
 
+    addActor(shipActor)
+    if Core.IsValidObj(pc) then
+        pcall(function()
+            if pc.GetViewTarget then addActor(pc:GetViewTarget()) end
+        end)
+        pcall(function() addActor(pc.Pawn) end)
+    end
+
+    local springArm = nil
     local cam = nil
-    for _, prop in ipairs({ "ThirdPersonCamera", "ExternalCamera", "Camera", "ShipCamera" }) do
-        local ok, comp = pcall(function() return shipActor[prop] end)
-        if ok and Core.IsValidObj(comp) then
-            cam = comp
-            break
+
+    for _, actor in ipairs(actorsToCheck) do
+        if not Core.IsValidObj(springArm) then
+            for _, prop in ipairs({ "SpringArm", "CameraBoom", "ThirdPersonSpringArm", "ExternalSpringArm" }) do
+                local ok, comp = pcall(function() return actor[prop] end)
+                if ok and Core.IsValidObj(comp) then
+                    springArm = comp
+                    break
+                end
+            end
         end
+        if not Core.IsValidObj(springArm) then
+            springArm, CachedSpringArmCls = FindFirstComponentOfClass(actor, "/Script/Engine.SpringArmComponent", CachedSpringArmCls)
+        end
+
+        if not Core.IsValidObj(cam) then
+            for _, prop in ipairs({ "ThirdPersonCamera", "ExternalCamera", "Camera", "ShipCamera", "CameraComponent" }) do
+                local ok, comp = pcall(function() return actor[prop] end)
+                if ok and Core.IsValidObj(comp) then
+                    cam = comp
+                    break
+                end
+            end
+        end
+        if not Core.IsValidObj(cam) then
+            cam, CachedCameraCls = FindFirstComponentOfClass(actor, "/Script/Engine.CameraComponent", CachedCameraCls)
+        end
+
+        if Core.IsValidObj(springArm) and Core.IsValidObj(cam) then break end
     end
 
     return springArm, cam
@@ -117,19 +179,43 @@ local function GetPilotedShipActor(pc)
         if ok and Core.IsValidObj(a) then shipActor = a; break end
     end
     if not Core.IsValidObj(shipActor) then
+        pcall(function()
+            local actors = shipObj.Actors
+            if actors then
+                local len = actors.GetArrayNum and actors:GetArrayNum() or #actors
+                for i = 1, len do
+                    local a = Core.UnwrapArrayElem(actors[i])
+                    if Core.IsValidObj(a) then shipActor = a; break end
+                end
+            end
+        end)
+    end
+    if not Core.IsValidObj(shipActor) then
         pcall(function() shipActor = shipObj.Actor or shipObj.ShipActor end)
+    end
+    if not Core.IsValidObj(shipActor) then
+        pcall(function()
+            if pc.GetViewTarget then
+                local vt = pc:GetViewTarget()
+                if Core.IsValidObj(vt) then shipActor = vt end
+            end
+        end)
     end
     if not Core.IsValidObj(shipActor) then
         local okPawn, pawn = pcall(function() return pc.Pawn end)
         if okPawn and Core.IsValidObj(pawn) then
-            -- Verify fallback pc.Pawn is actually a ship actor before mutating its camera/spring-arm
-            local okCls, cn = pcall(function() return pawn:GetClass():GetFName():ToString():lower() end)
-            if okCls and type(cn) == "string" and cn:find("ship", 1, true) then
-                shipActor = pawn
-            end
+            shipActor = pawn
         end
     end
     return shipActor, shipObj
+end
+
+local function IsPilotingShipNow()
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then return false end
+    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen() then return false end
+    local ok, po = pcall(function() return pc.PlayerObject end)
+    return ok and Core.IsValidObj(po) and Core.IsValidObj(po.PilotedShip)
 end
 
 local function ApplyShipCameraState(pc)
@@ -142,9 +228,14 @@ local function ApplyShipCameraState(pc)
         RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
     end
 
-    local springArm, cam = FindShipCameraComponents(shipActor)
+    local springArm, cam = FindShipCameraComponents(shipActor, pc)
     local saved = SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
     ActiveShipAddr = newAddr
+
+    Core.Log(string.format("[ShipCamera] Apply 3P=%s dist=%.0f actor=%s arm=%s cam=%s",
+        tostring(IsThirdPerson), ThirdPersonDist,
+        Core.IsValidObj(shipActor) and shipActor:GetClass():GetFName():ToString() or "nil",
+        tostring(Core.IsValidObj(springArm)), tostring(Core.IsValidObj(cam))))
 
     if Core.IsValidObj(springArm) then
         pcall(function()
@@ -213,7 +304,7 @@ local function StartScrollPoll()
             return
         end
 
-        if not pc.bShowMouseCursor then
+        if not (Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen()) then
             local delta = 0.0
             pcall(function()
                 if KEY_MOUSE_WHEEL_AXIS and pc.GetInputAnalogKeyState then
@@ -270,9 +361,10 @@ end
 function Feature.Init()
     Core.RegisterConfigurableKeybind({
         ConfigKey   = "ShipPerspectiveKey",
-        DefaultKey  = "V",
+        DefaultKey  = "H",
         MappingName = "Eqol_ShipPerspective",
         Label       = "Ship Camera Perspective",
+        CanTrigger  = IsPilotingShipNow,
         OnPress     = ToggleShipPerspective,
     })
 end

@@ -3909,18 +3909,33 @@ RefreshStationMapCanvas = function(machinesOnly)
                 if math.abs(plz - curFl.z) <= 220.0 then
                     local pmx, pmy = WorldToBaseCanvas(plx, ply)
                     local col = p.IsLocal and COLORS.PlayerLocal or (p.IsOnline and COLORS.PlayerOnline or COLORS.PlayerOffline)
-                    local pDot = AddBorderFast(outer, mCanvas, pmx, pmy, 12.0, 12.0, col, 45)
+                    local pHalo = AddBorderFast(outer, mCanvas, pmx, pmy, 26.0, 26.0, { R = 0.01, G = 0.01, B = 0.01, A = 0.90 }, 44)
+                    if pHalo then table.insert(PlayerMarkerWidgets, pHalo) end
+                    local pDot = AddBorderFast(outer, mCanvas, pmx, pmy, 20.0, 20.0, col, 45)
                     if pDot then table.insert(PlayerMarkerWidgets, pDot) end
+                    local nameWrap = CreateRawFast(PATHS.BorderClass, outer)
                     local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, curPC)
-                    if Core.IsValidObj(nameTxt) then
-                        local nSlot = mCanvas:AddChildToCanvas(nameTxt)
-                        SetCanvasSlot(nSlot, pmx, pmy - 16.0, 140.0, 20.0, 0.5, 1.0, 46)
+                    if Core.IsValidObj(nameWrap) and Core.IsValidObj(nameTxt) then
                         pcall(function()
+                            nameWrap:SetBrushColor({ R = 0.015, G = 0.018, B = 0.025, A = 0.86 })
+                            nameWrap:SetPadding({ Left = 8.0, Top = 3.0, Right = 8.0, Bottom = 3.0 })
+                            nameWrap:SetVisibility(3)
                             nameTxt:SetVisibility(3)
-                            nameTxt:SetSize(11)
+                            nameTxt:SetSize(16)
                             nameTxt:SetText(Core.MakeText(p.Name))
+                            nameWrap:AddChild(nameTxt)
                         end)
-                        table.insert(PlayerMarkerWidgets, nameTxt)
+                        SetWBPTextColor(nameTxt, col)
+                        local nSlot = mCanvas:AddChildToCanvas(nameWrap)
+                        if Core.IsValidObj(nSlot) then
+                            pcall(function()
+                                nSlot:SetPosition({ X = pmx, Y = pmy - 22.0 })
+                                nSlot:SetAlignment({ X = 0.5, Y = 1.0 })
+                                nSlot:SetAutoSize(true)
+                                nSlot:SetZOrder(46)
+                            end)
+                        end
+                        table.insert(PlayerMarkerWidgets, nameWrap)
                     end
                 end
             end

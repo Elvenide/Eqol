@@ -4,7 +4,7 @@ Switch between 1st-person and adjustable 3rd-person camera views while piloting 
 
 ## Usage
 
-- Press **`V`** (default) while piloting a ship to toggle between 1st-person and 3rd-person perspective.
+- Press **`H`** (default) while piloting a ship to toggle between 1st-person and 3rd-person perspective.
 - While in 3rd-person view, use the **Mouse Scroll Wheel** to zoom the camera closer or farther from your ship.
 
 ## Configuration
