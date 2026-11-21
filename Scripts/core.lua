@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.22"
+Core.VERSION = "0.1.23"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -1117,6 +1117,14 @@ local function ApplyKeybindState(bs, keyName, shouldSave)
     end
 end
 
+local SettingsMenuCallbacks = {}
+
+function Core.OnSettingsMenuReady(cb)
+    if type(cb) == "function" then
+        table.insert(SettingsMenuCallbacks, cb)
+    end
+end
+
 local function EnsureMenuKeybindRows(menu)
     if not Core.IsValidObj(menu) then return end
     local scrollBox = menu.ControlSettings
@@ -1153,6 +1161,10 @@ local function EnsureMenuKeybindRows(menu)
             SyncKeybindRow(bs, row)
         end
         ::continue_kb::
+    end
+
+    for _, cb in ipairs(SettingsMenuCallbacks) do
+        pcall(cb, menu)
     end
 end
 

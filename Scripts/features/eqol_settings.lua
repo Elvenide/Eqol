@@ -37,118 +37,84 @@ local COLORS = {
 local InjectedMenus = {} -- menuAddr -> { Menu, Switcher, EqolIndex, TabBtn, TabPage, Rows = { ... } }
 local DiagLogged = false
 
-local function CollectReflectedProps(uobj)
-    local out = {}
-    if not Core.IsValidObj(uobj) then return out end
-    local seen = {}
-    pcall(function()
-        local cls = uobj:GetClass()
-        while Core.IsValidObj(cls) do
-            local cName = cls:GetFName():ToString()
-            if cName == "UserWidget" or cName == "Widget" or cName == "Object" then break end
-            cls:ForEachProperty(function(prop)
-                local pName = prop:GetFName():ToString()
-                if not seen[pName] then
-                    seen[pName] = true
-                    local okV, val = pcall(function() return uobj[pName] end)
-                    if okV and val ~= nil then
-                        out[#out + 1] = { name = pName, val = val }
-                    end
-                end
-            end)
-            cls = cls:GetSuperStruct()
-        end
-    end)
-    return out
-end
-
 local function SafeIsA(obj, cls)
     if not (Core.IsValidObj(obj) and Core.IsValidObj(cls)) then return false end
     local ok, res = pcall(function() return obj:IsA(cls) end)
     return ok and res == true
 end
 
+local function FindTabBarInTree(rootPanel, panelCls, btnCls, depth, visited)
+    if not Core.IsValidObj(rootPanel) or depth > 4 then return nil, nil end
+    local addr = rootPanel:GetAddress()
+    if visited[addr] then return nil, nil end
+    visited[addr] = true
+
+    if SafeIsA(rootPanel, panelCls) and rootPanel.GetAllChildren then
+        local okCh, ch = pcall(function() return rootPanel:GetAllChildren() end)
+        if okCh and ch then
+            local okLen, len = pcall(function() return ch.GetArrayNum and ch:GetArrayNum() or #ch end)
+            if okLen and type(len) == "number" and len > 0 then
+                local btns = {}
+                local childPanels = {}
+                for i = 1, len do
+                    local cw = Core.UnwrapArrayElem(ch[i])
+                    if Core.IsValidObj(cw) then
+                        if SafeIsA(cw, btnCls) then
+                            btns[#btns + 1] = cw
+                        elseif SafeIsA(cw, panelCls) then
+                            childPanels[#childPanels + 1] = cw
+                        end
+                    end
+                end
+                if #btns >= 2 and #btns <= 8 then
+                    return rootPanel, btns[#btns]
+                end
+                for _, cp in ipairs(childPanels) do
+                    local tb, rb = FindTabBarInTree(cp, panelCls, btnCls, depth + 1, visited)
+                    if Core.IsValidObj(tb) then return tb, rb end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
 local function FindSettingsSwitcherAndTabBar(menu)
+    if not Core.IsValidObj(menu) or not Core.IsValidObj(menu.ControlSettings) then
+        return nil, nil, nil
+    end
+
     local switcherCls = Core.FindOrLoadClass(PATHS.WidgetSwitcherCls)
     local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetCls)
     local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
 
     local switcher = nil
-    local tabBar = nil
-    local refTabBtn = nil
+    local topAncestor = menu.ControlSettings
 
-    -- 1. Walk up from menu.ControlSettings to find the exact UWidgetSwitcher
-    if Core.IsValidObj(menu.ControlSettings) and menu.ControlSettings.GetParent then
-        local cur = menu.ControlSettings
-        for _ = 1, 5 do
-            local okP, p = pcall(function() return cur:GetParent() end)
-            if not okP or not Core.IsValidObj(p) then break end
-            if SafeIsA(p, switcherCls) then
-                switcher = p
-                break
-            end
-            cur = p
+    -- 1. Walk up from menu.ControlSettings to find the exact UWidgetSwitcher and its parent container
+    local cur = menu.ControlSettings
+    for _ = 1, 6 do
+        if not cur.GetParent then break end
+        local okP, p = pcall(function() return cur:GetParent() end)
+        if not okP or not Core.IsValidObj(p) then break end
+        topAncestor = p
+        if not Core.IsValidObj(switcher) and SafeIsA(p, switcherCls) then
+            switcher = p
         end
+        cur = p
     end
 
-    -- 2. Inspect reflected properties on WBP_SettingsMenu_C for Switcher & TabBar / Tab Buttons
-    local props = CollectReflectedProps(menu)
-    local propSummary = {}
-    for _, entry in ipairs(props) do
-        local v = entry.val
-        if Core.IsValidObj(v) then
-            local cn = "?"
-            pcall(function() cn = v:GetClass():GetFName():ToString() end)
-            if #propSummary < 24 then
-                propSummary[#propSummary + 1] = entry.name .. ":" .. cn
-            end
-            if not Core.IsValidObj(switcher) and SafeIsA(v, switcherCls) then
-                switcher = v
-            end
-            local low = entry.name:lower()
-            if not Core.IsValidObj(refTabBtn) and SafeIsA(v, btnCls) then
-                if low:find("control", 1, true) or low:find("audio", 1, true)
-                    or low:find("graphic", 1, true) or low:find("video", 1, true)
-                    or low:find("game", 1, true) or low:find("tab", 1, true)
-                then
-                    refTabBtn = v
-                end
-            end
+    -- 2. Search from switcher's parent (and topAncestor) for the tab strip PanelWidget holding the tab buttons
+    local tabBar, refTabBtn = nil, nil
+    local visited = {}
+    if Core.IsValidObj(switcher) and switcher.GetParent then
+        local okSP, sp = pcall(function() return switcher:GetParent() end)
+        if okSP and Core.IsValidObj(sp) then
+            tabBar, refTabBtn = FindTabBarInTree(sp, panelCls, btnCls, 0, visited)
         end
     end
-
-    if Core.IsValidObj(refTabBtn) and refTabBtn.GetParent then
-        local okP, p = pcall(function() return refTabBtn:GetParent() end)
-        if okP and SafeIsA(p, panelCls) then
-            tabBar = p
-        end
-    end
-
-    -- Fallback: find any PanelWidget on menu that holds 2..8 WBP_Button_C children (the tab strip)
-    if not Core.IsValidObj(tabBar) then
-        for _, entry in ipairs(props) do
-            local v = entry.val
-            if SafeIsA(v, panelCls) and v.GetAllChildren then
-                local okCh, ch = pcall(function() return v:GetAllChildren() end)
-                if okCh and ch then
-                    local btns = {}
-                    local okLen, len = pcall(function() return ch.GetArrayNum and ch:GetArrayNum() or #ch end)
-                    if okLen and type(len) == "number" and len >= 2 and len <= 8 then
-                        for i = 1, len do
-                            local cw = Core.UnwrapArrayElem(ch[i])
-                            if SafeIsA(cw, btnCls) then
-                                btns[#btns + 1] = cw
-                            end
-                        end
-                    end
-                    if #btns >= 2 then
-                        tabBar = v
-                        refTabBtn = btns[#btns]
-                        break
-                    end
-                end
-            end
-        end
+    if not Core.IsValidObj(tabBar) and Core.IsValidObj(topAncestor) then
+        tabBar, refTabBtn = FindTabBarInTree(topAncestor, panelCls, btnCls, 0, visited)
     end
 
     if not DiagLogged then
@@ -157,9 +123,6 @@ local function FindSettingsSwitcherAndTabBar(menu)
         local tbName = Core.IsValidObj(tabBar) and tabBar:GetFName():ToString() or "nil"
         local rbName = Core.IsValidObj(refTabBtn) and refTabBtn:GetFName():ToString() or "nil"
         Core.Log(string.format("[EqolSettings] Discovered switcher=%s tabBar=%s refBtn=%s", swName, tbName, rbName))
-        if not Core.IsValidObj(switcher) or not Core.IsValidObj(tabBar) then
-            Core.Log("[EqolSettings] Menu props: " .. table.concat(propSummary, ", "))
-        end
     end
 
     return switcher, tabBar, refTabBtn
@@ -479,27 +442,8 @@ end
 -- Feature Lifecycle
 --------------------------------------------------------------------------------
 
-Feature.WatchWidgets = {
-    WBP_SettingsMenu_C = function(menu)
-        ExecuteInGameThreadWithDelay(20, function()
-            if Core.IsValidObj(menu) then EnsureEqolSettingsTab(menu) end
-        end)
-    end,
-}
-
-function Feature.RegisterHooks()
-    for _, suffix in ipairs({ "Setup", "Refresh", "RefreshInGame" }) do
-        Core.TryRegisterHook(
-            "EqolSettings_Menu_" .. suffix,
-            "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:" .. suffix,
-            function(Context)
-                local menu = Context:get()
-                ExecuteInGameThreadWithDelay(20, function()
-                    if Core.IsValidObj(menu) then EnsureEqolSettingsTab(menu) end
-                end)
-            end
-        )
-    end
+function Feature.Init()
+    Core.OnSettingsMenuReady(EnsureEqolSettingsTab)
 end
 
 function Feature.PruneCaches()
