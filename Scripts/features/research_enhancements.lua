@@ -287,8 +287,7 @@ local function ApplyResearchFilter(st, overrideQuery)
     local treeView = nil
     pcall(function() treeView = st.Tree.ResearchTreeView end)
 
-    st.BaseVisible = st.BaseVisible or {}
-    local captureBase = (st.FilterDirty == true)
+    st.HiddenByEqol = st.HiddenByEqol or {}
     local matchCache = {}
     local handledWide = {}
 
@@ -301,17 +300,29 @@ local function ApplyResearchFilter(st, overrideQuery)
                 local child = container:GetChildAt(i)
                 if Core.IsValidObj(child) then
                     local cAddr = child:GetAddress()
-                    local curVis = true
-                    pcall(function() curVis = child:IsVisible() == true end)
-                    if captureBase or st.BaseVisible[cAddr] == nil then
-                        st.BaseVisible[cAddr] = curVis
-                    end
-                    local baseVis = (st.BaseVisible[cAddr] ~= false)
+                    local curVis = 0
+                    pcall(function() curVis = tonumber(child:GetVisibility()) or 0 end)
+
                     local tech = ResolveTechFromWidget(child)
                     local matched = (queryLower == "") or TechMatchesQuery(tech, queryLower, matchCache)
-                    local wantVis = baseVis and matched
-                    if curVis ~= wantVis then
-                        child:SetVisibility(wantVis and 0 or 1) -- 0 = Visible, 1 = Collapsed
+
+                    if matched then
+                        local origVis = st.HiddenByEqol[cAddr]
+                        if origVis ~= nil then
+                            st.HiddenByEqol[cAddr] = nil
+                            if curVis ~= origVis then
+                                child:SetVisibility(origVis)
+                            end
+                        end
+                    else
+                        if st.HiddenByEqol[cAddr] == nil then
+                            if curVis ~= 1 and curVis ~= 2 then
+                                st.HiddenByEqol[cAddr] = curVis
+                                child:SetVisibility(1) -- 1 = Collapsed
+                            end
+                        elseif curVis ~= 1 then
+                            child:SetVisibility(1)
+                        end
                     end
 
                     if Core.IsValidObj(treeView) and Core.IsValidObj(tech) and treeView.GetWidget then
@@ -488,7 +499,7 @@ EnsureResearchSearchBar = function(tree)
         Tree = tree,
         ResearchList = rList,
         SearchInput = searchInput,
-        BaseVisible = {},
+        HiddenByEqol = {},
         FilterDirty = true,
     }
     InjectedTrees[treeAddr] = st
@@ -1182,7 +1193,6 @@ function Feature.RegisterHooks()
                     if Core.IsValidObj(tree) then
                         local st = InjectedTrees[tree:GetAddress()]
                         if st then
-                            st.BaseVisible = {}
                             st.LastWideAlpha = {}
                         end
                         EnsureAndFilterTree(tree, true)
