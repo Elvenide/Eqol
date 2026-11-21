@@ -23,6 +23,7 @@ local PATHS = {
     WBPButtonClass    = "/Game/Blueprints/Widgets/Basic/WBP_Button.WBP_Button_C",
     WBPTextClass      = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
     WBPItemClass      = "/Game/Blueprints/Widgets/Display/Inventory/WBP_Item.WBP_Item_C",
+    InputKeyClass     = "/Game/Blueprints/Widgets/Display/WBP_InputKey.WBP_InputKey_C",
     BuildingMenuClass = "/Game/Blueprints/Widgets/Menus/WBP_Building.WBP_Building_C",
     CanvasPanelClass  = "/Script/UMG.CanvasPanel",
     ImageClass        = "/Script/UMG.Image",
@@ -2315,11 +2316,6 @@ end
 
 UpdateStatusBanner = function(textOverride)
     if not MapUI then return end
-    if Core.IsValidObj(MapUI.FloorPillText) then
-        pcall(function()
-            MapUI.FloorPillText:SetText(Core.MakeText(string.format("Floor %d / %d", SelectedFloorIdx, math.max(1, #CurrentFloors))))
-        end)
-    end
     local selCount = CountTableKeys(SelectedMachines) + CountTableKeys(SelectedGhosts)
     if Core.IsValidObj(MapUI.SelPillWrap) and Core.IsValidObj(MapUI.SelPillText) then
         pcall(function()
@@ -2353,8 +2349,8 @@ UpdateStatusBanner = function(textOverride)
     end
 end
 
-local APPLY_BG_ENABLED  = { R = 0.14, G = 0.36, B = 0.20, A = 0.96 }
-local APPLY_BG_DISABLED = { R = 0.16, G = 0.18, B = 0.21, A = 0.75 }
+local APPLY_BG_ENABLED   = { R = 0.74, G = 0.48, B = 0.06, A = 0.96 }
+local APPLY_BG_DISABLED  = { R = 0.15, G = 0.17, B = 0.20, A = 0.75 }
 local APPLY_TXT_DISABLED = { R = 0.60, G = 0.64, B = 0.70, A = 0.85 }
 
 UpdateActionBar = function()
@@ -2513,8 +2509,8 @@ local function MeasureMapCanvasSize()
         if okV and rawVp and IsFiniteNum(tonumber(rawVp.X)) and IsFiniteNum(tonumber(rawVp.Y)) and rawVp.X > 100 then
             local umgW = rawVp.X / vpScale
             local umgH = rawVp.Y / vpScale
-            local w = umgW * 0.88 - 170.0
-            local h = umgH * 0.90 - 76.0
+            local w = umgW
+            local h = umgH
             if w > 120.0 and h > 120.0 then
                 local changed = (math.abs(w - ViewTransform.canvasW) > 4.0 or math.abs(h - ViewTransform.canvasH) > 4.0)
                 ViewTransform.canvasW = w
@@ -3727,10 +3723,10 @@ RebuildFloorButtons = function()
     for flIdx = topIdx, botIdx, -1 do
         local thisIdx = flIdx
         local isSel = (thisIdx == SelectedFloorIdx)
-        local bgCol = isSel and { R = 0.45, G = 0.28, B = 0.04, A = 0.96 } or COLORS.FloorNormal
-        local txtCol = isSel and COLORS.FloorSelected or COLORS.PlayerLocal
+        local bgCol = isSel and { R = 0.62, G = 0.40, B = 0.05, A = 0.98 } or { R = 0.13, G = 0.15, B = 0.18, A = 0.92 }
+        local txtCol = isSel and { R = 1.00, G = 0.98, B = 0.92, A = 1.00 } or COLORS.PlayerLocal
         local btnWrap, btn = CreateLabeledButton(
-            MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 17, 96.0, 58.0, bgCol, txtCol,
+            MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 15, 60.0, 40.0, bgCol, txtCol,
             function()
                 ExecuteInGameThreadWithDelay(10, function()
                     SelectedFloorIdx = thisIdx
@@ -3748,7 +3744,7 @@ RebuildFloorButtons = function()
             local slot = MapUI.FloorSlotsBox:AddChildToVerticalBox(btnWrap)
             if Core.IsValidObj(slot) then
                 pcall(function()
-                    slot:SetPadding({ Left = 4.0, Top = 4.0, Right = 4.0, Bottom = 4.0 })
+                    slot:SetPadding({ Left = 0.0, Top = 3.0, Right = 0.0, Bottom = 3.0 })
                     slot:SetHorizontalAlignment(2)
                 end)
             end
@@ -4605,6 +4601,12 @@ local function IsAnyButtonHovered()
             if okH and h == true then return true end
         end
     end
+    for _, panel in ipairs({ MapUI.FloorFrame, MapUI.ApplyPanel, MapUI.CloseBtnFrame }) do
+        if Core.IsValidObj(panel) and panel.IsHovered then
+            local okH, h = pcall(function() return panel:IsHovered() end)
+            if okH and h == true then return true end
+        end
+    end
     return false
 end
 
@@ -5037,13 +5039,33 @@ local function OpenStationMap()
     pcall(function()
         win:SetWindowName(Core.MakeText("Station Map"))
         win:AddToViewport(50)
-        win:SetAnchorsInViewport({ Minimum = { X = 0.06, Y = 0.05 }, Maximum = { X = 0.94, Y = 0.95 } })
+        win:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+        if win.SetAlignmentInViewport then
+            win:SetAlignmentInViewport({ X = 0.0, Y = 0.0 })
+        end
+        if Core.IsValidObj(win.WBP_WindowHeader) then
+            win.WBP_WindowHeader:SetVisibility(1) -- Collapsed (fullscreen map, no titlebar)
+        end
+        -- Strip outer WBP_WindowBase_C padding/chrome so the map fills 100% of the screen edge-to-edge
+        local cur = win.Content
+        for _ = 1, 5 do
+            if not Core.IsValidObj(cur) then break end
+            if cur.SetPadding then
+                pcall(function() cur:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end)
+            end
+            if cur.SetBrushColor then
+                pcall(function() cur:SetBrushColor(COLORS.Transparent) end)
+            end
+            local sl = cur.Slot
+            if Core.IsValidObj(sl) and sl.SetPadding then
+                pcall(function() sl:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end)
+            end
+            local okP, par = pcall(function() return cur:GetParent() end)
+            cur = okP and par or nil
+        end
     end)
     SetStationMapCursorMode(pc, win, true)
 
-    local rootVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local topHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    local bodyHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
     local mapBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
     local mapOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
     local bgPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
@@ -5059,13 +5081,11 @@ local function OpenStationMap()
     local iconPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local iconCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local overlayCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
-    local rightVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local statusText = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
 
-    if not (Core.IsValidObj(rootVBox) and Core.IsValidObj(topHBox) and Core.IsValidObj(bodyHBox)
-        and Core.IsValidObj(mapBg) and Core.IsValidObj(mapOverlay) and Core.IsValidObj(bgPanZoom)
+    if not (Core.IsValidObj(mapBg) and Core.IsValidObj(mapOverlay) and Core.IsValidObj(bgPanZoom)
         and Core.IsValidObj(mapCanvas) and Core.IsValidObj(selectionCanvas)
-        and Core.IsValidObj(overlayCanvas) and Core.IsValidObj(rightVBox)) then
+        and Core.IsValidObj(overlayCanvas)) then
         DestroyStationMap()
         return
     end
@@ -5077,6 +5097,7 @@ local function OpenStationMap()
 
     pcall(function()
         mapBg:SetBrushColor(COLORS.WindowBg)
+        mapBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
         mapBg:SetClipping(1)
         mapOverlay:SetClipping(1)
         bgPanZoom:SetClipping(0)
@@ -5192,31 +5213,49 @@ local function OpenStationMap()
 
         local attached = false
         if Core.IsValidObj(win.Content) then
-            local okC = pcall(function() win.Content:AddChild(rootVBox) end)
+            local okC = pcall(function() win.Content:AddChild(mapBg) end)
             if okC then attached = true end
         end
         if not attached and Core.IsValidObj(win.ContentBorder) then
-            pcall(function() win.ContentBorder:AddChild(rootVBox) end)
+            pcall(function() win.ContentBorder:AddChild(mapBg) end)
         end
-        win:SetContentForSlot(FName("Content"), rootVBox)
+        win:SetContentForSlot(FName("Content"), mapBg)
     end)
 
-    -- Top unified pill bar:
-    -- Left end: static info/keybind pills first, then dynamic contextual pills (Selected, Deleting, Mode) after them
-    -- Right end: padded action buttons (Copy, Rotate, Delete); Fit removed; +/- zoom stacked in map top-right corner
-    local pillBgInfo = { R = 0.10, G = 0.13, B = 0.18, A = 0.92 }
-    local pillBgMode = { R = 0.10, G = 0.28, B = 0.18, A = 0.96 }
-    local pillBgSel  = { R = 0.34, G = 0.24, B = 0.06, A = 0.96 }
-    local pillBgDel  = { R = 0.36, G = 0.10, B = 0.10, A = 0.96 }
+    -- Shared base-game overlay palette (matching World Map & Ship/Station Designer)
+    local accentGold   = { R = 0.90, G = 0.62, B = 0.08, A = 0.96 }
+    local accentGoldDim= { R = 0.90, G = 0.62, B = 0.08, A = 0.65 }
+    local panelBgDark  = { R = 0.055, G = 0.062, B = 0.075, A = 0.90 }
+    local btnBgDark    = { R = 0.13, G = 0.15, B = 0.18, A = 0.92 }
+    local btnBgDiscard = { R = 0.34, G = 0.11, B = 0.11, A = 0.94 }
+    local pillBgMode   = { R = 0.10, G = 0.28, B = 0.18, A = 0.95 }
+    local pillBgSel    = { R = 0.38, G = 0.25, B = 0.05, A = 0.95 }
+    local pillBgDel    = { R = 0.40, G = 0.11, B = 0.11, A = 0.95 }
 
-    local function createInfoPill(initText, bgCol, textSize)
+    local function makeAccentBar(col, heightPx)
+        local sb = CreateRawFast(PATHS.SizeBoxClass, outer)
+        local bdr = CreateRawFast(PATHS.BorderClass, outer)
+        if Core.IsValidObj(sb) and Core.IsValidObj(bdr) then
+            pcall(function()
+                sb:SetHeightOverride(heightPx or 3.0)
+                bdr:SetBrushColor(col)
+                bdr:SetVisibility(3)
+                sb:SetVisibility(3)
+                sb:AddChild(bdr)
+            end)
+        end
+        return sb
+    end
+
+    -- 1. Top-Left Floating Status Pills (temporary pills: Selected, Deleting, Paste/Apply status)
+    local function createStatusPill(initText, bgCol, textSize)
         local bdr = CreateRawFast(PATHS.BorderClass, outer)
         local txt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
         if Core.IsValidObj(bdr) and Core.IsValidObj(txt) then
             pcall(function()
-                bdr:SetBrushColor(bgCol or pillBgInfo)
-                bdr:SetPadding({ Left = 10.0, Top = 5.0, Right = 10.0, Bottom = 5.0 })
-                bdr:SetVisibility(3)
+                bdr:SetBrushColor(bgCol)
+                bdr:SetPadding({ Left = 12.0, Top = 6.0, Right = 12.0, Bottom = 6.0 })
+                bdr:SetVisibility(1) -- Collapsed until active
                 txt:SetVisibility(3)
                 txt:SetSize(textSize or 11)
                 txt:SetText(Core.MakeText(initText or ""))
@@ -5226,115 +5265,162 @@ local function OpenStationMap()
         return bdr, txt
     end
 
-    local floorPillWrap, floorPillText = createInfoPill("Floor 1 / 1", pillBgInfo, 11)
-    local hintDragPill = createInfoPill("Drag / Shift+Click: Select", pillBgInfo, 10)
-    local hintPanPill  = createInfoPill("RMB: Pan  Scroll: Zoom", pillBgInfo, 10)
-    local selPillWrap, selPillText = createInfoPill("Selected: 0", pillBgSel, 11)
-    pcall(function() if Core.IsValidObj(selPillWrap) then selPillWrap:SetVisibility(1) end end)
-    local delPillWrap, delPillText = createInfoPill("Deleting: 0", pillBgDel, 11)
-    pcall(function() if Core.IsValidObj(delPillWrap) then delPillWrap:SetVisibility(1) end end)
-    local modePillWrap, modePillText = createInfoPill("", pillBgMode, 11)
-    pcall(function() if Core.IsValidObj(modePillWrap) then modePillWrap:SetVisibility(1) end end)
-
-    -- Add left-end pills (static first, dynamic pop-up pills after them so existing pills never shift)
-    for idx, pill in ipairs({ floorPillWrap, hintDragPill, hintPanPill, selPillWrap, delPillWrap, modePillWrap }) do
-        if Core.IsValidObj(pill) then
-            local sl = topHBox:AddChildToHorizontalBox(pill)
-            if Core.IsValidObj(sl) then
-                pcall(function()
-                    sl:SetVerticalAlignment(2)
-                    sl:SetPadding({ Left = (idx == 1) and 0.0 or 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                end)
+    local topLeftPillsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+    local selPillWrap, selPillText = createStatusPill("Selected: 0", pillBgSel, 11)
+    local delPillWrap, delPillText = createStatusPill("Deleting: 0", pillBgDel, 11)
+    local modePillWrap, modePillText = createStatusPill("", pillBgMode, 11)
+    if Core.IsValidObj(topLeftPillsHBox) then
+        pcall(function() topLeftPillsHBox:SetVisibility(4) end) -- SelfHitTestInvisible
+        for idx, pill in ipairs({ selPillWrap, delPillWrap, modePillWrap }) do
+            if Core.IsValidObj(pill) then
+                local sl = topLeftPillsHBox:AddChildToHorizontalBox(pill)
+                if Core.IsValidObj(sl) then
+                    pcall(function()
+                        sl:SetVerticalAlignment(2)
+                        sl:SetPadding({ Left = (idx == 1) and 0.0 or 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                    end)
+                end
             end
         end
-    end
-
-    -- Flexible spacer pushing action buttons cleanly to the right end
-    local topSpacer = CreateRawFast(PATHS.SizeBoxClass, outer)
-    if Core.IsValidObj(topSpacer) then
-        pcall(function() topSpacer:SetVisibility(4) end)
-        local spSlot = topHBox:AddChildToHorizontalBox(topSpacer)
-        if Core.IsValidObj(spSlot) then
-            pcall(function() spSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end)
-        end
-    end
-
-    -- Right-end action buttons with generous horizontal padding (deferred via ExecuteInGameThreadWithDelay per learning.md §6)
-    local copyWrap, copyBtn = CreateLabeledButton(win, pc, outer, "Copy (Ctrl+C)", 11, 122.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ExecuteInGameThreadWithDelay(10, CopySelectedMachines)
-    end)
-    local rotWrap, rotBtn = CreateLabeledButton(win, pc, outer, "Rotate (R)", 11, 102.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ExecuteInGameThreadWithDelay(10, function()
-            PendingRotationDeg = (PendingRotationDeg + 90) % 360
-            UpdateStatusBanner()
-            RefreshDynamicOverlay()
-        end)
-    end)
-    local delWrap, delBtn = CreateLabeledButton(win, pc, outer, "Delete (X)", 11, 102.0, 28.0, pillBgDel, COLORS.PlayerLocal, function()
-        ExecuteInGameThreadWithDelay(10, ProposeDeleteSelected)
-    end)
-    for _, ab in ipairs({ copyWrap, rotWrap, delWrap }) do
-        if Core.IsValidObj(ab) then
-            local sl = topHBox:AddChildToHorizontalBox(ab)
-            if Core.IsValidObj(sl) then
-                pcall(function()
-                    sl:SetVerticalAlignment(2)
-                    sl:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                end)
-            end
-        end
-    end
-
-    -- Vertically stacked +/- zoom buttons overlaid in the top-right corner of the map rectangle
-    local zoomVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
-    local zoomInWrap = CreateLabeledButton(win, pc, outer, "+", 15, 32.0, 32.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ExecuteInGameThreadWithDelay(10, function() ZoomMapByFactor(1.22) end)
-    end)
-    local zoomOutWrap = CreateLabeledButton(win, pc, outer, "-", 15, 32.0, 32.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ExecuteInGameThreadWithDelay(10, function() ZoomMapByFactor(1.0 / 1.22) end)
-    end)
-    if Core.IsValidObj(zoomVBox) then
-        pcall(function() zoomVBox:SetVisibility(4) end)
-        if Core.IsValidObj(zoomInWrap) then
-            local zs1 = zoomVBox:AddChildToVerticalBox(zoomInWrap)
-            if Core.IsValidObj(zs1) then pcall(function() zs1:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 4.0 }) end) end
-        end
-        if Core.IsValidObj(zoomOutWrap) then
-            zoomVBox:AddChildToVerticalBox(zoomOutWrap)
-        end
-        local zOvSlot = mapOverlay:AddChildToOverlay(zoomVBox)
-        if Core.IsValidObj(zOvSlot) then
+        local tlSlot = mapOverlay:AddChildToOverlay(topLeftPillsHBox)
+        if Core.IsValidObj(tlSlot) then
             pcall(function()
-                zOvSlot:SetHorizontalAlignment(3) -- Right
-                zOvSlot:SetVerticalAlignment(1)   -- Top
-                zOvSlot:SetPadding({ Left = 0.0, Top = 10.0, Right = 10.0, Bottom = 0.0 })
+                tlSlot:SetHorizontalAlignment(1) -- Left
+                tlSlot:SetVerticalAlignment(1)   -- Top
+                tlSlot:SetPadding({ Left = 16.0, Top = 16.0, Right = 0.0, Bottom = 0.0 })
             end)
         end
     end
 
-    local topSlot = rootVBox:AddChildToVerticalBox(topHBox)
-    if Core.IsValidObj(topSlot) then
+    -- 2. Top-Right Close (X) Button Overlay (matching World Map top-right X)
+    local closeBtnFrame = CreateRawFast(PATHS.BorderClass, outer)
+    local closeWrap, closeBtn = CreateLabeledButton(
+        win, pc, outer, "X", 16, 32.0, 32.0,
+        { R = 0.06, G = 0.07, B = 0.09, A = 0.92 },
+        { R = 0.98, G = 0.98, B = 1.00, A = 1.00 },
+        function()
+            ExecuteInGameThreadWithDelay(10, CloseStationMap)
+        end
+    )
+    if Core.IsValidObj(closeBtnFrame) and Core.IsValidObj(closeWrap) then
         pcall(function()
-            topSlot:SetPadding({ Left = 8.0, Top = 4.0, Right = 8.0, Bottom = 6.0 })
-            topSlot:SetHorizontalAlignment(0)
+            closeBtnFrame:SetBrushColor({ R = 0.92, G = 0.94, B = 0.96, A = 0.95 })
+            closeBtnFrame:SetPadding({ Left = 2.0, Top = 2.0, Right = 2.0, Bottom = 2.0 })
+            closeBtnFrame:AddChild(closeWrap)
         end)
+        local clSlot = mapOverlay:AddChildToOverlay(closeBtnFrame)
+        if Core.IsValidObj(clSlot) then
+            pcall(function()
+                clSlot:SetHorizontalAlignment(3) -- Right
+                clSlot:SetVerticalAlignment(1)   -- Top
+                clSlot:SetPadding({ Left = 0.0, Top = 14.0, Right = 14.0, Bottom = 0.0 })
+            end)
+        end
     end
 
-    -- Body left: Gridded Map Viewport (expands to fill available space)
-    local mapSlot = bodyHBox:AddChildToHorizontalBox(mapBg)
-    if Core.IsValidObj(mapSlot) then
-        pcall(function()
-            mapSlot:SetSize({ Value = 1.0, SizeRule = 1 })
-            mapSlot:SetHorizontalAlignment(0)
-            mapSlot:SetVerticalAlignment(0)
-        end)
+    -- 3. Bottom-Left Keybind Hints Overlay (matching World Map bottom-left WBP_InputKey style)
+    local keybindsVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    if Core.IsValidObj(keybindsVBox) then
+        pcall(function() keybindsVBox:SetVisibility(4) end) -- SelfHitTestInvisible
+        local keybindDefs = {
+            { key = "LMB",    label = "Select / Box Select (Shift: Multi)" },
+            { key = "RMB",    label = "Pan Map" },
+            { key = "SCROLL", label = "Zoom" },
+            { key = "B",      label = "Build Machine" },
+            { key = "CTRL+C", label = "Copy Selected" },
+            { key = "R",      label = "Rotate" },
+            { key = "X",      label = "Delete Selected" },
+        }
+        local hintLabelCol = { R = 0.86, G = 0.88, B = 0.92, A = 0.96 }
+        for rIdx, def in ipairs(keybindDefs) do
+            local rowHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+            if Core.IsValidObj(rowHBox) then
+                pcall(function() rowHBox:SetVisibility(3) end) -- HitTestInvisible
+                local keyBadge = Core.CreateUserWidget(PATHS.InputKeyClass, win, pc)
+                if Core.IsValidObj(keyBadge) then
+                    local keyStr = def.key
+                    local function applyKeyText()
+                        pcall(function()
+                            keyBadge:SetVisibility(3)
+                            if Core.IsValidObj(keyBadge.WBP_Text) then
+                                keyBadge.WBP_Text:SetText(Core.MakeText(keyStr))
+                            end
+                        end)
+                    end
+                    applyKeyText()
+                    ExecuteInGameThreadAfterFrames(1, function()
+                        if Core.IsValidObj(keyBadge) then applyKeyText() end
+                    end)
+                else
+                    -- Fallback styled keycap badge if WBP_InputKey_C is unavailable
+                    local capBorder = CreateRawFast(PATHS.BorderClass, outer)
+                    local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+                    if Core.IsValidObj(capBorder) and Core.IsValidObj(capTxt) then
+                        pcall(function()
+                            capBorder:SetBrushColor({ R = 0.14, G = 0.16, B = 0.20, A = 0.94 })
+                            capBorder:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
+                            capBorder:SetVisibility(3)
+                            capTxt:SetVisibility(3)
+                            capTxt:SetSize(10)
+                            capTxt:SetText(Core.MakeText(def.key))
+                            capBorder:AddChild(capTxt)
+                        end)
+                        keyBadge = capBorder
+                    end
+                end
+
+                if Core.IsValidObj(keyBadge) then
+                    local kSlot = rowHBox:AddChildToHorizontalBox(keyBadge)
+                    if Core.IsValidObj(kSlot) then
+                        pcall(function() kSlot:SetVerticalAlignment(2) end)
+                    end
+                end
+
+                local lbl = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+                if Core.IsValidObj(lbl) then
+                    pcall(function()
+                        lbl:SetVisibility(3)
+                        lbl:SetSize(11)
+                        lbl:SetText(Core.MakeText(def.label))
+                        if Core.IsValidObj(lbl.TextBlock) and lbl.TextBlock.SetColorAndOpacity then
+                            lbl.TextBlock:SetColorAndOpacity({ SpecifiedColor = hintLabelCol, ColorUseRule = 0 })
+                        end
+                    end)
+                    local lSlot = rowHBox:AddChildToHorizontalBox(lbl)
+                    if Core.IsValidObj(lSlot) then
+                        pcall(function()
+                            lSlot:SetVerticalAlignment(2)
+                            lSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                        end)
+                    end
+                end
+
+                local rSlot = keybindsVBox:AddChildToVerticalBox(rowHBox)
+                if Core.IsValidObj(rSlot) then
+                    pcall(function()
+                        rSlot:SetHorizontalAlignment(1) -- Left
+                        rSlot:SetPadding({ Left = 0.0, Top = (rIdx == 1) and 0.0 or 5.0, Right = 0.0, Bottom = 0.0 })
+                    end)
+                end
+            end
+        end
+
+        local blSlot = mapOverlay:AddChildToOverlay(keybindsVBox)
+        if Core.IsValidObj(blSlot) then
+            pcall(function()
+                blSlot:SetHorizontalAlignment(1) -- Left
+                blSlot:SetVerticalAlignment(3)   -- Bottom
+                blSlot:SetPadding({ Left = 18.0, Top = 0.0, Right = 0.0, Bottom = 16.0 })
+            end)
+        end
     end
 
-    -- Body right: Vertical Paginated Floor Selector (middle) + Bottom-Right Apply Changes (bottom)
+    -- 4. Center-Right Floating Vertical Paginated Floor Selector Overlay
     local floorFrame = Core.CreateRawWidget(PATHS.BorderClass, outer)
+    local floorOuterVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorInnerVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorSlotsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "↑", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "↑", 15, 60.0, 30.0, btnBgDark, COLORS.PlayerLocal, function()
         ExecuteInGameThreadWithDelay(10, function()
             local total = #CurrentFloors
             if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
@@ -5343,7 +5429,7 @@ local function OpenStationMap()
             end
         end)
     end)
-    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "↓", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "↓", 15, 60.0, 30.0, btnBgDark, COLORS.PlayerLocal, function()
         ExecuteInGameThreadWithDelay(10, function()
             local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
             if FloorPageTopIdx and FloorPageTopIdx > minTop then
@@ -5353,14 +5439,36 @@ local function OpenStationMap()
         end)
     end)
 
-    if Core.IsValidObj(floorFrame) and Core.IsValidObj(floorInnerVBox) and Core.IsValidObj(floorSlotsBox) then
+    if Core.IsValidObj(floorFrame) and Core.IsValidObj(floorOuterVBox) and Core.IsValidObj(floorInnerVBox) and Core.IsValidObj(floorSlotsBox) then
         pcall(function()
-            floorFrame:SetBrushColor(COLORS.FloorRailBg)
-            floorFrame:SetPadding({ Left = 8.0, Top = 12.0, Right = 8.0, Bottom = 12.0 })
+            floorFrame:SetBrushColor(panelBgDark)
+            floorFrame:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+
+            local topBar = makeAccentBar(accentGold, 3.0)
+            if Core.IsValidObj(topBar) then
+                local tbSlot = floorOuterVBox:AddChildToVerticalBox(topBar)
+                if Core.IsValidObj(tbSlot) then tbSlot:SetHorizontalAlignment(0) end
+            end
+
+            local flHdr = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+            if Core.IsValidObj(flHdr) then
+                flHdr:SetVisibility(3)
+                flHdr:SetSize(9)
+                flHdr:SetText(Core.MakeText("FLOOR"))
+                if Core.IsValidObj(flHdr.TextBlock) and flHdr.TextBlock.SetColorAndOpacity then
+                    flHdr.TextBlock:SetColorAndOpacity({ SpecifiedColor = accentGold, ColorUseRule = 0 })
+                end
+                local hSlot = floorOuterVBox:AddChildToVerticalBox(flHdr)
+                if Core.IsValidObj(hSlot) then
+                    hSlot:SetHorizontalAlignment(2)
+                    hSlot:SetPadding({ Left = 0.0, Top = 6.0, Right = 0.0, Bottom = 2.0 })
+                end
+            end
+
             if Core.IsValidObj(floorUpWrap) then
                 local uSlot = floorInnerVBox:AddChildToVerticalBox(floorUpWrap)
                 if Core.IsValidObj(uSlot) then
-                    uSlot:SetPadding({ Left = 4, Top = 0, Right = 4, Bottom = 8 })
+                    uSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 5.0 })
                     uSlot:SetHorizontalAlignment(2)
                 end
             end
@@ -5368,38 +5476,51 @@ local function OpenStationMap()
             if Core.IsValidObj(fsSlot) then
                 fsSlot:SetHorizontalAlignment(2)
                 fsSlot:SetVerticalAlignment(2)
-                fsSlot:SetSize({ Value = 1.0, SizeRule = 1 })
             end
             if Core.IsValidObj(floorDownWrap) then
                 local dSlot = floorInnerVBox:AddChildToVerticalBox(floorDownWrap)
                 if Core.IsValidObj(dSlot) then
-                    dSlot:SetPadding({ Left = 4, Top = 8, Right = 4, Bottom = 0 })
+                    dSlot:SetPadding({ Left = 0.0, Top = 5.0, Right = 0.0, Bottom = 0.0 })
                     dSlot:SetHorizontalAlignment(2)
                 end
             end
-            floorFrame:AddChild(floorInnerVBox)
-        end)
-    end
 
-    if Core.IsValidObj(floorFrame) then
-        local fWrapSlot = rightVBox:AddChildToVerticalBox(floorFrame)
-        if Core.IsValidObj(fWrapSlot) then
+            local innerSlot = floorOuterVBox:AddChildToVerticalBox(floorInnerVBox)
+            if Core.IsValidObj(innerSlot) then
+                innerSlot:SetPadding({ Left = 7.0, Top = 4.0, Right = 7.0, Bottom = 7.0 })
+                innerSlot:SetHorizontalAlignment(2)
+            end
+
+            local botBar = makeAccentBar(accentGoldDim, 2.0)
+            if Core.IsValidObj(botBar) then
+                local bbSlot = floorOuterVBox:AddChildToVerticalBox(botBar)
+                if Core.IsValidObj(bbSlot) then bbSlot:SetHorizontalAlignment(0) end
+            end
+
+            floorFrame:AddChild(floorOuterVBox)
+        end)
+
+        local crSlot = mapOverlay:AddChildToOverlay(floorFrame)
+        if Core.IsValidObj(crSlot) then
             pcall(function()
-                fWrapSlot:SetHorizontalAlignment(2) -- Center wider floor rail horizontally
-                fWrapSlot:SetVerticalAlignment(0)   -- Fill vertical height above Apply button
-                fWrapSlot:SetSize({ Value = 1.0, SizeRule = 1 })
-                fWrapSlot:SetPadding({ Left = 0.0, Top = 6.0, Right = 0.0, Bottom = 12.0 })
+                crSlot:SetHorizontalAlignment(3) -- Right
+                crSlot:SetVerticalAlignment(2)   -- Center
+                crSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 16.0, Bottom = 0.0 })
             end)
         end
     end
 
-    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 148.0, 40.0, APPLY_BG_DISABLED, APPLY_TXT_DISABLED, function()
+    -- 5. Bottom-Right Floating Apply Changes / Discard Overlay (matching Ship & Station Designer style)
+    local applyPanel = CreateRawFast(PATHS.BorderClass, outer)
+    local applyOuterVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local applyInnerVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 162.0, 38.0, APPLY_BG_DISABLED, APPLY_TXT_DISABLED, function()
         local pendingN = #PendingGhosts + CountTableKeys(PendingDeletes)
         if pendingN == 0 or ApplyInProgress then return end
         Core.Log(string.format("[StationMap] ApplyBtn pressed (pending=%d)", pendingN))
         ExecuteInGameThreadWithDelay(10, CommitPendingGhosts)
     end)
-    local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+    local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard Changes", 11, 162.0, 30.0, btnBgDiscard, COLORS.PlayerLocal, function()
         ExecuteInGameThreadWithDelay(10, function()
             PendingGhosts = {}
             PendingDeletes = {}
@@ -5409,50 +5530,49 @@ local function OpenStationMap()
         end)
     end)
 
-    if Core.IsValidObj(discardWrap) then
-        pcall(function() discardWrap:SetVisibility(2) end)
-        local dSlot = rightVBox:AddChildToVerticalBox(discardWrap)
-        if Core.IsValidObj(dSlot) then
+    if Core.IsValidObj(applyPanel) and Core.IsValidObj(applyOuterVBox) and Core.IsValidObj(applyInnerVBox) then
+        pcall(function()
+            applyPanel:SetBrushColor(panelBgDark)
+            applyPanel:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+
+            local aTopBar = makeAccentBar(accentGold, 3.0)
+            if Core.IsValidObj(aTopBar) then
+                local atSlot = applyOuterVBox:AddChildToVerticalBox(aTopBar)
+                if Core.IsValidObj(atSlot) then atSlot:SetHorizontalAlignment(0) end
+            end
+
+            if Core.IsValidObj(discardWrap) then
+                discardWrap:SetVisibility(1) -- Collapsed until pending changes exist
+                local dSlot = applyInnerVBox:AddChildToVerticalBox(discardWrap)
+                if Core.IsValidObj(dSlot) then
+                    dSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 6.0 })
+                    dSlot:SetHorizontalAlignment(2)
+                end
+            end
+            if Core.IsValidObj(applyWrap) then
+                local aSlot = applyInnerVBox:AddChildToVerticalBox(applyWrap)
+                if Core.IsValidObj(aSlot) then
+                    aSlot:SetHorizontalAlignment(2)
+                end
+            end
+
+            local aiSlot = applyOuterVBox:AddChildToVerticalBox(applyInnerVBox)
+            if Core.IsValidObj(aiSlot) then
+                aiSlot:SetPadding({ Left = 10.0, Top = 9.0, Right = 10.0, Bottom = 10.0 })
+                aiSlot:SetHorizontalAlignment(2)
+            end
+
+            applyPanel:AddChild(applyOuterVBox)
+        end)
+
+        local brSlot = mapOverlay:AddChildToOverlay(applyPanel)
+        if Core.IsValidObj(brSlot) then
             pcall(function()
-                dSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 6.0 })
-                dSlot:SetHorizontalAlignment(2)
+                brSlot:SetHorizontalAlignment(3) -- Right
+                brSlot:SetVerticalAlignment(3)   -- Bottom
+                brSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 16.0, Bottom = 16.0 })
             end)
         end
-    end
-    if Core.IsValidObj(applyWrap) then
-        local aSlot = rightVBox:AddChildToVerticalBox(applyWrap)
-        if Core.IsValidObj(aSlot) then
-            pcall(function() aSlot:SetHorizontalAlignment(2) end)
-        end
-    end
-
-    local rightBoxWrap = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-    pcall(function()
-        rightBoxWrap:SetMinDesiredWidth(164.0)
-        rightBoxWrap:AddChild(rightVBox)
-    end)
-    local rightBodySlot = bodyHBox:AddChildToHorizontalBox(rightBoxWrap)
-    if Core.IsValidObj(rightBodySlot) then
-        pcall(function()
-            rightBodySlot:SetPadding({ Left = 10.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-            rightBodySlot:SetVerticalAlignment(0)
-        end)
-    end
-
-    local bodySlot = rootVBox:AddChildToVerticalBox(bodyHBox)
-    if Core.IsValidObj(bodySlot) then
-        pcall(function()
-            bodySlot:SetSize({ Value = 1.0, SizeRule = 1 })
-            bodySlot:SetHorizontalAlignment(0)
-            bodySlot:SetVerticalAlignment(0)
-            bodySlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 8.0, Bottom = 8.0 })
-        end)
-    end
-
-    if Core.IsValidObj(win.WBP_WindowHeader) and Core.IsValidObj(win.WBP_WindowHeader.CloseButton) then
-        Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, function()
-            ExecuteInGameThreadWithDelay(10, CloseStationMap)
-        end)
     end
 
     MapUI = {
@@ -5471,17 +5591,16 @@ local function OpenStationMap()
         IconPanZoom = iconPanZoom,
         IconCanvas = iconCanvas,
         OverlayCanvas = overlayCanvas,
+        FloorFrame = floorFrame,
         FloorSlotsBox = floorSlotsBox,
         FloorUpBtn = floorUpWrap,
         FloorDownBtn = floorDownWrap,
+        ApplyPanel = applyPanel,
         ApplyBtn = applyWrap,
         ApplyBtnWidget = applyBtn,
         ApplyBtnText = applyBtnText,
         DiscardBtn = discardWrap,
-        CopyBtn = copyBtn,
-        RotateBtn = rotBtn,
-        DeleteBtn = delBtn,
-        FloorPillText = floorPillText,
+        CloseBtnFrame = closeBtnFrame,
         SelPillWrap = selPillWrap,
         SelPillText = selPillText,
         DelPillWrap = delPillWrap,
