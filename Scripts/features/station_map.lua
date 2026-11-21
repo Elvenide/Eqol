@@ -49,7 +49,7 @@ local COLORS = {
     WindowBg      = { R = 0.006, G = 0.006, B = 0.006, A = 1.00 }, -- ~#121212 in sRGB
     GridLine      = { R = 0.240, G = 0.300, B = 0.380, A = 0.28 },
     GridMajor     = { R = 0.340, G = 0.430, B = 0.540, A = 0.48 },
-    ModuleFill    = { R = 0.085, G = 0.115, B = 0.155, A = 0.92 },
+    ModuleFill    = { R = 0.026, G = 0.036, B = 0.050, A = 0.95 },
     ModuleBorder  = { R = 0.720, G = 0.800, B = 0.900, A = 0.96 },
     Assembler     = { R = 0.150, G = 0.560, B = 0.760, A = 0.92 },
     Container     = { R = 0.780, G = 0.560, B = 0.140, A = 0.92 },
@@ -4596,11 +4596,6 @@ local function GetMapCanvasCursorPos(pc)
             lx or -999, ly or -999, ax, ay, vpx, vpy, ViewTransform.canvasW, ViewTransform.canvasH))
     end
 
-    -- Align to the top-left tip of Main Sequence's custom cursor (0px X, -15px Y from bottom-left)
-    if ly ~= nil then
-        ly = ly - 15.0
-    end
-
     return lx, ly
 end
 
@@ -5019,7 +5014,7 @@ local function OpenStationMap()
         MapWinVisible = true
         pcall(function()
             if ActiveMapWin.IsInViewport and not ActiveMapWin:IsInViewport() then
-                ActiveMapWin:AddToViewport(50)
+                ActiveMapWin:AddToViewport(200)
             end
             ActiveMapWin:SetVisibility(0)
         end) -- Visible
@@ -5061,7 +5056,7 @@ local function OpenStationMap()
 
     pcall(function()
         win:SetWindowName(Core.MakeText("Station Map"))
-        win:AddToViewport(50)
+        win:AddToViewport(200)
         win:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
         if win.SetAlignmentInViewport then
             win:SetAlignmentInViewport({ X = 0.0, Y = 0.0 })
@@ -5387,33 +5382,27 @@ local function OpenStationMap()
             { key = "X",      label = "Delete Selected" },
         }
         local hintLabelCol = { R = 0.86, G = 0.88, B = 0.92, A = 0.96 }
-        local capOutlineCol = { R = 0.36, G = 0.40, B = 0.48, A = 0.90 }
-        local capFillCol    = { R = 0.06, G = 0.07, B = 0.09, A = 0.94 }
+        local capFillCol   = { R = 0.0194, G = 0.0194, B = 0.0194, A = 0.96 } -- ~#262626 in sRGB
         for rIdx, def in ipairs(keybindDefs) do
             local rowHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
             if Core.IsValidObj(rowHBox) then
                 pcall(function() rowHBox:SetVisibility(3) end) -- HitTestInvisible
-                local capOuter = CreateRawFast(PATHS.BorderClass, outer)
-                local capInner = CreateRawFast(PATHS.BorderClass, outer)
+                local capBg = CreateRawFast(PATHS.BorderClass, outer)
                 local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
-                if Core.IsValidObj(capOuter) and Core.IsValidObj(capInner) and Core.IsValidObj(capTxt) then
+                if Core.IsValidObj(capBg) and Core.IsValidObj(capTxt) then
                     pcall(function()
-                        capOuter:SetBrushColor(capOutlineCol)
-                        capOuter:SetPadding({ Left = 1.0, Top = 1.0, Right = 1.0, Bottom = 1.0 })
-                        capOuter:SetVisibility(3)
-                        capInner:SetBrushColor(capFillCol)
-                        capInner:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
-                        capInner:SetVisibility(3)
+                        capBg:SetBrushColor(capFillCol)
+                        capBg:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
+                        capBg:SetVisibility(3)
                         capTxt:SetVisibility(3)
                         capTxt:SetSize(10)
                         capTxt:SetText(Core.MakeText(def.key))
                         if Core.IsValidObj(capTxt.TextBlock) and capTxt.TextBlock.SetColorAndOpacity then
                             capTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
                         end
-                        capInner:AddChild(capTxt)
-                        capOuter:AddChild(capInner)
+                        capBg:AddChild(capTxt)
                     end)
-                    local kSlot = rowHBox:AddChildToHorizontalBox(capOuter)
+                    local kSlot = rowHBox:AddChildToHorizontalBox(capBg)
                     if Core.IsValidObj(kSlot) then
                         pcall(function() kSlot:SetVerticalAlignment(2) end)
                     end
