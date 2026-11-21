@@ -321,25 +321,25 @@ local function BuildFeatureRow(menu, pc, outer, featEntry, cls, menuState)
 
         rowBorder:SetBrushColor(COLORS.Transparent)
         rowBorder:SetPadding({ Left = 12.0, Top = 8.0, Right = 12.0, Bottom = 8.0 })
-        rowBorder:SetVisibility(3) -- HitTestInvisible so clicks anywhere on card hit cardBtn
-        rowHBox:SetVisibility(3)
+        rowBorder:SetVisibility(Core.VIS.HitTestInvisible) -- clicks anywhere on card hit cardBtn
+        rowHBox:SetVisibility(Core.VIS.HitTestInvisible)
 
         chkSize:SetWidthOverride(26.0)
         chkSize:SetHeightOverride(26.0)
-        chkSize:SetVisibility(3)
-        chkBg:SetHorizontalAlignment(2) -- Center
-        chkBg:SetVerticalAlignment(2)   -- Center
-        chkBg:SetVisibility(3)
+        chkSize:SetVisibility(Core.VIS.HitTestInvisible)
+        chkBg:SetHorizontalAlignment(Core.ALIGN.Center)
+        chkBg:SetVerticalAlignment(Core.ALIGN.Center)
+        chkBg:SetVisibility(Core.VIS.HitTestInvisible)
         chkBg:AddChild(chkMark)
         chkSize:AddChild(chkBg)
 
         local cSlot = rowHBox:AddChildToHorizontalBox(chkSize)
         if Core.IsValidObj(cSlot) then
-            cSlot:SetVerticalAlignment(2)
+            cSlot:SetVerticalAlignment(Core.ALIGN.Center)
             cSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 14.0, Bottom = 0.0 })
         end
 
-        textCol:SetVisibility(3)
+        textCol:SetVisibility(Core.VIS.HitTestInvisible)
         textCol:AddChildToVerticalBox(titleTxt)
         if featEntry.Description and featEntry.Description ~= "" then
             textCol:AddChildToVerticalBox(descTxt)
@@ -347,41 +347,41 @@ local function BuildFeatureRow(menu, pc, outer, featEntry, cls, menuState)
 
         local tSlot = rowHBox:AddChildToHorizontalBox(textCol)
         if Core.IsValidObj(tSlot) then
-            tSlot:SetVerticalAlignment(2)
-            tSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+            tSlot:SetVerticalAlignment(Core.ALIGN.Center)
+            tSlot:SetSize({ Value = 1.0, SizeRule = Core.SIZE_RULE.Fill })
         end
 
         rowBorder:AddChild(rowHBox)
 
         local bSlot = cardOverlay:AddChildToOverlay(cardBtn)
         if Core.IsValidObj(bSlot) then
-            bSlot:SetHorizontalAlignment(0) -- Fill
-            bSlot:SetVerticalAlignment(0)   -- Fill
+            bSlot:SetHorizontalAlignment(Core.ALIGN.Fill)
+            bSlot:SetVerticalAlignment(Core.ALIGN.Fill)
         end
         local rSlot = cardOverlay:AddChildToOverlay(rowBorder)
         if Core.IsValidObj(rSlot) then
-            rSlot:SetHorizontalAlignment(0) -- Fill
-            rSlot:SetVerticalAlignment(0)   -- Fill
+            rSlot:SetHorizontalAlignment(Core.ALIGN.Fill)
+            rSlot:SetVerticalAlignment(Core.ALIGN.Fill)
         end
     end)
 
     local function ApplyRowTextDefaults()
         if not Core.IsValidObj(cardBtn) then return end
         pcall(function()
-            chkMark:SetVisibility(3)
+            chkMark:SetVisibility(Core.VIS.HitTestInvisible)
             chkMark:SetSize(14)
-            if Core.IsValidObj(chkMark.TextBlock) then chkMark.TextBlock:SetVisibility(3) end
+            if Core.IsValidObj(chkMark.TextBlock) then chkMark.TextBlock:SetVisibility(Core.VIS.HitTestInvisible) end
 
-            titleTxt:SetVisibility(3)
+            titleTxt:SetVisibility(Core.VIS.HitTestInvisible)
             titleTxt:SetSize(13)
             titleTxt:SetText(Core.MakeText(rowState.DisplayName))
-            if Core.IsValidObj(titleTxt.TextBlock) then titleTxt.TextBlock:SetVisibility(3) end
+            if Core.IsValidObj(titleTxt.TextBlock) then titleTxt.TextBlock:SetVisibility(Core.VIS.HitTestInvisible) end
 
-            descTxt:SetVisibility(3)
+            descTxt:SetVisibility(Core.VIS.HitTestInvisible)
             descTxt:SetSize(10)
             descTxt:SetText(Core.MakeText(rowState.Description))
             if Core.IsValidObj(descTxt.TextBlock) and descTxt.TextBlock.SetColorAndOpacity then
-                descTxt.TextBlock:SetVisibility(3)
+                descTxt.TextBlock:SetVisibility(Core.VIS.HitTestInvisible)
                 descTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.DescText, ColorUseRule = 0 })
             end
         end)
@@ -476,28 +476,6 @@ local function PopulateEqolPageLazy(menuState)
     end)
 end
 
-local function LogCleanTabMetaOnce(refTabBtn)
-    if CleanTabMetaLogged or not Core.IsValidObj(refTabBtn) then return end
-    CleanTabMetaLogged = true
-    local props, funcs = {}, {}
-    pcall(function()
-        local cls = refTabBtn:GetClass()
-        while Core.IsValidObj(cls) do
-            local cn = cls:GetFName():ToString()
-            if cn == "UserWidget" or cn == "Widget" or cn == "Object" then break end
-            cls:ForEachProperty(function(p)
-                if #props < 16 then props[#props + 1] = p:GetFName():ToString() end
-            end)
-            cls:ForEachFunction(function(fn)
-                if #funcs < 16 then funcs[#funcs + 1] = fn:GetFName():ToString() end
-            end)
-            cls = cls:GetSuperStruct()
-        end
-    end)
-    Core.Log(string.format("[EqolSettings] CleanTab cls=%s props=[%s] funcs=[%s]",
-        refTabBtn:GetClass():GetFName():ToString(), table.concat(props, ","), table.concat(funcs, ",")))
-end
-
 local function HookSiblingTabButtons(menuState)
     if not menuState or not menuState.SiblingTabs then return end
     local cls = GetCachedWidgetClasses()
@@ -545,7 +523,6 @@ local function EnsureEqolSettingsTab(menu)
 
     local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
     local outer = Core.GetWidgetOuter(menu)
-    LogCleanTabMetaOnce(refTabBtn)
 
     -- Create only the lightweight empty ScrollBox shell now (lazy-populate rows on tab click so Esc has 0ms hitch!)
     local pageScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)

@@ -31,7 +31,11 @@ local function ToggleCinematicFreecam()
     ToggleSeq = ToggleSeq + 1
     local mySeq = ToggleSeq
 
-    pcall(function() pc:ToggleSpectatorMode() end)
+    local okSpec = pcall(function() pc:ToggleSpectatorMode() end)
+    if not okSpec then
+        Core.Log("Cinematic Freecam: ToggleSpectatorMode unavailable")
+        return
+    end
 
     local isSpec = GetSpectatorModeState(pc)
     if isSpec == nil then

@@ -136,9 +136,15 @@ local function ApplyShipCameraState(pc)
     local shipActor, shipObj = GetPilotedShipActor(pc)
     if not Core.IsValidObj(shipActor) then return end
 
+    local newAddr = shipActor:GetAddress()
+    if ActiveShipAddr and ActiveShipAddr ~= newAddr and SavedOriginalCamera[ActiveShipAddr] then
+        -- Restore the previous ship's original camera snapshot on direct Ship A -> Ship B switch
+        RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
+    end
+
     local springArm, cam = FindShipCameraComponents(shipActor)
     local saved = SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
-    ActiveShipAddr = shipActor:GetAddress()
+    ActiveShipAddr = newAddr
 
     if Core.IsValidObj(springArm) then
         pcall(function()

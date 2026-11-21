@@ -992,24 +992,29 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 fl.machines = {}
             end
             for _, m in ipairs(freshMachines) do
-                local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, cXform)
-                local bestFl = nil
-                local bestDz = math.huge
-                for _, fl in ipairs(cFloors) do
-                    local dz = math.abs(lz - fl.z)
-                    if dz < bestDz then
-                        bestDz = dz
-                        bestFl = fl
+                if not StationData.ShouldHideMachineOnMap(m) then
+                    local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, cXform)
+                    local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
+                    if not skipZero then
+                        local bestFl = nil
+                        local bestDz = math.huge
+                        for _, fl in ipairs(cFloors) do
+                            local dz = math.abs(lz - fl.z)
+                            if dz < bestDz then
+                                bestDz = dz
+                                bestFl = fl
+                            end
+                        end
+                        if bestFl then
+                            bestFl.machines[#bestFl.machines + 1] = {
+                                machine = m,
+                                x = lx,
+                                y = ly,
+                                z = lz,
+                                yaw = lyaw,
+                            }
+                        end
                     end
-                end
-                if bestFl then
-                    bestFl.machines[#bestFl.machines + 1] = {
-                        machine = m,
-                        x = lx,
-                        y = ly,
-                        z = lz,
-                        yaw = lyaw,
-                    }
                 end
             end
             CachedFloorMap.machineVersion = MachineCacheVersion

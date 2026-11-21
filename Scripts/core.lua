@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.33"
+Core.VERSION = "0.1.34"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -149,6 +149,8 @@ function Core.GetConfigPath()
     return Core.GetModDir() .. "/config.json"
 end
 
+local CachedConfigDiskValues = nil
+
 function Core.WriteConfig()
     local path = Core.GetConfigPath()
     local f = io.open(path, "w")
@@ -182,6 +184,11 @@ function Core.WriteConfig()
 
     f:write(table.concat(lines, "\n") .. "\n")
     f:close()
+
+    CachedConfigDiskValues = {}
+    for k, v in pairs(Core.Config) do
+        CachedConfigDiskValues[k] = v
+    end
 end
 
 local function ParseConfigRaw(raw)
@@ -209,29 +216,33 @@ local function ParseConfigRaw(raw)
 end
 
 function Core.ReadConfig(defaults)
-    local path = Core.GetConfigPath()
-    local f = io.open(path, "r")
-    if not f then
-        if defaults then
-            for k, v in pairs(defaults) do
-                if Core.Config[k] == nil then
-                    Core.Config[k] = v
+    local diskValues = CachedConfigDiskValues
+    if diskValues == nil then
+        local path = Core.GetConfigPath()
+        local f = io.open(path, "r")
+        if not f then
+            if defaults then
+                for k, v in pairs(defaults) do
+                    if Core.Config[k] == nil then
+                        Core.Config[k] = v
+                    end
                 end
             end
+            Core.WriteConfig()
+            return
         end
-        Core.WriteConfig()
-        return
-    end
-    local raw = f:read("*a") or ""
-    f:close()
+        local raw = f:read("*a") or ""
+        f:close()
 
-    -- Parse ALL keys currently in config.json and merge unknown keys into Core.Config
-    -- BEFORE checking dirty/writing, so incremental feature registration never wipes
-    -- saved keys belonging to features that haven't called Core.ReadConfig yet.
-    local diskValues = ParseConfigRaw(raw)
-    for k, diskVal in pairs(diskValues) do
-        if Core.Config[k] == nil then
-            Core.Config[k] = diskVal
+        -- Parse ALL keys currently in config.json once and merge unknown keys into Core.Config
+        -- BEFORE checking dirty/writing, so incremental feature registration never wipes
+        -- saved keys belonging to features that haven't called Core.ReadConfig yet.
+        diskValues = ParseConfigRaw(raw)
+        CachedConfigDiskValues = diskValues
+        for k, diskVal in pairs(diskValues) do
+            if Core.Config[k] == nil then
+                Core.Config[k] = diskVal
+            end
         end
     end
 

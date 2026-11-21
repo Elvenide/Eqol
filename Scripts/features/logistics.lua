@@ -47,7 +47,6 @@ local STATUS_COLORS = {
 local HudKeyIndicators = {} -- hudAddr -> { Root, KeyText }
 local ActiveLogisticsWin = nil
 local ActiveLogisticsUI = nil
-local HookedButtons = {}
 
 --------------------------------------------------------------------------------
 -- Keybind Helpers
@@ -673,7 +672,7 @@ local function PopulateStorageSection(ui, items)
         if ui.InvWrap.ClearChildren then ui.InvWrap:ClearChildren() end
     end)
     for idx, entry in ipairs(items) do
-        local slotW = Core.CreateUserWidget(PATHS.InventorySlotClass, ui.Window, ui.PC)
+        local slotW = CreateUserWidgetFast(PATHS.InventorySlotClass, ui.Window, ui.PC)
         if Core.IsValidObj(slotW) then
             pcall(function()
                 slotW:SetItemStack({ Item = entry.Item, Amount = entry.Amount })
@@ -709,11 +708,11 @@ local function PopulateTotalProductionSection(ui, prodTotals)
         if ui.TotListBox.ClearChildren then ui.TotListBox:ClearChildren() end
     end)
     for i = 1, #prodTotals, 2 do
-        local pairRow = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
+        local pairRow = CreateRawFast(PATHS.HorizontalBoxClass, ui.Outer)
         if Core.IsValidObj(pairRow) then
             for col = 0, 1 do
                 local entry = prodTotals[i + col]
-                local cellBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
+                local cellBox = CreateRawFast(PATHS.HorizontalBoxClass, ui.Outer)
                 if Core.IsValidObj(cellBox) then
                     if entry then
                         AddItemRateChip(cellBox, ui.Window, ui.PC, ui.Outer, entry.Item, entry.Rate, STATUS_COLORS.Green)
@@ -737,10 +736,10 @@ local function PopulateTotalProductionSection(ui, prodTotals)
 end
 
 local function BuildMachineRow(ui, entry, info, prodRates, consRates)
-    local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
-    local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, ui.Outer)
-    local statusBar = Core.CreateRawWidget(PATHS.BorderClass, ui.Outer)
-    local statusSize = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+    local rowBorder = CreateRawFast(PATHS.BorderClass, ui.Outer)
+    local rowHBox = CreateRawFast(PATHS.HorizontalBoxClass, ui.Outer)
+    local statusBar = CreateRawFast(PATHS.BorderClass, ui.Outer)
+    local statusSize = CreateRawFast(PATHS.SizeBoxClass, ui.Outer)
     if not (Core.IsValidObj(rowBorder) and Core.IsValidObj(rowHBox) and Core.IsValidObj(statusBar) and Core.IsValidObj(statusSize)) then
         return nil
     end
@@ -764,14 +763,14 @@ local function BuildMachineRow(ui, entry, info, prodRates, consRates)
     end
 
     local statusTxt = nil
-    local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+    local nameTxt = CreateUserWidgetFast(PATHS.WBPTextClass, ui.Window, ui.PC)
     if Core.IsValidObj(nameTxt) then
         pcall(function()
             nameTxt:SetSize(12)
             nameTxt:SetText(Core.MakeText(entry.Name))
         end)
-        local nameCol = Core.CreateRawWidget(PATHS.VerticalBoxClass, ui.Outer)
-        statusTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+        local nameCol = CreateRawFast(PATHS.VerticalBoxClass, ui.Outer)
+        statusTxt = CreateUserWidgetFast(PATHS.WBPTextClass, ui.Window, ui.PC)
         if Core.IsValidObj(nameCol) and Core.IsValidObj(statusTxt) then
             pcall(function()
                 statusTxt:SetSize(9)
@@ -783,7 +782,7 @@ local function BuildMachineRow(ui, entry, info, prodRates, consRates)
             nameCol:AddChildToVerticalBox(nameTxt)
             nameCol:AddChildToVerticalBox(statusTxt)
         end
-        local nBox = Core.CreateRawWidget(PATHS.SizeBoxClass, ui.Outer)
+        local nBox = CreateRawFast(PATHS.SizeBoxClass, ui.Outer)
         pcall(function() nBox:SetWidthOverride(130.0) end)
         nBox:AddChild(Core.IsValidObj(nameCol) and nameCol or nameTxt)
         local nSlot = rowHBox:AddChildToHorizontalBox(nBox)
@@ -801,7 +800,7 @@ local function BuildMachineRow(ui, entry, info, prodRates, consRates)
     end
 
     if #entry.Inputs > 0 and #entry.Outputs > 0 then
-        local arrowTxt = Core.CreateUserWidget(PATHS.WBPTextClass, ui.Window, ui.PC)
+        local arrowTxt = CreateUserWidgetFast(PATHS.WBPTextClass, ui.Window, ui.PC)
         if Core.IsValidObj(arrowTxt) then
             pcall(function()
                 arrowTxt:SetSize(13)

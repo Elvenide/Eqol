@@ -291,47 +291,6 @@ local function GetActorFromSimObj(simObj)
     return nil, "none"
 end
 
-local function SafeCompLocalPos(comp, pos, fw, rt, up)
-    if not Core.IsValidObj(comp) or not comp.K2_GetComponentLocation then return nil end
-    local out = nil
-    pcall(function()
-        local loc = comp:K2_GetComponentLocation()
-        if loc and type(loc.X) == "number" then
-            local dx = loc.X - pos.X
-            local dy = loc.Y - pos.Y
-            local dz = loc.Z - pos.Z
-            out = {
-                lx = dx * fw.X + dy * fw.Y + dz * fw.Z,
-                ly = dx * rt.X + dy * rt.Y + dz * rt.Z,
-                lz = dx * up.X + dy * up.Y + dz * up.Z,
-                wx = loc.X, wy = loc.Y, wz = loc.Z,
-            }
-        end
-    end)
-    return out
-end
-
-local function FormatLocalPos(lp)
-    if not lp then return "nil" end
-    return string.format("(%.1f,%.1f,%.1f)", lp.lx, lp.ly, lp.lz)
-end
-
-local function SafeCompWorldAndLocal(comp, pos, fw, rt, up)
-    local lp = SafeCompLocalPos(comp, pos, fw, rt, up)
-    if not lp then return nil end
-    local rotStr = ""
-    pcall(function()
-        local f = comp.GetForwardVector and comp:GetForwardVector() or nil
-        if f and type(f.X) == "number" then
-            local fx = f.X * fw.X + f.Y * fw.Y + f.Z * fw.Z
-            local fy = f.X * rt.X + f.Y * rt.Y + f.Z * rt.Z
-            local fz = f.X * up.X + f.Y * up.Y + f.Z * up.Z
-            rotStr = string.format(" fw=(%.2f,%.2f,%.2f)", fx, fy, fz)
-        end
-    end)
-    return FormatLocalPos(lp) .. rotStr
-end
-
 local function GetStopFrameInfo(stopObj)
     local actor, actorSrc = GetActorFromSimObj(stopObj)
     local pos = nil
@@ -824,11 +783,6 @@ local function UpdateElevatorPortIcons()
                 end
             end
         end
-    end
-
-    if count > 0 or #CachedWorldPorts > 0 then
-        LogOnce(string.format("vis:%d:%d", count, #CachedWorldPorts),
-            "Step[Render] Visible in range (<=30m): %d / %d", count, #CachedWorldPorts)
     end
 
     for i = count + 1, #IconPool do

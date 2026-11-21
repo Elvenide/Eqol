@@ -413,7 +413,7 @@ EnsureResearchSearchBar = function(tree)
                 Tree = tree,
                 ResearchList = rList,
                 SearchInput = existingInput,
-                BaseVisible = {},
+                HiddenByEqol = {},
                 FilterDirty = true,
             }
             InjectedTrees[treeAddr] = st

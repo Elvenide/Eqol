@@ -744,7 +744,16 @@ local function TryAttachExistingHuds()
     if okHuds and huds then
         for _, hud in ipairs(huds) do
             if Core.IsValidObj(hud) then
-                EnsureHudHotbarTracked(hud)
+                local isLocalHud = true
+                pcall(function()
+                    local owningPC = hud.GetOwningPlayer and hud:GetOwningPlayer() or nil
+                    if Core.IsValidObj(owningPC) and owningPC.IsLocalPlayerController then
+                        isLocalHud = (owningPC:IsLocalPlayerController() == true)
+                    end
+                end)
+                if isLocalHud then
+                    EnsureHudHotbarTracked(hud)
+                end
             end
         end
     end

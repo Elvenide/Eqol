@@ -13,6 +13,7 @@ local Feature = {
 
 local TargetTextBlock = nil
 local OriginalMSVersion = nil
+local OriginalMSRawText = nil
 local PollRunning = false
 local FrameCount = 0
 local LastFpsTime = 0.0
@@ -20,19 +21,19 @@ local CurrentFps = 0
 local LastScanTime = -999.0
 
 local function ExtractMSVersion(str)
-    if type(str) ~= "string" then return nil end
+    if type(str) ~= "string" then return nil, nil end
     local trimmed = str:match("^%s*(.-)%s*$") or ""
-    if trimmed == "" then return nil end
+    if trimmed == "" then return nil, nil end
     -- Already formatted by us? Extract the MS v... suffix so we keep the real version
     local existing = trimmed:match("MS%s+v([^|%s]+)")
     if existing and existing ~= "" then
-        return existing
+        return existing, nil
     end
     -- Match raw Main Sequence version strings like "0.1.0.109s" or "v0.1.0.109s"
     if trimmed:match("^[vV]?%d+%.%d+%.%d+") and #trimmed <= 24 then
-        return trimmed:gsub("^[vV]", "")
+        return trimmed:gsub("^[vV]", ""), trimmed
     end
-    return nil
+    return nil, nil
 end
 
 local function IsVersionOverlayTextBlock(tb)
@@ -64,15 +65,15 @@ local function FindVersionTextBlock()
             if okT and txtObj ~= nil then
                 local okS, s = pcall(function() return txtObj:ToString() end)
                 if okS and type(s) == "string" then
-                    local ver = ExtractMSVersion(s)
+                    local ver, rawTxt = ExtractMSVersion(s)
                     if ver then
-                        return tb, ver
+                        return tb, ver, rawTxt
                     end
                 end
             end
         end
     end
-    return nil, nil
+    return nil, nil, nil
 end
 
 local function UpdateVersionTextBlock()
@@ -98,10 +99,13 @@ local SCAN_RETRY_SECONDS = 8.0 -- Safety-net FindAllOf("TextBlock") interval (>=
 local function TryHookVersionTextBlock()
     if Core.IsValidObj(TargetTextBlock) then return true end
     LastScanTime = os.clock()
-    local tb, ver = FindVersionTextBlock()
+    local tb, ver, rawTxt = FindVersionTextBlock()
     if Core.IsValidObj(tb) and ver then
         TargetTextBlock = tb
         OriginalMSVersion = ver
+        if rawTxt then
+            OriginalMSRawText = rawTxt
+        end
         EnsureSlotAutoSize(tb)
         Core.Log(string.format("[HudVersionBar] Hooked version TextBlock (MS v%s)", ver))
         return true
@@ -173,8 +177,9 @@ function Feature.OnToggle(enabled)
     if enabled then
         StartLoop()
     else
-        if Core.IsValidObj(TargetTextBlock) and OriginalMSVersion then
-            pcall(function() TargetTextBlock:SetText(Core.MakeText(OriginalMSVersion)) end)
+        local restoreText = OriginalMSRawText or OriginalMSVersion
+        if Core.IsValidObj(TargetTextBlock) and restoreText then
+            pcall(function() TargetTextBlock:SetText(Core.MakeText(restoreText)) end)
         end
     end
 end

@@ -31,9 +31,7 @@ local COLORS = {
 local InjectedDesigners = {}       -- hudAddr -> { Hud, PowerText, PowerLabel, LabelColor, SolarEfficiency, SolarEffSource, InitialLoadedGen, InitialLoadedCons, ResetBaseline, LastPendingSig, LastStepDiag }
 local ActorClassPowerCache = {}    -- actorClsAddr -> { info = table, clsName = string }
 local ActorBlockInfoCache = {}     -- actorAddr -> { info = table, clsAddr = number, clsName = string }
-local LoggedActorClasses = {}      -- actorClsAddr -> true
 local RefreshScheduled = false
-local LastTriggerSource = "init"
 local RefreshDesignerPowerStats    -- forward declaration
 
 local function FormatPower(kw)
@@ -545,7 +543,6 @@ local function EnsureDesignerWatcher()
                         if okN and type(rawLen) == "number" and st.WatchedRawLen ~= nil and rawLen ~= st.WatchedRawLen then
                             st.WatchedRawLen = rawLen
                             st.LastFullPendingScanClock = os.clock()
-                            LastTriggerSource = "WatcherPoll"
                             RefreshDesignerPowerStats(st.Hud)
                             previewCount = st.WatchedPreviewCount or rawLen
                             pendingCount = st.WatchedPendingCount or 0
@@ -566,7 +563,6 @@ local function EnsureDesignerWatcher()
                 if previewCount ~= st.WatchedPreviewCount or pendingCount ~= st.WatchedPendingCount then
                     st.WatchedPreviewCount = previewCount
                     st.WatchedPendingCount = pendingCount
-                    LastTriggerSource = "WatcherPoll"
                     RefreshDesignerPowerStats(st.Hud)
                 end
             end
@@ -583,9 +579,6 @@ local function EnsureDesignerWatcher()
 end
 
 local function ScanAndRefreshAllDesigners(triggerSource, allowFindAll)
-    if triggerSource then
-        LastTriggerSource = triggerSource
-    end
     local seen = {}
     local anyTracked = false
     for addr, st in pairs(InjectedDesigners) do
@@ -612,9 +605,6 @@ local function ScanAndRefreshAllDesigners(triggerSource, allowFindAll)
 end
 
 local function ScheduleAllDesignersRefresh(triggerSource, targetHud)
-    if triggerSource then
-        LastTriggerSource = triggerSource
-    end
     if RefreshScheduled then return end
     RefreshScheduled = true
     ExecuteInGameThreadWithDelay(40, function()
@@ -1141,7 +1131,6 @@ Feature.WatchWidgets = {
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(150, function()
             if Core.IsFeatureEnabled("DesignerPowerStats") and Core.IsValidObj(hud) and not InjectedDesigners[hud:GetAddress()] and IsHudVisible(hud) then
-                LastTriggerSource = "WatchWidget_WBP_DesignerHUD_C"
                 RefreshDesignerPowerStats(hud)
             end
         end)

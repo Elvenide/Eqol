@@ -4922,7 +4922,13 @@ local function DestroyStationMap()
     LastGridTier = nil
     LastGridZoomRatio = nil
     LastHoveredPortIdx = nil
-    UnregisterButtonList(FloorIconButtons)
+    for _, entry in pairs(FloorIconButtons) do
+        if type(entry) == "table" and entry.btn then
+            Core.UnregisterWBPButtonClick(entry.btn)
+        else
+            Core.UnregisterWBPButtonClick(entry)
+        end
+    end
     UnregisterButtonList(FloorRailButtons)
     UnregisterButtonList(TrackedButtons)
     FloorIconButtons = {}
