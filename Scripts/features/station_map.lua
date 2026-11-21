@@ -1000,6 +1000,117 @@ local function PlayerHasBuildableMaterials(pc, buildable, count)
     return true
 end
 
+local function ComputePendingMaterialSummary(pc)
+    local summary = {
+        isCreative = false,
+        hasMissing = false,
+        entries = {},
+    }
+    if not Core.IsValidObj(pc) then return summary end
+    local playerObj = pc.PlayerObject
+    if not Core.IsValidObj(playerObj) then return summary end
+
+    local okCreative, isCreative = pcall(function() return playerObj.bCreativeMode or pc.bCreativeMode end)
+    summary.isCreative = (okCreative and isCreative == true)
+
+    local inv = nil
+    local okBInv, bInv = pcall(function() return playerObj:GetBuildingInventory() end)
+    if okBInv and Core.IsValidObj(bInv) then
+        inv = bInv
+    elseif Core.IsValidObj(playerObj.Inventory) then
+        inv = playerObj.Inventory
+    end
+
+    local netByItem = {}
+    local function addDelta(itemObj, delta)
+        if not Core.IsValidObj(itemObj) or not delta or delta == 0 then return end
+        local addr = itemObj:GetAddress()
+        if netByItem[addr] then
+            netByItem[addr].net = netByItem[addr].net + delta
+        else
+            netByItem[addr] = { item = itemObj, net = delta }
+        end
+    end
+
+    -- 1. Build costs from pending ghosts
+    for _, g in ipairs(PendingGhosts) do
+        if g and Core.IsValidObj(g.buildable) then
+            local bCosts = {}
+            CollectBuildableCosts(g.buildable, 1, bCosts)
+            for _, entry in pairs(bCosts) do
+                addDelta(entry.item, entry.amount)
+            end
+        end
+    end
+
+    -- 2. Refunds from pending deletes and overwrite-replacement targets
+    local seenDelAddr = {}
+    local function creditDeleteMachine(dm)
+        if not dm or not Core.IsValidObj(dm.machine) then return end
+        local mAddr = dm.addr or dm.machine:GetAddress()
+        if seenDelAddr[mAddr] then return end
+        seenDelAddr[mAddr] = true
+        local bld = Core.IsValidObj(dm.buildable) and dm.buildable
+            or (StationData.FindBuildableForMachineClass and StationData.FindBuildableForMachineClass(dm.machine) or nil)
+        if Core.IsValidObj(bld) then
+            local rCosts = {}
+            CollectBuildableCosts(bld, 1, rCosts)
+            for _, entry in pairs(rCosts) do
+                addDelta(entry.item, -entry.amount)
+            end
+        end
+    end
+
+    for _, dm in pairs(PendingDeletes) do
+        creditDeleteMachine(dm)
+    end
+    for _, g in ipairs(PendingGhosts) do
+        if g and g.isReplace and g.replaceTargets then
+            for _, rt in ipairs(g.replaceTargets) do
+                creditDeleteMachine(rt)
+            end
+        end
+    end
+
+    for _, rec in pairs(netByItem) do
+        if rec.net ~= 0 then
+            local itemName = "Item"
+            pcall(function()
+                if rec.item.DisplayName then
+                    local s = rec.item.DisplayName:ToString()
+                    if s and s ~= "" then itemName = s end
+                elseif rec.item.GetFName then
+                    itemName = rec.item:GetFName():ToString()
+                end
+            end)
+            local have = 0
+            if Core.IsValidObj(inv) and inv.GetItemAmount then
+                local okAmt, h = pcall(function() return inv:GetItemAmount(rec.item) end)
+                if okAmt then have = tonumber(h) or 0 end
+            end
+            local lacking = (not summary.isCreative) and (rec.net > 0) and (have < rec.net)
+            if lacking then
+                summary.hasMissing = true
+            end
+            table.insert(summary.entries, {
+                item = rec.item,
+                name = itemName,
+                net = rec.net,
+                have = have,
+                lacking = lacking,
+            })
+        end
+    end
+
+    table.sort(summary.entries, function(a, b)
+        if a.lacking ~= b.lacking then return a.lacking end
+        if (a.net > 0) ~= (b.net > 0) then return a.net > 0 end
+        return a.name < b.name
+    end)
+
+    return summary
+end
+
 local function CheckMaterialsForPendingList(pc, list, delList)
     if not Core.IsValidObj(pc) then return false, nil end
     local playerObj = pc.PlayerObject
@@ -2371,10 +2482,127 @@ local APPLY_BG_ENABLED   = { R = 0.74, G = 0.48, B = 0.06, A = 0.96 }
 local APPLY_BG_DISABLED  = { R = 0.15, G = 0.17, B = 0.20, A = 0.75 }
 local APPLY_TXT_DISABLED = { R = 0.60, G = 0.64, B = 0.70, A = 0.85 }
 
+local COST_TXT_LACKING = { R = 0.90, G = 0.14, B = 0.24, A = 1.00 }
+local COST_TXT_REFUND  = { R = 0.35, G = 0.88, B = 0.48, A = 1.00 }
+local COST_TXT_OK      = { R = 0.88, G = 0.92, B = 0.96, A = 1.00 }
+
+local function RefreshModificationCostPanel(summary)
+    if not MapUI or not Core.IsValidObj(MapUI.CostPanel) or not Core.IsValidObj(MapUI.CostListVBox) then return end
+    local entries = summary and summary.entries or {}
+    if #entries == 0 then
+        pcall(function() MapUI.CostPanel:SetVisibility(1) end) -- Collapsed
+        return
+    end
+
+    pcall(function() MapUI.CostListVBox:ClearChildren() end)
+    local outer = Core.GetWidgetOuter(MapUI.Window)
+    local pc = MapUI.PC
+    local isCreative = summary.isCreative
+
+    for idx, entry in ipairs(entries) do
+        local row = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+        if Core.IsValidObj(row) then
+            pcall(function() row:SetVisibility(3) end)
+
+            -- Native item icon (24x24 WBP_Item_C)
+            local iconSb = CreateRawFast(PATHS.SizeBoxClass, outer)
+            local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
+            if Core.IsValidObj(iconSb) and Core.IsValidObj(itemW) then
+                pcall(function()
+                    iconSb:SetWidthOverride(24.0)
+                    iconSb:SetHeightOverride(24.0)
+                    iconSb:SetVisibility(3)
+                    itemW:SetVisibility(3)
+                    itemW:SetItem(entry.item)
+                    iconSb:AddChild(itemW)
+                end)
+                local iSlot = row:AddChildToHorizontalBox(iconSb)
+                if Core.IsValidObj(iSlot) then
+                    pcall(function() iSlot:SetVerticalAlignment(2) end)
+                end
+            end
+
+            -- Net cost label (e.g. "0/40x", "10/10x", "-5x", or "40x" in Creative Mode)
+            local amtStr
+            local amtCol
+            if entry.net < 0 then
+                amtStr = string.format("%dx", entry.net)
+                amtCol = COST_TXT_REFUND
+            elseif isCreative then
+                amtStr = string.format("%dx", entry.net)
+                amtCol = COST_TXT_OK
+            else
+                amtStr = string.format("%d/%dx", entry.have, entry.net)
+                amtCol = entry.lacking and COST_TXT_LACKING or COST_TXT_OK
+            end
+
+            local amtTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+            if Core.IsValidObj(amtTxt) then
+                pcall(function()
+                    amtTxt:SetVisibility(3)
+                    amtTxt:SetSize(11)
+                    amtTxt:SetText(Core.MakeText(amtStr))
+                    if Core.IsValidObj(amtTxt.TextBlock) and amtTxt.TextBlock.SetColorAndOpacity then
+                        amtTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = amtCol, ColorUseRule = 0 })
+                    end
+                end)
+                local aSlot = row:AddChildToHorizontalBox(amtTxt)
+                if Core.IsValidObj(aSlot) then
+                    pcall(function()
+                        aSlot:SetVerticalAlignment(2)
+                        aSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                    end)
+                end
+            end
+
+            -- Item display name
+            local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+            if Core.IsValidObj(nameTxt) then
+                pcall(function()
+                    nameTxt:SetVisibility(3)
+                    nameTxt:SetSize(11)
+                    nameTxt:SetText(Core.MakeText(entry.name))
+                    if Core.IsValidObj(nameTxt.TextBlock) and nameTxt.TextBlock.SetColorAndOpacity then
+                        nameTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
+                    end
+                end)
+                local nSlot = row:AddChildToHorizontalBox(nameTxt)
+                if Core.IsValidObj(nSlot) then
+                    pcall(function()
+                        nSlot:SetVerticalAlignment(2)
+                        nSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                    end)
+                end
+            end
+
+            local rSlot = MapUI.CostListVBox:AddChildToVerticalBox(row)
+            if Core.IsValidObj(rSlot) then
+                pcall(function()
+                    rSlot:SetHorizontalAlignment(1)
+                    rSlot:SetPadding({ Left = 0.0, Top = (idx == 1) and 0.0 or 5.0, Right = 0.0, Bottom = 0.0 })
+                end)
+            end
+        end
+    end
+
+    pcall(function() MapUI.CostPanel:SetVisibility(0) end) -- Visible
+end
+
 UpdateActionBar = function()
     if not MapUI then return end
     local pendingN = #PendingGhosts + CountTableKeys(PendingDeletes)
-    local canApply = (pendingN > 0) and (not ApplyInProgress)
+    local pc = Core.GetLocalPlayerController()
+    local matSummary = (pendingN > 0) and ComputePendingMaterialSummary(pc) or { isCreative = false, hasMissing = false, entries = {} }
+    local hasMissing = (pendingN > 0) and (matSummary.hasMissing == true)
+    local canApply = (pendingN > 0) and (not ApplyInProgress) and (not hasMissing)
+
+    RefreshModificationCostPanel(matSummary)
+
+    if Core.IsValidObj(MapUI.ValidationBox) then
+        pcall(function()
+            MapUI.ValidationBox:SetVisibility(hasMissing and 0 or 1) -- Visible vs Collapsed
+        end)
+    end
     if Core.IsValidObj(MapUI.ApplyBtnText) then
         pcall(function()
             if pendingN > 0 then
@@ -4637,7 +4865,7 @@ local function IsAnyButtonHovered()
             if okH and h == true then return true end
         end
     end
-    for _, panel in ipairs({ MapUI.FloorFrame, MapUI.ApplyPanel, MapUI.CloseBtnFrame }) do
+    for _, panel in ipairs({ MapUI.FloorFrame, MapUI.ApplyPanel, MapUI.CloseBtnFrame, MapUI.CostPanel }) do
         if Core.IsValidObj(panel) and panel.IsHovered then
             local okH, h = pcall(function() return panel:IsHovered() end)
             if okH and h == true then return true end
@@ -4660,6 +4888,38 @@ local function EnsureInputPoll()
         if not Core.IsValidObj(pc) then
             ExecuteInGameThreadAfterFrames(1, Tick)
             return
+        end
+
+        -- Update top-right Close (X) button orange hover highlight
+        if Core.IsValidObj(MapUI.CloseBtnFrame) and Core.IsValidObj(MapUI.CloseBtnWidget) then
+            local isCloseHov = false
+            pcall(function()
+                isCloseHov = (MapUI.CloseBtnWidget:IsHovered() == true)
+                    or (MapUI.CloseBtnFrame:IsHovered() == true)
+            end)
+            if isCloseHov ~= MapUI.CloseBtnWasHovered then
+                MapUI.CloseBtnWasHovered = isCloseHov
+                pcall(function()
+                    MapUI.CloseBtnFrame:SetBrushColor(isCloseHov
+                        and { R = 0.96, G = 0.56, B = 0.06, A = 1.00 }
+                        or  { R = 0.92, G = 0.94, B = 0.96, A = 0.95 })
+                    if MapUI.CloseBtnWidget.SetBackgroundColour then
+                        MapUI.CloseBtnWidget:SetBackgroundColour(isCloseHov
+                            and { R = 0.36, G = 0.18, B = 0.02, A = 0.96 }
+                            or  { R = 0.06, G = 0.07, B = 0.09, A = 0.92 })
+                    end
+                    if Core.IsValidObj(MapUI.CloseBtnText) and Core.IsValidObj(MapUI.CloseBtnText.TextBlock)
+                        and MapUI.CloseBtnText.TextBlock.SetColorAndOpacity
+                    then
+                        MapUI.CloseBtnText.TextBlock:SetColorAndOpacity({
+                            SpecifiedColor = isCloseHov
+                                and { R = 1.00, G = 0.68, B = 0.14, A = 1.00 }
+                                or  { R = 0.98, G = 0.98, B = 1.00, A = 1.00 },
+                            ColorUseRule = 0,
+                        })
+                    end
+                end)
+            end
         end
 
         -- Keep character movement disabled while Station Map is open without touching BP_CameraPawn_C / movement components
@@ -5368,12 +5628,73 @@ local function OpenStationMap()
         return bdr, txt
     end
 
+    local topLeftVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
     local topLeftPillsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
     local selPillWrap, selPillText = createStatusPill("Selected: 0", pillBgSel, 11)
     local delPillWrap, delPillText = createStatusPill("Deleting: 0", pillBgDel, 11)
     local modePillWrap, modePillText = createStatusPill("", pillBgMode, 11)
-    if Core.IsValidObj(topLeftPillsHBox) then
-        pcall(function() topLeftPillsHBox:SetVisibility(4) end) -- SelfHitTestInvisible
+
+    -- Modification Cost panel (Designer-style net material cost overlay beneath status pills)
+    local costPanel = CreateRawFast(PATHS.BorderClass, outer)
+    local costOuterVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local costScroll = CreateRawFast(PATHS.ScrollBoxClass, outer)
+    local costListVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    if Core.IsValidObj(costPanel) and Core.IsValidObj(costOuterVBox) and Core.IsValidObj(costListVBox) then
+        pcall(function()
+            costPanel:SetBrushColor(panelBgDark)
+            costPanel:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            costPanel:SetVisibility(1) -- Collapsed until pending changes exist
+
+            local costHeader = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+            if Core.IsValidObj(costHeader) then
+                costHeader:SetVisibility(3)
+                costHeader:SetSize(13)
+                costHeader:SetText(Core.MakeText("▼  Modification Cost"))
+                if Core.IsValidObj(costHeader.TextBlock) and costHeader.TextBlock.SetColorAndOpacity then
+                    costHeader.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
+                end
+                local chSlot = costOuterVBox:AddChildToVerticalBox(costHeader)
+                if Core.IsValidObj(chSlot) then
+                    chSlot:SetHorizontalAlignment(1)
+                    chSlot:SetPadding({ Left = 12.0, Top = 10.0, Right = 14.0, Bottom = 8.0 })
+                end
+            end
+
+            local listContainer = costListVBox
+            if Core.IsValidObj(costScroll) then
+                local costScrollSb = CreateRawFast(PATHS.SizeBoxClass, outer)
+                costScroll:SetScrollBarVisibility(1)
+                costScroll:AddChild(costListVBox)
+                if Core.IsValidObj(costScrollSb) then
+                    costScrollSb:SetMaxDesiredHeight(300.0)
+                    costScrollSb:SetMinDesiredWidth(236.0)
+                    costScrollSb:AddChild(costScroll)
+                    listContainer = costScrollSb
+                else
+                    listContainer = costScroll
+                end
+            end
+            local clSlot = costOuterVBox:AddChildToVerticalBox(listContainer)
+            if Core.IsValidObj(clSlot) then
+                clSlot:SetHorizontalAlignment(0)
+                clSlot:SetPadding({ Left = 12.0, Top = 0.0, Right = 14.0, Bottom = 10.0 })
+            end
+
+            local costBotBar = makeAccentBar(accentGold, 3.0)
+            if Core.IsValidObj(costBotBar) then
+                local cbSlot = costOuterVBox:AddChildToVerticalBox(costBotBar)
+                if Core.IsValidObj(cbSlot) then cbSlot:SetHorizontalAlignment(0) end
+            end
+
+            costPanel:AddChild(costOuterVBox)
+        end)
+    end
+
+    if Core.IsValidObj(topLeftVBox) and Core.IsValidObj(topLeftPillsHBox) then
+        pcall(function()
+            topLeftVBox:SetVisibility(4) -- SelfHitTestInvisible
+            topLeftPillsHBox:SetVisibility(4) -- SelfHitTestInvisible
+        end)
         for idx, pill in ipairs({ selPillWrap, delPillWrap, modePillWrap }) do
             if Core.IsValidObj(pill) then
                 local sl = topLeftPillsHBox:AddChildToHorizontalBox(pill)
@@ -5385,19 +5706,32 @@ local function OpenStationMap()
                 end
             end
         end
-        local tlSlot = mapOverlay:AddChildToOverlay(topLeftPillsHBox)
+        local pillsRowSlot = topLeftVBox:AddChildToVerticalBox(topLeftPillsHBox)
+        if Core.IsValidObj(pillsRowSlot) then
+            pcall(function() pillsRowSlot:SetHorizontalAlignment(1) end)
+        end
+        if Core.IsValidObj(costPanel) then
+            local cpSlot = topLeftVBox:AddChildToVerticalBox(costPanel)
+            if Core.IsValidObj(cpSlot) then
+                pcall(function()
+                    cpSlot:SetHorizontalAlignment(1)
+                    cpSlot:SetPadding({ Left = 0.0, Top = 8.0, Right = 0.0, Bottom = 0.0 })
+                end)
+            end
+        end
+        local tlSlot = mapOverlay:AddChildToOverlay(topLeftVBox)
         if Core.IsValidObj(tlSlot) then
             pcall(function()
                 tlSlot:SetHorizontalAlignment(1) -- Left
                 tlSlot:SetVerticalAlignment(1)   -- Top
-                tlSlot:SetPadding({ Left = 16.0, Top = 16.0, Right = 0.0, Bottom = 0.0 })
+                tlSlot:SetPadding({ Left = 14.0, Top = 14.0, Right = 0.0, Bottom = 0.0 })
             end)
         end
     end
 
-    -- 2. Top-Right Close (X) Button Overlay (matching World Map top-right X)
+    -- 2. Top-Right Close (X) Button Overlay (matching World Map top-right X, orange hover highlight)
     local closeBtnFrame = CreateRawFast(PATHS.BorderClass, outer)
-    local closeWrap, closeBtn = CreateLabeledButton(
+    local closeWrap, closeBtn, closeBtnText = CreateLabeledButton(
         win, pc, outer, "X", 16, 32.0, 32.0,
         { R = 0.06, G = 0.07, B = 0.09, A = 0.92 },
         { R = 0.98, G = 0.98, B = 1.00, A = 1.00 },
@@ -5449,7 +5783,7 @@ local function OpenStationMap()
                 if bg then
                     bg.DrawAs = 4 -- ESlateBrushDrawType::RoundedBox
                     if bg.OutlineSettings then
-                        bg.OutlineSettings.CornerRadii = { X = 4.0, Y = 4.0, Z = 4.0, W = 4.0 }
+                        bg.OutlineSettings.CornerRadii = { X = 2.0, Y = 2.0, Z = 2.0, W = 2.0 }
                         bg.OutlineSettings.RoundingType = 1 -- ESlateBrushRoundingType::FixedRadius
                         bg.OutlineSettings.Width = 0.0
                         bg.OutlineSettings.bUseBrushTransparency = true
@@ -5643,22 +5977,23 @@ local function OpenStationMap()
             pcall(function()
                 crSlot:SetHorizontalAlignment(3) -- Right
                 crSlot:SetVerticalAlignment(2)   -- Center
-                crSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 16.0, Bottom = 0.0 })
+                crSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
             end)
         end
     end
 
-    -- 5. Bottom-Right Floating Apply Changes / Discard Overlay (matching Ship & Station Designer style)
+    -- 5. Bottom-Right Floating Apply Changes / Discard / Build Validation Overlay (flush bottom-right, Designer style)
     local applyPanel = CreateRawFast(PATHS.BorderClass, outer)
     local applyOuterVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
     local applyInnerVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
-    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 162.0, 38.0, APPLY_BG_DISABLED, APPLY_TXT_DISABLED, function()
+    local validationBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local applyWrap, applyBtn, applyBtnText = CreateLabeledButton(win, pc, outer, "Apply Changes", 12, 220.0, 38.0, APPLY_BG_DISABLED, APPLY_TXT_DISABLED, function()
         local pendingN = #PendingGhosts + CountTableKeys(PendingDeletes)
         if pendingN == 0 or ApplyInProgress then return end
         Core.Log(string.format("[StationMap] ApplyBtn pressed (pending=%d)", pendingN))
         ExecuteInGameThreadWithDelay(10, CommitPendingGhosts)
     end)
-    local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard Changes", 11, 162.0, 30.0, btnBgDiscard, COLORS.PlayerLocal, function()
+    local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard Changes", 11, 220.0, 30.0, btnBgDiscard, COLORS.PlayerLocal, function()
         ExecuteInGameThreadWithDelay(10, function()
             PendingGhosts = {}
             PendingDeletes = {}
@@ -5667,6 +6002,60 @@ local function OpenStationMap()
             RefreshSelectionLayer()
         end)
     end)
+
+    if Core.IsValidObj(validationBox) then
+        pcall(function()
+            validationBox:SetVisibility(1) -- Collapsed until missing materials
+            local valHdrRow = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+            if Core.IsValidObj(valHdrRow) then
+                local valTitle = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+                if Core.IsValidObj(valTitle) then
+                    valTitle:SetVisibility(3)
+                    valTitle:SetSize(13)
+                    valTitle:SetText(Core.MakeText("Build Validation"))
+                    if Core.IsValidObj(valTitle.TextBlock) and valTitle.TextBlock.SetColorAndOpacity then
+                        valTitle.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
+                    end
+                    local vtSlot = valHdrRow:AddChildToHorizontalBox(valTitle)
+                    if Core.IsValidObj(vtSlot) then vtSlot:SetVerticalAlignment(2) end
+                end
+                local valSpacer = CreateRawFast(PATHS.SizeBoxClass, outer)
+                if Core.IsValidObj(valSpacer) then
+                    valSpacer:SetVisibility(4)
+                    local vsSlot = valHdrRow:AddChildToHorizontalBox(valSpacer)
+                    if Core.IsValidObj(vsSlot) then vsSlot:SetSize({ Value = 1.0, SizeRule = 1 }) end
+                end
+                local valX = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+                if Core.IsValidObj(valX) then
+                    valX:SetVisibility(3)
+                    valX:SetSize(15)
+                    valX:SetText(Core.MakeText("X"))
+                    if Core.IsValidObj(valX.TextBlock) and valX.TextBlock.SetColorAndOpacity then
+                        valX.TextBlock:SetColorAndOpacity({ SpecifiedColor = COST_TXT_LACKING, ColorUseRule = 0 })
+                    end
+                    local vxSlot = valHdrRow:AddChildToHorizontalBox(valX)
+                    if Core.IsValidObj(vxSlot) then vxSlot:SetVerticalAlignment(2) end
+                end
+                local vhSlot = validationBox:AddChildToVerticalBox(valHdrRow)
+                if Core.IsValidObj(vhSlot) then vhSlot:SetHorizontalAlignment(0) end
+            end
+
+            local valMsg = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+            if Core.IsValidObj(valMsg) then
+                valMsg:SetVisibility(3)
+                valMsg:SetSize(11)
+                valMsg:SetText(Core.MakeText("Missing Building Materials"))
+                if Core.IsValidObj(valMsg.TextBlock) and valMsg.TextBlock.SetColorAndOpacity then
+                    valMsg.TextBlock:SetColorAndOpacity({ SpecifiedColor = COST_TXT_LACKING, ColorUseRule = 0 })
+                end
+                local vmSlot = validationBox:AddChildToVerticalBox(valMsg)
+                if Core.IsValidObj(vmSlot) then
+                    vmSlot:SetHorizontalAlignment(3) -- Right-aligned matching Designer Validation
+                    vmSlot:SetPadding({ Left = 0.0, Top = 3.0, Right = 0.0, Bottom = 10.0 })
+                end
+            end
+        end)
+    end
 
     if Core.IsValidObj(applyPanel) and Core.IsValidObj(applyOuterVBox) and Core.IsValidObj(applyInnerVBox) then
         pcall(function()
@@ -5679,6 +6068,10 @@ local function OpenStationMap()
                 if Core.IsValidObj(atSlot) then atSlot:SetHorizontalAlignment(0) end
             end
 
+            if Core.IsValidObj(validationBox) then
+                local vbSlot = applyInnerVBox:AddChildToVerticalBox(validationBox)
+                if Core.IsValidObj(vbSlot) then vbSlot:SetHorizontalAlignment(0) end
+            end
             if Core.IsValidObj(discardWrap) then
                 discardWrap:SetVisibility(1) -- Collapsed until pending changes exist
                 local dSlot = applyInnerVBox:AddChildToVerticalBox(discardWrap)
@@ -5696,8 +6089,8 @@ local function OpenStationMap()
 
             local aiSlot = applyOuterVBox:AddChildToVerticalBox(applyInnerVBox)
             if Core.IsValidObj(aiSlot) then
-                aiSlot:SetPadding({ Left = 10.0, Top = 9.0, Right = 10.0, Bottom = 10.0 })
-                aiSlot:SetHorizontalAlignment(2)
+                aiSlot:SetPadding({ Left = 12.0, Top = 10.0, Right = 12.0, Bottom = 12.0 })
+                aiSlot:SetHorizontalAlignment(0)
             end
 
             applyPanel:AddChild(applyOuterVBox)
@@ -5706,9 +6099,9 @@ local function OpenStationMap()
         local brSlot = mapOverlay:AddChildToOverlay(applyPanel)
         if Core.IsValidObj(brSlot) then
             pcall(function()
-                brSlot:SetHorizontalAlignment(3) -- Right
-                brSlot:SetVerticalAlignment(3)   -- Bottom
-                brSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 16.0, Bottom = 16.0 })
+                brSlot:SetHorizontalAlignment(3) -- Right (flush)
+                brSlot:SetVerticalAlignment(3)   -- Bottom (flush)
+                brSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
             end)
         end
     end
@@ -5738,11 +6131,17 @@ local function OpenStationMap()
         FloorDownBtnWidget = floorDownBtn,
         FloorDownBtnText = floorDownText,
         ApplyPanel = applyPanel,
+        ValidationBox = validationBox,
         ApplyBtn = applyWrap,
         ApplyBtnWidget = applyBtn,
         ApplyBtnText = applyBtnText,
         DiscardBtn = discardWrap,
         CloseBtnFrame = closeBtnFrame,
+        CloseBtnWidget = closeBtn,
+        CloseBtnText = closeBtnText,
+        CloseBtnWasHovered = false,
+        CostPanel = costPanel,
+        CostListVBox = costListVBox,
         HintSelectLabel = hintSelectLabel,
         HintCopyRow = hintCopyRow,
         HintDeleteRow = hintDeleteRow,
