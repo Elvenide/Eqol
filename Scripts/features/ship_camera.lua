@@ -10,12 +10,13 @@ local Feature = {
     Description = "Hotkey (default H) for 3rd-person ship perspective with scroll-wheel zoom.",
 }
 
-local MIN_ZOOM_MULT = 0.65
-local MAX_ZOOM_MULT = 3.00
-local ZOOM_MULT_STEP = 0.15
+local MIN_ZOOM_MULT = 1.00
+local DEFAULT_ZOOM_MULT = 3.00
+local MAX_ZOOM_MULT = 7.00
+local ZOOM_MULT_STEP = 0.25
 
 local IsThirdPerson = false
-local ZoomMultiplier = 1.0
+local ZoomMultiplier = DEFAULT_ZOOM_MULT
 local ScrollPollActive = false
 local SavedOriginalCamera = {} -- shipActorAddr -> { ShipActor, ShipObj, SpringArm, TargetArmLength, Cam, RelativeLocation, RelativeRotation, ShipRadius }
 local ActiveShipAddr = nil
@@ -280,7 +281,7 @@ local function IsPilotingShipNow()
     return ok and Core.IsValidObj(po) and Core.IsValidObj(po.PilotedShip)
 end
 
-local function ApplyShipCameraState(pc)
+local function ApplyShipCameraState(pc, logChange)
     local shipActor, shipObj = GetPilotedShipActor(pc)
     if not Core.IsValidObj(shipActor) then return end
 
@@ -302,10 +303,11 @@ local function ApplyShipCameraState(pc)
     local backDist = shipRadius * 1.65 * ZoomMultiplier
     local upHeight = shipRadius * 0.48 * ZoomMultiplier
 
-    Core.Log(string.format("[ShipCamera] Apply 3P=%s radius=%.0f back=%.0f up=%.0f actor=%s arm=%s cam=%s",
-        tostring(IsThirdPerson), shipRadius, backDist, upHeight,
-        Core.IsValidObj(shipActor) and shipActor:GetClass():GetFName():ToString() or "nil",
-        tostring(Core.IsValidObj(springArm)), tostring(Core.IsValidObj(cam))))
+    if logChange then
+        Core.Log(string.format("[ShipCamera] Apply 3P=%s zoom=%.2fx radius=%.0f back=%.0f up=%.0f actor=%s",
+            tostring(IsThirdPerson), ZoomMultiplier, shipRadius, backDist, upHeight,
+            Core.IsValidObj(shipActor) and shipActor:GetClass():GetFName():ToString() or "nil"))
+    end
 
     if Core.IsValidObj(springArm) then
         pcall(function()
@@ -426,7 +428,7 @@ local function ToggleShipPerspective()
     if not Core.IsValidObj(shipActor) then return end
 
     IsThirdPerson = not IsThirdPerson
-    ApplyShipCameraState(pc)
+    ApplyShipCameraState(pc, true)
     if IsThirdPerson then
         StartScrollPoll()
     end
