@@ -1,6 +1,6 @@
 -- Eqol Feature: Power Overview
 -- 1. Customizable hotkey (default P, configurable in Settings -> Controls) to toggle Power Overview
---    inside both space stations and spaceships.
+--    inside space stations.
 -- 2. Summary header progress bars (Production, Consumption, and Power Satisfaction) in WBP_PowerOverview.
 
 local Core = require("core")
@@ -15,13 +15,10 @@ local MAPPING_NAME = "Eqol_PowerOverview"
 
 local PATHS = {
     PowerOverviewClass = "/Game/Blueprints/Widgets/Windows/WBP_PowerOverview.WBP_PowerOverview_C",
-    SettingsMenuClass  = "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C",
-    InputRemapClass    = "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C",
     ProgressBarClass   = "/Game/Blueprints/Widgets/Basic/WBP_ProgressBar.WBP_ProgressBar_C",
     TextClass          = "/Game/Blueprints/Widgets/Basic/WBP_Text.WBP_Text_C",
     IMCSystem          = "/Game/Data/Input/IMC_System.IMC_System",
     IAEscape           = "/Game/Data/Input/Common/IA_Escape.IA_Escape",
-    DetailsStringTable = "/Game/Data/Localization/STB_Details.STB_Details",
 }
 
 -- Exact FLinearColor values extracted from WBP_PowerGrid
@@ -31,142 +28,11 @@ local STATUS_COLORS = {
     Red   = { R = 0.5177,  G = 0.0,    B = 0.04122, A = 1.0 },
 }
 
--- Unreal FKey.KeyName -> UE4SS Key.* enum mapping
-local UE_TO_UE4SS_KEY = {
-    BackSpace         = Key and Key.BACKSPACE,
-    Tab               = Key and Key.TAB,
-    Enter             = Key and Key.RETURN,
-    Return            = Key and Key.RETURN,
-    Pause             = Key and Key.PAUSE,
-    CapsLock          = Key and Key.CAPS_LOCK,
-    Escape            = Key and Key.ESCAPE,
-    SpaceBar          = Key and Key.SPACE,
-    PageUp            = Key and Key.PAGE_UP,
-    PageDown          = Key and Key.PAGE_DOWN,
-    End               = Key and Key.END,
-    Home              = Key and Key.HOME,
-    Left              = Key and Key.LEFT_ARROW,
-    Up                = Key and Key.UP_ARROW,
-    Right             = Key and Key.RIGHT_ARROW,
-    Down              = Key and Key.DOWN_ARROW,
-    Insert            = Key and Key.INS,
-    Delete            = Key and Key.DEL,
-    Zero              = Key and Key.ZERO,
-    One               = Key and Key.ONE,
-    Two               = Key and Key.TWO,
-    Three             = Key and Key.THREE,
-    Four              = Key and Key.FOUR,
-    Five              = Key and Key.FIVE,
-    Six               = Key and Key.SIX,
-    Seven             = Key and Key.SEVEN,
-    Eight             = Key and Key.EIGHT,
-    Nine              = Key and Key.NINE,
-    NumPadZero        = Key and Key.NUM_ZERO,
-    NumPadOne         = Key and Key.NUM_ONE,
-    NumPadTwo         = Key and Key.NUM_TWO,
-    NumPadThree       = Key and Key.NUM_THREE,
-    NumPadFour        = Key and Key.NUM_FOUR,
-    NumPadFive        = Key and Key.NUM_FIVE,
-    NumPadSix         = Key and Key.NUM_SIX,
-    NumPadSeven       = Key and Key.NUM_SEVEN,
-    NumPadEight       = Key and Key.NUM_EIGHT,
-    NumPadNine        = Key and Key.NUM_NINE,
-    Multiply          = Key and Key.MULTIPLY,
-    Add               = Key and Key.ADD,
-    Subtract          = Key and Key.SUBTRACT,
-    Decimal           = Key and Key.DECIMAL,
-    Divide            = Key and Key.DIVIDE,
-    Semicolon         = Key and Key.OEM_ONE,
-    Equals            = Key and Key.OEM_PLUS,
-    Comma             = Key and Key.OEM_COMMA,
-    Hyphen            = Key and Key.OEM_MINUS,
-    Period            = Key and Key.OEM_PERIOD,
-    Slash             = Key and Key.OEM_TWO,
-    Tilde             = Key and Key.OEM_THREE,
-    LeftBracket       = Key and Key.OEM_FOUR,
-    Backslash         = Key and Key.OEM_FIVE,
-    RightBracket      = Key and Key.OEM_SIX,
-    Apostrophe        = Key and Key.OEM_SEVEN,
-    LeftMouseButton   = Key and Key.LEFT_MOUSE_BUTTON,
-    RightMouseButton  = Key and Key.RIGHT_MOUSE_BUTTON,
-    MiddleMouseButton = Key and Key.MIDDLE_MOUSE_BUTTON,
-    ThumbMouseButton  = Key and Key.XBUTTON_ONE,
-    ThumbMouseButton2 = Key and Key.XBUTTON_TWO,
-}
-
-local ActiveUe4ssKey = nil
-local RegisteredKeyHandlers = {}
-local FallbackPollActive = false
-local FallbackWasDown = false
 local UnmappedPFromSystem = false
 local AllHooksLogged = false
 
 -- Per-widget state keyed by UObject memory address to prevent duplicate UI injection
 local InjectedOverviews = {}
-local InjectedSettingsRows = {}
-local TrackedRemapRows = {}
-
---------------------------------------------------------------------------------
--- Helpers
---------------------------------------------------------------------------------
-
-local function GetPowerOverviewDisplayText()
-    local ktl = Core.GetCDO(Core.PATHS.KismetTextLibCDO)
-    if Core.IsValidObj(ktl) then
-        local ok, txt = pcall(function()
-            return ktl:TextFromStringTable(FName(PATHS.DetailsStringTable), "PowerOverview")
-        end)
-        if ok and txt then
-            local okStr, s = pcall(function() return txt:ToString() end)
-            if okStr and s and s ~= "" and s ~= "<MISSING STRING TABLE ENTRY>" then
-                return txt
-            end
-        end
-    end
-    return Core.MakeText("Power Overview")
-end
-
-local function MakeInputChord(keyName)
-    local resolvedName = (keyName and keyName ~= "") and keyName or "None"
-    return {
-        Key = { KeyName = FName(resolvedName) },
-        bShift = false,
-        bCtrl = false,
-        bAlt = false,
-        bCmd = false,
-    }
-end
-
-local function ResolveUE4SSKey(keyName)
-    if not keyName or keyName == "" or keyName == "None" or not Key then
-        return nil
-    end
-    if UE_TO_UE4SS_KEY[keyName] then
-        return UE_TO_UE4SS_KEY[keyName]
-    end
-    local upper = string.upper(keyName)
-    if Key[upper] then
-        return Key[upper]
-    end
-    return nil
-end
-
-local function IsSelectingAnyKeybind()
-    for addr, row in pairs(TrackedRemapRows) do
-        if Core.IsValidObj(row) then
-            local sel = row.InputKeySelector
-            if Core.IsValidObj(sel) then
-                local okSel, selecting = pcall(function() return sel:GetIsSelectingKey() end)
-                if okSel and selecting then
-                    return true
-                end
-            end
-        else
-            TrackedRemapRows[addr] = nil
-        end
-    end
-    return false
-end
 
 --------------------------------------------------------------------------------
 -- Power Overview Hotkey (Space Stations)
@@ -233,9 +99,8 @@ local function TogglePowerOverview()
         return
     end
 
-    -- Do not trigger while navigating menus, rebinding keys, or typing in inputs
-    if IsSelectingAnyKeybind()
-        or Core.IsAnyTextInputFocused()
+    -- Do not trigger while navigating menus or rebinding keys
+    if Core.IsSelectingAnyRegisteredKeybind()
         or Core.IsAnyWidgetClassVisible("WBP_SettingsMenu_C")
         or Core.IsAnyWidgetClassVisible("WBP_PauseMenu_C")
         or Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
@@ -288,46 +153,6 @@ local function TogglePowerOverview()
     end
 end
 
-local function StartFallbackKeyPollIfNeeded()
-    if FallbackPollActive then return end
-    local keyName = Core.Config.PowerOverviewKey
-    if ActiveUe4ssKey ~= nil or keyName == "None" or keyName == "" then
-        return
-    end
-
-    FallbackPollActive = true
-    FallbackWasDown = false
-
-    local function PollTick()
-        local curKey = Core.Config.PowerOverviewKey
-        if ActiveUe4ssKey ~= nil or curKey == "None" or curKey == "" then
-            FallbackPollActive = false
-            return
-        end
-
-        local pc = Core.GetLocalPlayerController()
-        if Core.IsValidObj(pc) then
-            local okDown, isDown = pcall(function()
-                return pc:IsInputKeyDown({ KeyName = FName(curKey) })
-            end)
-            if okDown then
-                if isDown and not FallbackWasDown then
-                    FallbackWasDown = true
-                    TogglePowerOverview()
-                elseif not isDown then
-                    FallbackWasDown = false
-                end
-            else
-                FallbackWasDown = false
-            end
-        end
-
-        ExecuteInGameThreadWithDelay(33, PollTick)
-    end
-
-    ExecuteInGameThreadWithDelay(33, PollTick)
-end
-
 local function SyncIMCSystemBinding(forceRebuild)
     local imcSystem = Core.FindOrLoadClass(PATHS.IMCSystem)
     local iaEscape = Core.FindOrLoadClass(PATHS.IAEscape)
@@ -364,163 +189,6 @@ local function SyncIMCSystemBinding(forceRebuild)
         local eiLib = Core.GetCDO(Core.PATHS.EnhancedInputLibCDO)
         if Core.IsValidObj(eiLib) then
             pcall(function() eiLib:RequestRebuildControlMappingsUsingContext(imcSystem, true) end)
-        end
-    end
-end
-
-local function ApplyPowerOverviewKeybind(keyName, shouldSave)
-    local normalized = (keyName and keyName ~= "") and keyName or "None"
-    Core.Config.PowerOverviewKey = normalized
-    if shouldSave then
-        Core.WriteConfig()
-    end
-
-    SyncIMCSystemBinding()
-
-    local ue4ssKey = ResolveUE4SSKey(normalized)
-    ActiveUe4ssKey = ue4ssKey
-    FallbackWasDown = false
-
-    if ue4ssKey ~= nil then
-        if not RegisteredKeyHandlers[ue4ssKey] then
-            RegisteredKeyHandlers[ue4ssKey] = true
-            RegisterKeyBind(ue4ssKey, function()
-                if ActiveUe4ssKey == ue4ssKey then
-                    ExecuteInGameThread(TogglePowerOverview)
-                end
-            end)
-        end
-    else
-        StartFallbackKeyPollIfNeeded()
-    end
-end
-
---------------------------------------------------------------------------------
--- Settings Menu (Controls) Native Keybind Row
---------------------------------------------------------------------------------
-
-local function SyncRemapRowDisplay(row)
-    if not Core.IsValidObj(row) then return end
-
-    row.MappingName = FName(MAPPING_NAME)
-    local label = GetPowerOverviewDisplayText()
-    row.InputActionText = label
-
-    if Core.IsValidObj(row.WBP_SettingEntryBody) then
-        pcall(function() row.WBP_SettingEntryBody:SetText(label) end)
-    end
-
-    if Core.IsValidObj(row.InputKeySelector) then
-        local chord = MakeInputChord(Core.Config.PowerOverviewKey)
-        pcall(function() row.InputKeySelector:SetSelectedKey(chord) end)
-    end
-end
-
-local function IsEqolRemapRow(row)
-    if not Core.IsValidObj(row) then return false end
-    local addr = row:GetAddress()
-    if TrackedRemapRows[addr] then
-        return true
-    end
-    local okName, mName = pcall(function() return row.MappingName:ToString() end)
-    if okName and mName == MAPPING_NAME then
-        TrackedRemapRows[addr] = row
-        return true
-    end
-    return false
-end
-
-local function FindExistingRemapRowInScrollBox(scrollBox)
-    if not Core.IsValidObj(scrollBox) then return nil end
-    local okChildren, children = pcall(function() return scrollBox:GetAllChildren() end)
-    if not okChildren or not children then return nil end
-
-    local found = nil
-    local okForEach = pcall(function()
-        children:ForEach(function(_, elem)
-            if found then return end
-            local child = Core.UnwrapArrayElem(elem)
-            if child and IsEqolRemapRow(child) then
-                found = child
-            end
-        end)
-    end)
-    if okForEach then
-        return found
-    end
-
-    for i = 1, #children do
-        local child = Core.UnwrapArrayElem(children[i])
-        if child and IsEqolRemapRow(child) then
-            return child
-        end
-    end
-    return nil
-end
-
-local function EnsureSettingsKeybindRow(menu)
-    if not Core.IsValidObj(menu) then return end
-
-    local scrollBox = menu.ControlSettings
-    if not Core.IsValidObj(scrollBox) then return end
-
-    local menuAddr = menu:GetAddress()
-    local existing = InjectedSettingsRows[menuAddr]
-    if Core.IsValidObj(existing) then
-        local okHas, hasChild = pcall(function() return scrollBox:HasChild(existing) end)
-        if okHas and hasChild then
-            SyncRemapRowDisplay(existing)
-            return
-        end
-    end
-
-    local foundChild = FindExistingRemapRowInScrollBox(scrollBox)
-    if Core.IsValidObj(foundChild) then
-        InjectedSettingsRows[menuAddr] = foundChild
-        TrackedRemapRows[foundChild:GetAddress()] = foundChild
-        SyncRemapRowDisplay(foundChild)
-        return
-    end
-
-    local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
-    local row = Core.CreateUserWidget(PATHS.InputRemapClass, menu, pc)
-    if not Core.IsValidObj(row) then
-        Core.Log("Failed to construct WBP_InputRemap_C for Controls settings")
-        return
-    end
-
-    local rowAddr = row:GetAddress()
-    InjectedSettingsRows[menuAddr] = row
-    TrackedRemapRows[rowAddr] = row
-    row.MappingName = FName(MAPPING_NAME)
-
-    local slot = scrollBox:AddChild(row)
-    if Core.IsValidObj(slot) then
-        local refRow = Core.IsValidObj(menu.StatusWindow) and menu.StatusWindow or menu.Statistics
-        if Core.IsValidObj(refRow) then
-            if Core.IsValidObj(refRow.InputMappingContext) then
-                pcall(function() row.InputMappingContext = refRow.InputMappingContext end)
-            end
-            if Core.IsValidObj(refRow.Slot) then
-                pcall(function()
-                    slot:SetPadding(refRow.Slot.Padding)
-                    slot:SetHorizontalAlignment(refRow.Slot.HorizontalAlignment)
-                    slot:SetVerticalAlignment(refRow.Slot.VerticalAlignment)
-                end)
-            end
-        end
-    end
-
-    SyncRemapRowDisplay(row)
-    Core.Log("Injected Power Overview keybind row into WBP_SettingsMenu_C")
-end
-
-local function InjectExistingSettingsMenus()
-    local ok, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
-    if not ok or not menus then return end
-    for _, menu in ipairs(menus) do
-        if Core.IsValidObj(menu) then
-            EnsureSettingsKeybindRow(menu)
         end
     end
 end
@@ -611,9 +279,24 @@ local function EnsureOverviewBars(overviewWidget)
     local okPC, owningPC = pcall(function() return overviewWidget:GetOwningPlayer() end)
     local pc = (okPC and Core.IsValidObj(owningPC)) and owningPC or Core.GetLocalPlayerController()
 
-    -- Bar 1: Production Current / Max
+    -- Create and validate ALL summary bar widgets before attaching any to parent panels
+    -- so a partial construction failure never leaves orphaned duplicate bars behind.
     local bar1Box, bar1 = CreateSizedProgressBar(overviewWidget, pc, outer)
-    if not Core.IsValidObj(bar1Box) then return nil end
+    local bar2Box, bar2 = CreateSizedProgressBar(overviewWidget, pc, outer)
+    local satVBox = Core.CreateRawWidget(Core.PATHS.VerticalBoxClass, outer)
+    local satHeaderBox = Core.CreateRawWidget(Core.PATHS.HorizontalBoxClass, outer)
+    local satLabelText = Core.CreateUserWidget(PATHS.TextClass, overviewWidget, pc)
+    local satValueText = Core.CreateUserWidget(PATHS.TextClass, overviewWidget, pc)
+    local bar3Box, bar3 = CreateSizedProgressBar(overviewWidget, pc, outer)
+    if not (Core.IsValidObj(bar1Box) and Core.IsValidObj(bar2Box)
+        and Core.IsValidObj(satVBox) and Core.IsValidObj(satHeaderBox)
+        and Core.IsValidObj(satLabelText) and Core.IsValidObj(satValueText)
+        and Core.IsValidObj(bar3Box))
+    then
+        return nil
+    end
+
+    -- Bar 1: Production Current / Max
     local bar1Slot = prodVBox:AddChildToVerticalBox(bar1Box)
     if Core.IsValidObj(bar1Slot) then
         pcall(function()
@@ -623,8 +306,6 @@ local function EnsureOverviewBars(overviewWidget)
     end
 
     -- Bar 2: Consumption Current / Max
-    local bar2Box, bar2 = CreateSizedProgressBar(overviewWidget, pc, outer)
-    if not Core.IsValidObj(bar2Box) then return nil end
     local bar2Slot = consVBox:AddChildToVerticalBox(bar2Box)
     if Core.IsValidObj(bar2Slot) then
         pcall(function()
@@ -634,14 +315,6 @@ local function EnsureOverviewBars(overviewWidget)
     end
 
     -- Bar 3: Power Satisfaction (Production / Consumption)
-    local satVBox = Core.CreateRawWidget(Core.PATHS.VerticalBoxClass, outer)
-    local satHeaderBox = Core.CreateRawWidget(Core.PATHS.HorizontalBoxClass, outer)
-    local satLabelText = Core.CreateUserWidget(PATHS.TextClass, overviewWidget, pc)
-    local satValueText = Core.CreateUserWidget(PATHS.TextClass, overviewWidget, pc)
-    local bar3Box, bar3 = CreateSizedProgressBar(overviewWidget, pc, outer)
-    if not (Core.IsValidObj(satVBox) and Core.IsValidObj(satHeaderBox) and Core.IsValidObj(satLabelText) and Core.IsValidObj(satValueText) and Core.IsValidObj(bar3Box)) then
-        return nil
-    end
 
     local okSolarLabel, solarLabelText = pcall(function() return solarHBox:GetChildAt(0) end)
     if okSolarLabel and Core.IsValidObj(solarLabelText) then
@@ -792,17 +465,22 @@ Feature.WatchWidgets = {
     WBP_PowerOverview_C = function(widget)
         UpdateOverviewBars(widget)
     end,
-    WBP_SettingsMenu_C = function(widget)
-        EnsureSettingsKeybindRow(widget)
-    end,
 }
 
 function Feature.Init()
-    Core.ReadConfig({ PowerOverviewKey = DEFAULT_KEY })
-    ApplyPowerOverviewKeybind(Core.Config.PowerOverviewKey, false)
+    Core.RegisterConfigurableKeybind({
+        ConfigKey              = "PowerOverviewKey",
+        DefaultKey             = DEFAULT_KEY,
+        MappingName            = MAPPING_NAME,
+        Label                  = "Power Overview",
+        AllowNativeWindowClass = PATHS.PowerOverviewClass,
+        OnPress                = TogglePowerOverview,
+        OnChanged              = function()
+            SyncIMCSystemBinding(false)
+        end,
+    })
+    SyncIMCSystemBinding(false)
 end
-
-local InitialSettingsScanDone = false
 
 function Feature.RegisterHooks()
     local r1 = Core.TryRegisterHook(
@@ -838,110 +516,9 @@ function Feature.RegisterHooks()
         end
     )
 
-    local r4 = Core.TryRegisterHook(
-        "SettingsMenu_Setup",
-        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Setup",
-        function(Context)
-            local menu = Context:get()
-            if Core.IsValidObj(menu) then
-                EnsureSettingsKeybindRow(menu)
-            end
-        end
-    )
-
-    local r5 = Core.TryRegisterHook(
-        "SettingsMenu_Refresh",
-        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Refresh",
-        function(Context)
-            local menu = Context:get()
-            if Core.IsValidObj(menu) then
-                EnsureSettingsKeybindRow(menu)
-            end
-        end
-    )
-
-    local r6 = Core.TryRegisterHook(
-        "SettingsMenu_RefreshInGame",
-        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:RefreshInGame",
-        function(Context)
-            local menu = Context:get()
-            if Core.IsValidObj(menu) then
-                EnsureSettingsKeybindRow(menu)
-            end
-        end
-    )
-
-    local r7 = Core.TryRegisterHook(
-        "InputRemap_LoadSettings",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:LoadSettings",
-        function(Context)
-            local row = Context:get()
-            if IsEqolRemapRow(row) then
-                SyncRemapRowDisplay(row)
-            end
-        end
-    )
-
-    local r8 = Core.TryRegisterHook(
-        "InputRemap_RefreshDisplayKey",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:RefreshDisplayKey",
-        function(Context)
-            local row = Context:get()
-            if IsEqolRemapRow(row) then
-                SyncRemapRowDisplay(row)
-            end
-        end
-    )
-
-    local r9 = Core.TryRegisterHook(
-        "InputRemap_OnKeySelected",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_InputKeySelector_K2Node_ComponentBoundEvent_0_OnKeySelected__DelegateSignature",
-        function(Context, SelectedKeyParam)
-            local row = Context:get()
-            if not IsEqolRemapRow(row) then return end
-
-            local okKey, keyName = pcall(function()
-                local chord = (type(SelectedKeyParam.get) == "function") and SelectedKeyParam:get() or SelectedKeyParam
-                return chord.Key.KeyName:ToString()
-            end)
-            if okKey and keyName and keyName ~= "" and keyName ~= "None" then
-                ApplyPowerOverviewKeybind(keyName, true)
-            end
-            SyncRemapRowDisplay(row)
-        end
-    )
-
-    local r10 = Core.TryRegisterHook(
-        "InputRemap_Revert",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_RevertToDefaultButton_K2Node_ComponentBoundEvent_1_OnButtonPressedEvent__DelegateSignature",
-        function(Context)
-            local row = Context:get()
-            if not IsEqolRemapRow(row) then return end
-
-            ApplyPowerOverviewKeybind(DEFAULT_KEY, true)
-            SyncRemapRowDisplay(row)
-        end
-    )
-
-    local r11 = Core.TryRegisterHook(
-        "InputRemap_Clear",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_ClearMappingButton_K2Node_ComponentBoundEvent_2_OnButtonPressedEvent__DelegateSignature",
-        function(Context)
-            local row = Context:get()
-            if not IsEqolRemapRow(row) then return end
-
-            ApplyPowerOverviewKeybind("None", true)
-            SyncRemapRowDisplay(row)
-        end
-    )
-
     SyncIMCSystemBinding(false)
-    if not InitialSettingsScanDone then
-        InitialSettingsScanDone = true
-        InjectExistingSettingsMenus()
-    end
 
-    if r1 and r2 and r3 and r4 and r5 and r6 and r7 and r8 and r9 and r10 and r11 and not AllHooksLogged then
+    if r1 and r2 and r3 and not AllHooksLogged then
         AllHooksLogged = true
         Core.Log("All PowerOverview Blueprint hooks registered")
     end
@@ -956,16 +533,6 @@ function Feature.PruneCaches()
     for addr, st in pairs(InjectedOverviews) do
         if not Core.IsValidObj(st.Bar1) then
             InjectedOverviews[addr] = nil
-        end
-    end
-    for addr, row in pairs(InjectedSettingsRows) do
-        if not Core.IsValidObj(row) then
-            InjectedSettingsRows[addr] = nil
-        end
-    end
-    for addr, row in pairs(TrackedRemapRows) do
-        if not Core.IsValidObj(row) then
-            TrackedRemapRows[addr] = nil
         end
     end
 end

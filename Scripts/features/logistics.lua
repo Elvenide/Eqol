@@ -42,46 +42,6 @@ local STATUS_COLORS = {
     KeyBg      = { R = 0.060,   G = 0.090,  B = 0.130,   A = 0.85 },
 }
 
-local UE_TO_UE4SS_KEY = {
-    BackSpace         = Key and Key.BACKSPACE,
-    Tab               = Key and Key.TAB,
-    Enter             = Key and Key.RETURN,
-    Return            = Key and Key.RETURN,
-    SpaceBar          = Key and Key.SPACE,
-    Left              = Key and Key.LEFT_ARROW,
-    Up                = Key and Key.UP_ARROW,
-    Right             = Key and Key.RIGHT_ARROW,
-    Down              = Key and Key.DOWN_ARROW,
-    Zero              = Key and Key.ZERO,
-    One               = Key and Key.ONE,
-    Two               = Key and Key.TWO,
-    Three             = Key and Key.THREE,
-    Four              = Key and Key.FOUR,
-    Five              = Key and Key.FIVE,
-    Six               = Key and Key.SIX,
-    Seven             = Key and Key.SEVEN,
-    Eight             = Key and Key.EIGHT,
-    Nine              = Key and Key.NINE,
-    Semicolon         = Key and Key.OEM_ONE,
-    Equals            = Key and Key.OEM_PLUS,
-    Comma             = Key and Key.OEM_COMMA,
-    Hyphen            = Key and Key.OEM_MINUS,
-    Period            = Key and Key.OEM_PERIOD,
-    Slash             = Key and Key.OEM_TWO,
-    Tilde             = Key and Key.OEM_THREE,
-    LeftBracket       = Key and Key.OEM_FOUR,
-    Backslash         = Key and Key.OEM_FIVE,
-    RightBracket      = Key and Key.OEM_SIX,
-    Apostrophe        = Key and Key.OEM_SEVEN,
-}
-
-local ActiveUe4ssKey = nil
-local RegisteredKeyHandlers = {}
-local FallbackPollActive = false
-local FallbackWasDown = false
-
-local InjectedSettingsRows = {}
-local TrackedRemapRows = {}
 local HudKeyIndicators = {} -- hudAddr -> { Root, KeyText }
 local ActiveLogisticsWin = nil
 local ActiveLogisticsUI = nil
@@ -90,48 +50,6 @@ local HookedButtons = {}
 --------------------------------------------------------------------------------
 -- Keybind Helpers
 --------------------------------------------------------------------------------
-
-local function MakeInputChord(keyName)
-    local resolvedName = (keyName and keyName ~= "") and keyName or "None"
-    return {
-        Key = { KeyName = FName(resolvedName) },
-        bShift = false,
-        bCtrl = false,
-        bAlt = false,
-        bCmd = false,
-    }
-end
-
-local function ResolveUE4SSKey(keyName)
-    if not keyName or keyName == "" or keyName == "None" or not Key then
-        return nil
-    end
-    if UE_TO_UE4SS_KEY[keyName] then
-        return UE_TO_UE4SS_KEY[keyName]
-    end
-    local upper = string.upper(keyName)
-    if Key[upper] then
-        return Key[upper]
-    end
-    return nil
-end
-
-local function IsSelectingAnyKeybind()
-    for addr, row in pairs(TrackedRemapRows) do
-        if Core.IsValidObj(row) then
-            local sel = row.InputKeySelector
-            if Core.IsValidObj(sel) then
-                local okSel, selecting = pcall(function() return sel:GetIsSelectingKey() end)
-                if okSel and selecting then
-                    return true
-                end
-            end
-        else
-            TrackedRemapRows[addr] = nil
-        end
-    end
-    return false
-end
 
 local function GetFormattedKeybind(configKey, defaultKey)
     local keyStr = tostring(Core.Config[configKey] or defaultKey or "")
@@ -197,16 +115,17 @@ local function GetAssemblerRunState(m)
         end
     end
 
+    local isPaused = (bWorking == false)
     local isRunning = false
     if bWorking ~= nil then
         isRunning = bWorking and (status == nil or status == 0)
     elseif status ~= nil then
         isRunning = (status == 0)
     end
-    return isRunning, status
+    return isRunning, status, isPaused
 end
 
-local function CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
+local function CheckAssemblerInventories(m, isRunning, machineStatus, isPaused, inputs, outputs)
     local missingInputs = false
     local missingNames = {}
     local outputFull = false
@@ -295,8 +214,8 @@ local function CheckAssemblerInventories(m, isRunning, machineStatus, inputs, ou
         missingInputs = true
     end
 
-    -- If powered & valid config with all required inputs present, but stopped -> output is full
-    if not outputFull and not isRunning and machineStatus ~= 2 and machineStatus ~= 3 and not missingInputs then
+    -- If powered, unpaused, & valid config with all required inputs present, but stopped -> output is full
+    if not outputFull and not isPaused and not isRunning and machineStatus ~= 2 and machineStatus ~= 3 and not missingInputs then
         outputFull = true
     end
     if outputFull then
@@ -354,7 +273,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                     if bm > 0.0001 then bonusMult = bm end
                 end)
 
-                local isRunning, machineStatus = GetAssemblerRunState(m)
+                local isRunning, machineStatus, isPaused = GetAssemblerRunState(m)
                 local craftSec = 1.0
                 local inputs = {}
                 local outputs = {}
@@ -399,14 +318,14 @@ local function CollectStationLogisticsData(station, walkFrame)
                         end)
                     end
 
-                    hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
+                    hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, isPaused, inputs, outputs)
 
                     -- Total Production reflects ONLY actual currently running output;
-                    -- stationProdRates also counts Output Full machines so backed-up producers don't report fake deficits.
+                    -- stationProdRates also counts unpaused Output Full machines so backed-up producers don't report fake deficits.
                     for _, outp in ipairs(outputs) do
                         local k = GetItemKey(outp.Item)
                         if k then
-                            if isRunning or isOutputFull then
+                            if isRunning or (isOutputFull and not isPaused) then
                                 stationProdRates[k] = (stationProdRates[k] or 0.0) + outp.Rate
                             end
                             if isRunning then
@@ -418,8 +337,8 @@ local function CollectStationLogisticsData(station, walkFrame)
                         end
                     end
 
-                    -- Demand counts running or input-starved machines (not output-full or unpowered)
-                    if isRunning or hasMissingInputs then
+                    -- Demand counts running or input-starved machines (not paused, output-full, or unpowered)
+                    if (isRunning or hasMissingInputs) and not isPaused then
                         for _, inp in ipairs(inputs) do
                             local k = GetItemKey(inp.Item)
                             if k then
@@ -435,6 +354,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                     Name = StationData.GetMachineDisplayName(m),
                     HasRecipe = Core.IsValidObj(rec),
                     IsRunning = isRunning,
+                    IsPaused = isPaused,
                     MachineStatus = machineStatus,
                     HasMissingInputs = hasMissingInputs,
                     MissingInputNames = missingNames,
@@ -585,6 +505,19 @@ local function AddItemRateChip(parentHBox, window, pc, outer, item, rate, tintCo
             pSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 12.0, Bottom = 0.0 })
         end)
     end
+    return rateTxt
+end
+
+local COLOR_DEFAULT_RATE = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
+
+-- Shared deficit predicate: raw resources (no recipe & 0 station production) are never flagged as production deficits.
+local function IsInputInDeficit(item, prodRates, consRates)
+    local k = GetItemKey(item) or "?"
+    local pRate = prodRates[k] or 0.0
+    local cRate = consRates[k] or 0.0
+    local hasRecipe = false
+    pcall(function() hasRecipe = Core.IsValidObj(item.Recipe) end)
+    return (pRate > 0.001 or hasRecipe) and (cRate > pRate + 0.001), k, pRate, cRate
 end
 
 local function BuildStorageSignatures(items)
@@ -612,15 +545,9 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
     local deficitNames = {}
     local inpParts = {}
     for _, inp in ipairs(entry.Inputs) do
-        local k = GetItemKey(inp.Item) or "?"
-        local pRate = prodRates[k] or 0.0
-        local cRate = consRates[k] or 0.0
-        local isDef = false
-        local hasRecipe = false
-        pcall(function() hasRecipe = Core.IsValidObj(inp.Item.Recipe) end)
-        if (pRate > 0.001 or hasRecipe) and cRate > pRate + 0.001 then
+        local isDef, k, pRate, cRate = IsInputInDeficit(inp.Item, prodRates, consRates)
+        if isDef then
             hasDeficit = true
-            isDef = true
             local iName = k
             pcall(function()
                 if inp.Item and inp.Item.Name then
@@ -645,6 +572,11 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
         statusLabel = "No Recipe"
         statusCol = STATUS_COLORS.Amber
         tooltipMsg = "Idle: no active recipe or output configured."
+    elseif entry.IsPaused then
+        statusCode = "A_PAU"
+        statusLabel = "Paused"
+        statusCol = STATUS_COLORS.Amber
+        tooltipMsg = "Paused: machine is manually turned off."
     elseif entry.MachineStatus == 2 then
         statusCode = "R_PWR"
         statusLabel = "No Power"
@@ -853,12 +785,12 @@ local function BuildMachineRow(ui, entry, info, prodRates, consRates)
         end
     end
 
+    local inputChips = {}
     for _, inp in ipairs(entry.Inputs) do
-        local k = GetItemKey(inp.Item)
-        local pRate = prodRates[k] or 0.0
-        local cRate = consRates[k] or 0.0
-        local chipTint = (cRate > pRate + 0.001) and STATUS_COLORS.Red or nil
-        AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, inp.Item, inp.Rate, chipTint)
+        local isDef = IsInputInDeficit(inp.Item, prodRates, consRates)
+        local chipTint = isDef and STATUS_COLORS.Red or nil
+        local rateTxt = AddItemRateChip(rowHBox, ui.Window, ui.PC, ui.Outer, inp.Item, inp.Rate, chipTint)
+        inputChips[#inputChips + 1] = { Item = inp.Item, RateTxt = rateTxt }
     end
 
     if #entry.Inputs > 0 and #entry.Outputs > 0 then
@@ -891,6 +823,7 @@ local function BuildMachineRow(ui, entry, info, prodRates, consRates)
         RowBorder = rowBorder,
         StatusBar = statusBar,
         StatusTxt = statusTxt,
+        InputChips = inputChips,
     }
 end
 
@@ -940,6 +873,15 @@ local function PopulateMachinesSection(ui, assemblers, prodRates, consRates)
                         rw.StatusTxt:SetText(Core.MakeText(info.statusLabel or ""))
                         if Core.IsValidObj(rw.StatusTxt.TextBlock) then
                             rw.StatusTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = info.statusCol, ColorUseRule = 0 })
+                        end
+                    end
+                    if rw.InputChips then
+                        for _, chip in ipairs(rw.InputChips) do
+                            if Core.IsValidObj(chip.RateTxt) and Core.IsValidObj(chip.RateTxt.TextBlock) then
+                                local isDef = IsInputInDeficit(chip.Item, prodRates, consRates)
+                                local col = isDef and STATUS_COLORS.Red or COLOR_DEFAULT_RATE
+                                chip.RateTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = col, ColorUseRule = 0 })
+                            end
                         end
                     end
                 end)
@@ -1234,7 +1176,6 @@ end
 
 local function ToggleLogistics()
     if Core.IsSelectingAnyRegisteredKeybind()
-        or IsSelectingAnyKeybind()
         or Core.IsAnyTextInputFocused()
     then
         return
@@ -1253,146 +1194,8 @@ local function ToggleLogistics()
 end
 
 --------------------------------------------------------------------------------
--- Keybind Registration & Fallback Polling
+-- Top-Right HUD Keybind Indicator
 --------------------------------------------------------------------------------
-
-local function StartFallbackKeyPollIfNeeded()
-    if FallbackPollActive then return end
-    local keyName = Core.Config.LogisticsKey
-    if ActiveUe4ssKey ~= nil or keyName == "None" or keyName == "" then
-        return
-    end
-
-    FallbackPollActive = true
-    FallbackWasDown = false
-
-    local function PollTick()
-        local curKey = Core.Config.LogisticsKey
-        if ActiveUe4ssKey ~= nil or curKey == "None" or curKey == "" then
-            FallbackPollActive = false
-            return
-        end
-
-        local pc = Core.GetLocalPlayerController()
-        if Core.IsValidObj(pc) then
-            local okDown, isDown = pcall(function()
-                return pc:IsInputKeyDown({ KeyName = FName(curKey) })
-            end)
-            if okDown then
-                if isDown and not FallbackWasDown then
-                    FallbackWasDown = true
-                    ToggleLogistics()
-                elseif not isDown then
-                    FallbackWasDown = false
-                end
-            else
-                FallbackWasDown = false
-            end
-        end
-
-        ExecuteInGameThreadWithDelay(33, PollTick)
-    end
-
-    ExecuteInGameThreadWithDelay(33, PollTick)
-end
-
-local function ApplyLogisticsKeybind(keyName, shouldSave)
-    local normalized = (keyName and keyName ~= "") and keyName or "None"
-    Core.Config.LogisticsKey = normalized
-    if shouldSave then
-        Core.WriteConfig()
-    end
-
-    UpdateAllHudKeyIndicators()
-
-    local ue4ssKey = ResolveUE4SSKey(normalized)
-    ActiveUe4ssKey = ue4ssKey
-    FallbackWasDown = false
-
-    if ue4ssKey ~= nil then
-        if not RegisteredKeyHandlers[ue4ssKey] then
-            RegisteredKeyHandlers[ue4ssKey] = true
-            RegisterKeyBind(ue4ssKey, function()
-                if ActiveUe4ssKey == ue4ssKey then
-                    ExecuteInGameThread(ToggleLogistics)
-                end
-            end)
-        end
-    else
-        StartFallbackKeyPollIfNeeded()
-    end
-end
-
---------------------------------------------------------------------------------
--- Settings Menu (Controls) Row & Bottom-Right HUD Keybind Indicator
---------------------------------------------------------------------------------
-
-local function SyncRemapRowDisplay(row)
-    if not Core.IsValidObj(row) then return end
-
-    row.MappingName = FName(MAPPING_NAME)
-    local label = Core.MakeText("Logistics")
-    row.InputActionText = label
-
-    if Core.IsValidObj(row.WBP_SettingEntryBody) then
-        pcall(function() row.WBP_SettingEntryBody:SetText(label) end)
-    end
-
-    if Core.IsValidObj(row.InputKeySelector) then
-        pcall(function() row.InputKeySelector:SetSelectedKey(MakeInputChord(Core.Config.LogisticsKey)) end)
-    end
-end
-
-local function IsEqolRemapRow(row)
-    if not Core.IsValidObj(row) then return false end
-    local addr = row:GetAddress()
-    if TrackedRemapRows[addr] then return true end
-    local okName, mName = pcall(function() return row.MappingName:ToString() end)
-    if okName and mName == MAPPING_NAME then
-        TrackedRemapRows[addr] = row
-        return true
-    end
-    return false
-end
-
-local function EnsureSettingsKeybindRow(menu)
-    if not Core.IsValidObj(menu) then return end
-    local scrollBox = menu.ControlSettings
-    if not Core.IsValidObj(scrollBox) then return end
-
-    local menuAddr = menu:GetAddress()
-    local existing = InjectedSettingsRows[menuAddr]
-    if Core.IsValidObj(existing) then
-        local okHas, hasChild = pcall(function() return scrollBox:HasChild(existing) end)
-        if okHas and hasChild then
-            SyncRemapRowDisplay(existing)
-            return
-        end
-    end
-
-    local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
-    local row = Core.CreateUserWidget(PATHS.InputRemapClass, menu, pc)
-    if not Core.IsValidObj(row) then return end
-
-    InjectedSettingsRows[menuAddr] = row
-    TrackedRemapRows[row:GetAddress()] = row
-    row.MappingName = FName(MAPPING_NAME)
-
-    local slot = scrollBox:AddChild(row)
-    if Core.IsValidObj(slot) then
-        local refRow = Core.IsValidObj(menu.StatusWindow) and menu.StatusWindow or menu.Statistics
-        if Core.IsValidObj(refRow) and Core.IsValidObj(refRow.Slot) then
-            pcall(function()
-                slot:SetPadding(refRow.Slot.Padding)
-                slot:SetHorizontalAlignment(refRow.Slot.HorizontalAlignment)
-                slot:SetVerticalAlignment(refRow.Slot.VerticalAlignment)
-            end)
-        end
-    end
-
-    SyncRemapRowDisplay(row)
-    Core.Log("Injected Logistics keybind row into WBP_SettingsMenu_C")
-end
 
 local CachedHudIconTextures = {}
 
@@ -1685,9 +1488,6 @@ end
 --------------------------------------------------------------------------------
 
 Feature.WatchWidgets = {
-    WBP_SettingsMenu_C = function(menu)
-        EnsureSettingsKeybindRow(menu)
-    end,
     WBP_CharacterHUD_C = function(hud)
         EnsureHudKeybindIndicator(hud)
         StartHudIndicatorPoll()
@@ -1695,11 +1495,18 @@ Feature.WatchWidgets = {
 }
 
 function Feature.Init()
-    Core.ReadConfig({ LogisticsKey = DEFAULT_KEY })
-    ApplyLogisticsKeybind(Core.Config.LogisticsKey, false)
+    Core.RegisterConfigurableKeybind({
+        ConfigKey     = "LogisticsKey",
+        DefaultKey    = DEFAULT_KEY,
+        MappingName   = MAPPING_NAME,
+        Label         = "Logistics",
+        AllowCursorUI = true,
+        OnPress       = ToggleLogistics,
+        OnChanged     = UpdateAllHudKeyIndicators,
+    })
     if Key and Key.ESCAPE then
         RegisterKeyBind(Key.ESCAPE, function()
-            if Core.IsValidObj(ActiveLogisticsWin) then
+            if ActiveLogisticsVisible and Core.IsValidObj(ActiveLogisticsWin) then
                 ExecuteInGameThread(CloseLogisticsWindow)
             end
         end)
@@ -1717,63 +1524,6 @@ function Feature.RegisterHooks()
             if Core.IsValidObj(w) and Core.IsValidObj(ActiveLogisticsWin) and w:GetAddress() == ActiveLogisticsWin:GetAddress() then
                 CloseLogisticsWindow()
             end
-        end
-    )
-    Core.TryRegisterHook(
-        "SettingsMenu_Setup_Logistics",
-        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Setup",
-        function(Context)
-            local menu = Context:get()
-            if Core.IsValidObj(menu) then EnsureSettingsKeybindRow(menu) end
-        end
-    )
-
-    Core.TryRegisterHook(
-        "SettingsMenu_Refresh_Logistics",
-        "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Refresh",
-        function(Context)
-            local menu = Context:get()
-            if Core.IsValidObj(menu) then EnsureSettingsKeybindRow(menu) end
-        end
-    )
-
-    Core.TryRegisterHook(
-        "InputRemap_OnKeySelected_Logistics",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_InputKeySelector_K2Node_ComponentBoundEvent_0_OnKeySelected__DelegateSignature",
-        function(Context, SelectedKeyParam)
-            local row = Context:get()
-            if not IsEqolRemapRow(row) then return end
-
-            local okKey, keyName = pcall(function()
-                local chord = (type(SelectedKeyParam.get) == "function") and SelectedKeyParam:get() or SelectedKeyParam
-                return chord.Key.KeyName:ToString()
-            end)
-            if okKey and keyName and keyName ~= "" and keyName ~= "None" then
-                ApplyLogisticsKeybind(keyName, true)
-            end
-            SyncRemapRowDisplay(row)
-        end
-    )
-
-    Core.TryRegisterHook(
-        "InputRemap_Revert_Logistics",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_RevertToDefaultButton_K2Node_ComponentBoundEvent_1_OnButtonPressedEvent__DelegateSignature",
-        function(Context)
-            local row = Context:get()
-            if not IsEqolRemapRow(row) then return end
-            ApplyLogisticsKeybind(DEFAULT_KEY, true)
-            SyncRemapRowDisplay(row)
-        end
-    )
-
-    Core.TryRegisterHook(
-        "InputRemap_Clear_Logistics",
-        "/Game/Blueprints/Widgets/Display/Settings/WBP_InputRemap.WBP_InputRemap_C:BndEvt__WBP_InputRemap_ClearMappingButton_K2Node_ComponentBoundEvent_2_OnButtonPressedEvent__DelegateSignature",
-        function(Context)
-            local row = Context:get()
-            if not IsEqolRemapRow(row) then return end
-            ApplyLogisticsKeybind("None", true)
-            SyncRemapRowDisplay(row)
         end
     )
 
@@ -1815,6 +1565,7 @@ function Feature.RegisterHooks()
             local hud = Context:get()
             if Core.IsValidObj(hud) then
                 EnsureHudKeybindIndicator(hud)
+                StartHudIndicatorPoll()
                 UpdateAllHudKeyIndicators()
             end
         end
@@ -1822,13 +1573,6 @@ function Feature.RegisterHooks()
 
     if not InitialLogisticsWidgetScanDone then
         InitialLogisticsWidgetScanDone = true
-        local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
-        if okMenus and menus then
-            for _, m in ipairs(menus) do
-                if Core.IsValidObj(m) then EnsureSettingsKeybindRow(m) end
-            end
-        end
-
         local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
         if okHuds and huds then
             for _, h in ipairs(huds) do
@@ -1844,18 +1588,16 @@ end
 function Feature.OnMapLoad()
     DestroyLogisticsWindow()
     CachedWidgetClasses = {}
+    CachedHudIconTextures = {}
     CachedWblCDO = nil
 end
 
 function Feature.PruneCaches()
-    for addr, row in pairs(InjectedSettingsRows) do
-        if not Core.IsValidObj(row) then InjectedSettingsRows[addr] = nil end
-    end
-    for addr, row in pairs(TrackedRemapRows) do
-        if not Core.IsValidObj(row) then TrackedRemapRows[addr] = nil end
-    end
     for addr, entry in pairs(HudKeyIndicators) do
         if not Core.IsValidObj(entry.Root) then HudKeyIndicators[addr] = nil end
+    end
+    for k, tex in pairs(CachedHudIconTextures) do
+        if not Core.IsValidObj(tex) then CachedHudIconTextures[k] = nil end
     end
     if ActiveLogisticsWin and not Core.IsValidObj(ActiveLogisticsWin) then
         ActiveLogisticsWin = nil

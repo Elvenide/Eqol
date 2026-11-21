@@ -410,14 +410,15 @@ local function GetActorPowerInfo(actor)
     end
 
     local aAddr = actor:GetAddress()
-    local cachedActor = ActorBlockInfoCache[aAddr]
-    if cachedActor then
-        return cachedActor.info, cachedActor.clsName
-    end
-
     local actorCls = nil
     pcall(function() actorCls = actor:GetClass() end)
     local clsAddr = Core.IsValidObj(actorCls) and actorCls:GetAddress() or 0
+
+    local cachedActor = ActorBlockInfoCache[aAddr]
+    if cachedActor and clsAddr ~= 0 and cachedActor.clsAddr == clsAddr then
+        return cachedActor.info, cachedActor.clsName
+    end
+
     local clsName = SafeObjName(actorCls)
 
     local cachedCls = (clsAddr ~= 0) and ActorClassPowerCache[clsAddr] or nil
@@ -438,7 +439,7 @@ local function GetActorPowerInfo(actor)
 end
 
 local function EvalPowerInfo(info, solarEfficiency)
-    local eff = (type(solarEfficiency) == "number" and solarEfficiency > 0) and solarEfficiency or 1.0
+    local eff = (type(solarEfficiency) == "number" and solarEfficiency >= 0) and solarEfficiency or 1.0
     return (info.nonSolarGen or 0.0) + (info.solarBaseGen or 0.0) * eff, (info.cons or 0.0)
 end
 
@@ -536,13 +537,22 @@ local function EnsureDesignerWatcher()
                         end)
                         if okN and type(rawLen) == "number" and st.WatchedRawLen ~= nil and rawLen ~= st.WatchedRawLen then
                             st.WatchedRawLen = rawLen
+                            st.LastFullPendingScanClock = os.clock()
                             LastTriggerSource = "WatcherPoll"
                             RefreshDesignerPowerStats(st.Hud)
                             previewCount = st.WatchedPreviewCount or rawLen
                             pendingCount = st.WatchedPendingCount or 0
                         else
                             st.WatchedRawLen = rawLen
-                            previewCount, pendingCount = CountPreviewBlocksPending(previewBlocks)
+                            local now = os.clock()
+                            -- Throttle full PreviewBlocks pending scan to ~1.6s when rawLen is unchanged
+                            if (now - (st.LastFullPendingScanClock or 0)) >= 1.6 then
+                                st.LastFullPendingScanClock = now
+                                previewCount, pendingCount = CountPreviewBlocksPending(previewBlocks)
+                            else
+                                previewCount = st.WatchedPreviewCount or 0
+                                pendingCount = st.WatchedPendingCount or 0
+                            end
                         end
                     end
                 end
@@ -680,7 +690,7 @@ local function ResolveStationSolarEfficiency(frame, pg)
                 if maxEff > 0 and maxDist > minDist then
                     local t = Core.Clamp((dist - minDist) / (maxDist - minDist), 0.0, 1.0)
                     eff = maxEff + t * (minEff - maxEff)
-                    if eff > 0 then
+                    if eff >= 0 then
                         effSource = string.format("dist_to_sun(dist=%.1f,range=[%.1f..%.1f],eff=[%.2f..%.2f])",
                             dist, minDist, maxDist, maxEff, minEff)
                         return eff, effSource
@@ -702,8 +712,23 @@ local function ComputeDesignerPower(designerHud, st)
     local frame = nil
     pcall(function() frame = designer:GetFrame() end)
 
+    local frameAddr = Core.IsValidObj(frame) and frame:GetAddress() or nil
+    if st and st.FrameAddr ~= frameAddr then
+        st.FrameAddr = frameAddr
+        st.SolarEfficiency = nil
+        st.SolarEffSource = nil
+        st.InitialLoadedGen = nil
+        st.InitialLoadedCons = nil
+        st.InitialLoadedCount = nil
+        st.ResetBaseline = true
+    end
+
     local isStationFrame = false
-    local frameClsName = SafeObjName(frame and frame:GetClass() or nil)
+    local frameCls = nil
+    if Core.IsValidObj(frame) then
+        pcall(function() frameCls = frame:GetClass() end)
+    end
+    local frameClsName = SafeObjName(frameCls)
     if Core.IsValidObj(frame) and string.find(frameClsName, "Station", 1, true) then
         isStationFrame = true
     end
@@ -1120,6 +1145,8 @@ function Feature.RegisterHooks()
 end
 
 function Feature.OnClientRestart()
+    ActorBlockInfoCache = {}
+    ActorClassPowerCache = {}
     Feature.RegisterHooks()
     if next(InjectedDesigners) ~= nil then
         ExecuteInGameThreadWithDelay(200, function()
@@ -1129,6 +1156,8 @@ function Feature.OnClientRestart()
 end
 
 function Feature.OnMapLoad()
+    ActorBlockInfoCache = {}
+    ActorClassPowerCache = {}
     Feature.RegisterHooks()
     ExecuteInGameThreadWithDelay(200, function()
         ScanAndRefreshAllDesigners("OnMapLoad", true)

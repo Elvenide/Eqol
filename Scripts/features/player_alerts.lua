@@ -26,9 +26,9 @@ local function PushBuiltInAlert(messageStr)
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return false end
 
-    local alertWidgets = nil
+    local targetWidget = nil
     if Core.IsValidObj(CachedAlertWidget) and Core.IsValidObj(CachedAlertWidget.Container) then
-        alertWidgets = { CachedAlertWidget }
+        targetWidget = CachedAlertWidget
     else
         CachedAlertWidget = nil
         local now = os.clock()
@@ -36,52 +36,64 @@ local function PushBuiltInAlert(messageStr)
             LastAlertScanTime = now
             local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
             if okAlerts and found and #found > 0 then
-                alertWidgets = found
+                -- Pick a single active in-viewport WBP_PlayerAlerts_C to avoid duplicate alerts
+                local fallback = nil
                 for _, w in ipairs(found) do
                     if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
-                        CachedAlertWidget = w
-                        break
+                        if not fallback then fallback = w end
+                        local okVP, inVP = pcall(function() return w:IsInViewport() end)
+                        local okVis, isVis = pcall(function() return w:IsVisible() end)
+                        if (okVP and inVP) or (okVis and isVis) then
+                            targetWidget = w
+                            break
+                        end
                     end
+                end
+                targetWidget = targetWidget or fallback
+                if Core.IsValidObj(targetWidget) then
+                    CachedAlertWidget = targetWidget
                 end
             end
         end
     end
-    if not alertWidgets or #alertWidgets == 0 then
+    if not Core.IsValidObj(targetWidget) or not Core.IsValidObj(targetWidget.Container) then
         return false
     end
 
     local pushed = false
-    for _, w in ipairs(alertWidgets) do
-        if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
-            local entryW = Core.CreateUserWidget(PATHS.WBPPlayerAlertStatusClass, w, pc)
+    local entryW = Core.CreateUserWidget(PATHS.WBPPlayerAlertStatusClass, targetWidget, pc)
+    if Core.IsValidObj(entryW) then
+        pcall(function()
+            if Core.IsValidObj(entryW.WBP_RichText) then
+                entryW.WBP_RichText:SetText(Core.MakeText(messageStr))
+            end
+            if targetWidget.Container.AddChildToVerticalBox then
+                targetWidget.Container:AddChildToVerticalBox(entryW)
+            else
+                targetWidget.Container:AddChild(entryW)
+            end
+            pushed = true
+        end)
+        ExecuteInGameThreadWithDelay(6000, function()
             if Core.IsValidObj(entryW) then
                 pcall(function()
-                    if Core.IsValidObj(entryW.WBP_RichText) then
-                        entryW.WBP_RichText:SetText(Core.MakeText(messageStr))
-                    end
-                    if w.Container.AddChildToVerticalBox then
-                        w.Container:AddChildToVerticalBox(entryW)
-                    else
-                        w.Container:AddChild(entryW)
-                    end
-                    pushed = true
-                end)
-                ExecuteInGameThreadWithDelay(6000, function()
-                    if Core.IsValidObj(entryW) then
-                        pcall(function() entryW:RemoveSelf() end)
+                    if entryW.RemoveSelf then
+                        entryW:RemoveSelf()
+                    elseif entryW.RemoveFromParent then
+                        entryW:RemoveFromParent()
                     end
                 end)
             end
-        end
+        end)
     end
     return pushed
 end
 
-local function PollPlayerPresence()
+local function PollPlayerPresence(forceRefresh)
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) or not Core.IsValidObj(pc.PlayerObject) then return end
 
-    local players = StationData.GetAllPlayersInfo(pc)
+    local players = StationData.GetAllPlayersInfo(pc, forceRefresh == true)
     if #players == 0 then return end
 
     if not InitializedSnapshot then
@@ -164,14 +176,14 @@ function Feature.RegisterHooks()
         "PC_AddRemotePlayer_Alert",
         "/Script/MainSequence.DMSPlayerController:Client_AddRemotePlayer",
         function()
-            ExecuteInGameThreadWithDelay(250, PollPlayerPresence)
+            ExecuteInGameThreadWithDelay(250, function() PollPlayerPresence(true) end)
         end
     )
     Core.TryRegisterHook(
         "PC_RemovePlayer_Alert",
         "/Script/MainSequence.DMSPlayerController:Client_RemovePlayer",
         function()
-            ExecuteInGameThreadWithDelay(250, PollPlayerPresence)
+            ExecuteInGameThreadWithDelay(250, function() PollPlayerPresence(true) end)
         end
     )
 end

@@ -450,6 +450,10 @@ local function DisableSimCollider(simObj, countsByClass)
     end
 end
 
+local CachedPrimCls = nil
+local CachedSmCls = nil
+local ScanGeneration = 0
+
 local function EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
     local actorAddr = actor:GetAddress()
     local needCompScan = not ProcessedCollisionActors[actorAddr]
@@ -469,7 +473,10 @@ local function EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts
     if not needCompScan then return end
     ProcessedCollisionActors[actorAddr] = true
 
-    local primCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
+    if not Core.IsValidObj(CachedPrimCls) then
+        CachedPrimCls = Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
+    end
+    local primCls = CachedPrimCls
     if not Core.IsValidObj(primCls) or not actor.K2_GetComponentsByClass then return end
 
     local comps, n = ExtractArray(actor:K2_GetComponentsByClass(primCls))
@@ -519,7 +526,10 @@ local function EnsureTargetHeight(actor)
     if ProcessedHeightActors[actorAddr] then return end
     ProcessedHeightActors[actorAddr] = true
 
-    local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+    if not Core.IsValidObj(CachedSmCls) then
+        CachedSmCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+    end
+    local smCls = CachedSmCls
     if not Core.IsValidObj(smCls) or not actor.K2_GetComponentsByClass then return end
 
     local comps, n = ExtractArray(actor:K2_GetComponentsByClass(smCls))
@@ -645,6 +655,7 @@ local function ScanAndApplyTweaks()
 end
 
 local function ResetWorldCaches()
+    ScanGeneration = ScanGeneration + 1
     OrigMeshState = {}
     ProcessedHeightActors = {}
     ProcessedCollisionActors = {}
@@ -654,6 +665,8 @@ local function ResetWorldCaches()
     ProcessedEnvNums = {}
     CachedAnchors = {}
     RegisteredSlotProps = {}
+    CachedPrimCls = nil
+    CachedSmCls = nil
     NeedsEnvClean = false
 end
 
@@ -667,6 +680,7 @@ local function RunStaggeredScan()
     end
     StaggeredScanActive = true
     StaggeredScanPending = false
+    local myGen = ScanGeneration
 
     -- Build a flat list of single-class scan tasks so we never run 16 FindAllOf calls in one frame
     local tasks = {}
@@ -685,6 +699,10 @@ local function RunStaggeredScan()
     local idx = 1
 
     local function Step()
+        if myGen ~= ScanGeneration then
+            StaggeredScanActive = false
+            return
+        end
         if idx <= #tasks then
             local t = tasks[idx]
             idx = idx + 1
@@ -719,7 +737,7 @@ local function RunStaggeredScan()
         else
             pcall(CleanTrackedEnvs)
             StaggeredScanActive = false
-            if StaggeredScanPending then
+            if StaggeredScanPending and myGen == ScanGeneration then
                 StaggeredScanPending = false
                 ExecuteInGameThreadWithDelay(300, RunStaggeredScan)
             end
@@ -733,9 +751,12 @@ local DebouncedScanScheduled = false
 local function ScheduleStaggeredScan(delayMs)
     if DebouncedScanScheduled then return end
     DebouncedScanScheduled = true
+    local myGen = ScanGeneration
     ExecuteInGameThreadWithDelay(delayMs or 400, function()
         DebouncedScanScheduled = false
-        RunStaggeredScan()
+        if myGen == ScanGeneration then
+            RunStaggeredScan()
+        end
     end)
 end
 
@@ -744,6 +765,35 @@ local UNDERGROUND_SIM_SET = {
     BP_UndergroundBeltObject_2_C = true,
     BP_UndergroundBeltObject_3_C = true,
 }
+
+local function ApplyDirectToMachineActors(obj, isWalk)
+    if not Core.IsValidObj(obj) then return false end
+    local foundActor = false
+    local simSeen = {}
+    local disabledCounts = {}
+
+    local function handleActor(a)
+        if not Core.IsValidObj(a) then return end
+        foundActor = true
+        if isWalk then
+            EnsureActorPawnIgnoreAndSimDisable(a, simSeen, disabledCounts)
+        end
+        EnsureTargetHeight(a)
+    end
+
+    pcall(function()
+        if Core.IsValidObj(obj.Actor) then
+            handleActor(obj.Actor)
+        end
+        if obj.Actors then
+            local arr, n = ExtractArray(obj.Actors)
+            for i = 1, n do
+                handleActor(arr[i])
+            end
+        end
+    end)
+    return foundActor
+end
 
 local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
@@ -757,20 +807,26 @@ local function RegisterMachineObjectHook()
             or low:find("beltbalancer", 1, true) ~= nil
         local isUg = UNDERGROUND_SIM_SET[clsName]
             or low:find("undergroundbelt", 1, true) ~= nil
-        if isWalk then
-            EnsureSimCDODisabled(obj)
-            pcall(function()
-                if obj.bColliderEnabled == true then
-                    obj.bColliderEnabled = false
-                end
-            end)
-            NeedsEnvClean = true
-            ScheduleStaggeredScan(300)
-            ExecuteInGameThreadWithDelay(1000, function() ScheduleStaggeredScan(50) end)
-        elseif isUg then
-            ScheduleStaggeredScan(300)
-            ExecuteInGameThreadWithDelay(1000, function() ScheduleStaggeredScan(50) end)
-        end
+        if not isWalk and not isUg then return end
+
+        local myGen = ScanGeneration
+        ExecuteInGameThreadWithDelay(150, function()
+            if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
+            if isWalk then
+                EnsureSimCDODisabled(obj)
+                DisableSimCollider(obj, {})
+                pcall(CleanTrackedEnvs)
+            end
+            if not ApplyDirectToMachineActors(obj, isWalk) then
+                -- Actor may spawn a moment after the simulation object; retry direct lookup once before falling back
+                ExecuteInGameThreadWithDelay(400, function()
+                    if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
+                    if not ApplyDirectToMachineActors(obj, isWalk) then
+                        ScheduleStaggeredScan(300)
+                    end
+                end)
+            end
+        end)
     end
     -- MachineObject is the true base class for newly built splitters, balancers, and underground belts
     pcall(NotifyOnNewObject, "/Script/MainSequence.MachineObject", HandleNewMachineObj)
@@ -804,10 +860,25 @@ function Feature.PruneCaches()
             OrigMeshState[addr] = nil
         end
     end
-    for addr, _ in pairs(CachedAnchors) do
-        local entry = CachedAnchors[addr]
+    for addr, entry in pairs(CachedAnchors) do
         if not entry or not Core.IsValidObj(entry.obj) then
             CachedAnchors[addr] = nil
+        end
+    end
+    for addr, frame in pairs(TrackedSimFrames) do
+        if not Core.IsValidObj(frame) then
+            TrackedSimFrames[addr] = nil
+        end
+    end
+    for addr, env in pairs(TrackedEnvs) do
+        if not Core.IsValidObj(env) then
+            TrackedEnvs[addr] = nil
+            ProcessedEnvNums[addr] = nil
+        end
+    end
+    for elemAddr, entry in pairs(RegisteredSlotProps) do
+        if not entry or not entry.anchor or not Core.IsValidObj(entry.anchor.obj) then
+            RegisteredSlotProps[elemAddr] = nil
         end
     end
 end

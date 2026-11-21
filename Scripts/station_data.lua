@@ -37,6 +37,10 @@ end
 -- Array / Struct Helpers
 --------------------------------------------------------------------------------
 
+local function safeGetArrayElem(arr, i)
+    return arr[i]
+end
+
 function StationData.ForEachArray(arr, fn)
     if not arr then return end
     local okLen, len = pcall(function()
@@ -47,7 +51,7 @@ function StationData.ForEachArray(arr, fn)
     end
     if okLen and type(len) == "number" then
         for i = 1, len do
-            local okElem, elem = pcall(function() return arr[i] end)
+            local okElem, elem = pcall(safeGetArrayElem, arr, i)
             if okElem and elem ~= nil then
                 fn(i, elem)
             end
@@ -874,7 +878,7 @@ function StationData.StationLocalToWorld(xform, lx, ly, lz)
     return wx, wy, wz
 end
 
-function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds)
+function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds, xform)
     local actor = StationData.GetObjectActor(machine)
     if Core.IsValidObj(actor) then
         local okLoc, loc = pcall(function() return actor:K2_GetActorLocation() end)
@@ -886,8 +890,14 @@ function StationData.GetMachineWorldPosAndYaw(machine, fallbackBounds)
 
     local okL, loc = pcall(function() return machine.Location end)
     if okL and loc then
-        local x, y, z = Core.GetFPVector(loc)
-        return x, y, z, 0
+        -- machine.Location is station-local PVector in meters (learning.md §1) -> convert to cm
+        local lx, ly, lz = Core.GetFPVector(loc)
+        lx, ly, lz = lx * 100.0, ly * 100.0, lz * 100.0
+        if xform and xform.hasActor then
+            local wx, wy, wz = StationData.StationLocalToWorld(xform, lx, ly, lz)
+            return wx, wy, wz, 0
+        end
+        return lx, ly, lz, 0
     end
 
     if fallbackBounds then
@@ -912,12 +922,9 @@ local function GetMachineLocalPosAndYaw(machine, xform)
 
     local okL, loc = pcall(function() return machine.Location end)
     if okL and loc then
+        -- machine.Location is station-local PVector in meters (learning.md §1) -> convert to cm
         local x, y, z = Core.GetFPVector(loc)
-        -- If actor isn't spawned, check if machine.Location looks station-local vs world
-        if xform and xform.hasActor and (math.abs(x - xform.ox) > 200000.0 or math.abs(y - xform.oy) > 200000.0) then
-            return x, y, z, 0.0
-        end
-        return StationData.WorldToStationLocal(xform, x, y, z, nil, nil, nil)
+        return x * 100.0, y * 100.0, z * 100.0, 0.0
     end
     return 0.0, 0.0, 0.0, 0.0
 end
@@ -968,12 +975,44 @@ local function CollectElevatorStopLocalZs(station, allMachines, xform)
     return stopLists
 end
 
+local MachineCacheVersion = 0
+
 function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, playerZ)
     local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
     local now = os.clock()
     if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 300.0 then
         local cFloors = CachedFloorMap.floors
         local cXform = CachedFloorMap.xform
+        -- Re-bin only fl.machines when InvalidateMachineCache() bumped MachineCacheVersion
+        -- (avoids rebuilding static platforms and 853+ wall colliders!)
+        if CachedFloorMap.machineVersion ~= MachineCacheVersion then
+            local freshMachines = StationData.GetAllStationMachines(station, nil, walkFrame)
+            for _, fl in ipairs(cFloors) do
+                fl.machines = {}
+            end
+            for _, m in ipairs(freshMachines) do
+                local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, cXform)
+                local bestFl = nil
+                local bestDz = math.huge
+                for _, fl in ipairs(cFloors) do
+                    local dz = math.abs(lz - fl.z)
+                    if dz < bestDz then
+                        bestDz = dz
+                        bestFl = fl
+                    end
+                end
+                if bestFl then
+                    bestFl.machines[#bestFl.machines + 1] = {
+                        machine = m,
+                        x = lx,
+                        y = ly,
+                        z = lz,
+                        yaw = lyaw,
+                    }
+                end
+            end
+            CachedFloorMap.machineVersion = MachineCacheVersion
+        end
         local curIdx = 1
         if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" and #cFloors > 0 then
             local _, _, plz = StationData.WorldToStationLocal(cXform, playerX, playerY, playerZ, nil, nil, nil)
@@ -1537,6 +1576,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
         CachedFloorMap = {
             key = cacheKey,
             time = os.clock(),
+            machineVersion = MachineCacheVersion,
             floors = floors,
             unitSize = unitSize,
             gridOriginX = gridOriginX,
@@ -2998,7 +3038,7 @@ function StationData.GetMachineFootprintCells(machine, buildableOpt)
 
     if not tryReadDims(machine) and not tryReadDims(bld) and Core.IsValidObj(actor) then
         pcall(function()
-            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            local smCls = GetClassCached("StaticMeshComponent", "/Script/Engine.StaticMeshComponent")
             if Core.IsValidObj(smCls) and actor.K2_GetComponentsByClass then
                 local compsRaw = actor:K2_GetComponentsByClass(smCls)
                 local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
@@ -3066,11 +3106,13 @@ function StationData.GetMachineLocalPosAndYaw(machine, xform)
 end
 
 function StationData.InvalidateMachineCache()
+    MachineCacheVersion = MachineCacheVersion + 1
     CachedMachinesByFrame = {}
     CachedStationMachines = { key = nil, time = 0, list = {} }
 end
 
 function StationData.InvalidateCaches()
+    MachineCacheVersion = MachineCacheVersion + 1
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
     CachedStationMachines = { key = nil, time = 0, list = {} }
@@ -3113,9 +3155,9 @@ local function ToLuaString(v)
     return nil
 end
 
-function StationData.GetAllPlayersInfo(localPC)
+function StationData.GetAllPlayersInfo(localPC, forceRefresh)
     local now = os.clock()
-    if (now - CachedPlayersSnapshot.time) < 2.0 and #CachedPlayersSnapshot.list > 0 then
+    if not forceRefresh and (now - CachedPlayersSnapshot.time) < 2.0 and #CachedPlayersSnapshot.list > 0 then
         -- Refresh live positions on cached actors without calling FindAllOf
         for _, p in ipairs(CachedPlayersSnapshot.list) do
             if Core.IsValidObj(p.Actor) then

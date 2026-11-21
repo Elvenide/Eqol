@@ -16,16 +16,8 @@ local function ZeroShipThrottle()
         return
     end
 
-    local shipObj = playerObj.PilotedShip
+    -- Use the verified native PlayerController RPC only (never write directly to PilotedShip simulation properties)
     pcall(function() pc:SetThrottleInput(0.0) end)
-
-    for _, prop in ipairs({ "Throttle", "TargetThrottle", "ThrottleStep", "CurrentThrottle" }) do
-        pcall(function()
-            if shipObj[prop] ~= nil then
-                shipObj[prop] = 0
-            end
-        end)
-    end
 end
 
 function Feature.Init()

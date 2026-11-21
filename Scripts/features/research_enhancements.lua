@@ -794,12 +794,27 @@ local function FindOwningTreeForQueueParent(parentWidget)
     if not Core.IsValidObj(parentWidget) then return nil, nil end
     local pAddr = parentWidget:GetAddress()
 
+    local hasCachedTree = false
     for _, st in pairs(InjectedTrees) do
-        if Core.IsValidObj(st.Tree) and Core.IsValidObj(st.Tree.ResearchQueueContainer) then
-            if st.Tree.ResearchQueueContainer:GetAddress() == pAddr then
+        if Core.IsValidObj(st.Tree) then
+            hasCachedTree = true
+            if Core.IsValidObj(st.Tree.ResearchQueueContainer)
+                and st.Tree.ResearchQueueContainer:GetAddress() == pAddr
+            then
                 return st.Tree, st.Tree.ResearchQueueContainer
             end
+            -- Early-return when clicking a non-queued tech inside a known ResearchList.Container
+            -- so we never fall through to FindAllOf("WBP_ResearchTree_2_C") on every tech click.
+            if Core.IsValidObj(st.ResearchList) and Core.IsValidObj(st.ResearchList.Container)
+                and st.ResearchList.Container:GetAddress() == pAddr
+            then
+                return nil, nil
+            end
         end
+    end
+
+    if hasCachedTree then
+        return nil, nil
     end
 
     local okTrees, trees = pcall(FindAllOf, "WBP_ResearchTree_2_C")
@@ -939,8 +954,8 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
     }
     ActiveDrag = dragState
 
-    local function DragPoll()
-        if ActiveDrag ~= dragState then return end
+    local function DragPollStep()
+        if ActiveDrag ~= dragState then return false end
 
         local treeOk = Core.IsValidObj(dragState.Tree)
             and Core.IsValidObj(dragState.QueueBox)
@@ -979,7 +994,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
                 local expectedTech = dragState.SnapshotTechs and dragState.SnapshotTechs[fromIdx] or nil
                 ReorderResearchQueue(dragState.Tree, fromIdx, toIdx, expectedTech)
             end
-            return
+            return false
         end
 
         local curX, curY = GetViewportMousePos(pc)
@@ -1049,7 +1064,21 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
             end)
         end
 
-        ExecuteInGameThreadWithDelay(16, DragPoll)
+        return true
+    end
+
+    local function DragPoll()
+        local ok, keepPolling = pcall(DragPollStep)
+        if not ok then
+            Core.Log("[ResearchEnhancements] DragPoll error: " .. tostring(keepPolling))
+            ActiveDrag = nil
+            DestroyDragGhost()
+            ResetQueueChildVisuals(dragState.QueueBox)
+            return
+        end
+        if keepPolling then
+            ExecuteInGameThreadWithDelay(16, DragPoll)
+        end
     end
 
     ExecuteInGameThreadWithDelay(16, DragPoll)
@@ -1117,6 +1146,11 @@ function Feature.RegisterHooks()
                 ExecuteInGameThreadWithDelay(20, function()
                     local tree = ResolveTreeForList(rList)
                     if Core.IsValidObj(tree) then
+                        local st = InjectedTrees[tree:GetAddress()]
+                        if st then
+                            st.BaseVisible = {}
+                            st.LastWideAlpha = {}
+                        end
                         EnsureAndFilterTree(tree, true)
                     end
                 end)
@@ -1184,6 +1218,16 @@ function Feature.OnClientRestart()
     ObjectSearchTextCache = {}
     Feature.RegisterHooks()
     ScanExistingTrees()
+end
+
+function Feature.OnMapLoad()
+    ActiveDrag = nil
+    DestroyDragGhost()
+    InjectedTrees = {}
+    InputToTree = {}
+    ListToTree = {}
+    TechSearchTextCache = {}
+    ObjectSearchTextCache = {}
 end
 
 function Feature.PruneCaches()

@@ -22,6 +22,25 @@ local CachedChats = {}          -- addr -> WBP_Chat_C
 local LastElevatorScanClock = -10.0
 local LastChatScanClock = -10.0
 local LastExitBuildClock = -10.0
+local LastFloorHotkeyClock = -10.0
+local MODIFIER_KEYS = nil
+
+local function IsAnyModifierKeyDown(pc)
+    if not Core.IsValidObj(pc) then return false end
+    if MODIFIER_KEYS == nil then
+        MODIFIER_KEYS = {}
+        for _, kName in ipairs({ "LeftControl", "RightControl", "LeftShift", "RightShift", "LeftAlt", "RightAlt" }) do
+            pcall(function() MODIFIER_KEYS[#MODIFIER_KEYS + 1] = { KeyName = FName(kName) } end)
+        end
+    end
+    for _, keyTbl in ipairs(MODIFIER_KEYS) do
+        local ok, down = pcall(function() return pc:IsInputKeyDown(keyTbl) end)
+        if ok and down == true then
+            return true
+        end
+    end
+    return false
+end
 
 local function RefreshElevatorCache()
     LastElevatorScanClock = os.clock()
@@ -242,14 +261,14 @@ end
 
 local function ExitBuildingModeIfInElevator(pc)
     local now = os.clock()
+    -- Only suppress build mode immediately after an elevator floor hotkey press (within 150ms),
+    -- so intentional building near an elevator pod is never blocked.
+    if (now - LastFloorHotkeyClock) > 0.15 then return end
     if now - LastExitBuildClock < 0.03 then return end
     if not Core.IsValidObj(pc) then
         pc = Core.GetLocalPlayerController()
     end
     if not Core.IsValidObj(pc) then return end
-
-    local elevObj = FindActivePlayerElevator(pc)
-    if not Core.IsValidObj(elevObj) then return end
 
     LastExitBuildClock = now
     pcall(function() pc:ExitBuildingMode() end)
@@ -336,20 +355,21 @@ function Feature.RegisterHooks()
 end
 
 local function GoToElevatorFloor(floorNum)
-    Feature.RegisterHooks()
-
-    if Core.IsSelectingAnyRegisteredKeybind() or IsChatOpenFast() then
+    if Core.IsSelectingAnyRegisteredKeybind() or Core.IsAnyTextInputFocused() or IsChatOpenFast() then
         return
     end
 
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
+    if IsAnyModifierKeyDown(pc) then return end
 
     local elevObj, openWidget = FindActivePlayerElevator(pc, false)
     if not Core.IsValidObj(elevObj) then return end
 
     local bottomElev, stackIdx = ResolveStackIndexForFloor(elevObj, floorNum)
     if not Core.IsValidObj(bottomElev) or stackIdx == nil then return end
+
+    LastFloorHotkeyClock = os.clock()
 
     local curFloor = nil
     pcall(function() curFloor = tonumber(bottomElev.CurrentFloor) end)

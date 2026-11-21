@@ -8,6 +8,7 @@ local Feature = {
 }
 
 local FreecamActive = false
+local ToggleSeq = 0
 
 local function GetSpectatorModeState(pc)
     if not Core.IsValidObj(pc) then return nil end
@@ -24,6 +25,9 @@ local function ToggleCinematicFreecam()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
+    ToggleSeq = ToggleSeq + 1
+    local mySeq = ToggleSeq
+
     pcall(function() pc:ToggleSpectatorMode() end)
 
     local isSpec = GetSpectatorModeState(pc)
@@ -34,6 +38,7 @@ local function ToggleCinematicFreecam()
 
     pcall(function() pc:SetHUDHidden(isSpec) end)
     ExecuteInGameThreadWithDelay(50, function()
+        if ToggleSeq ~= mySeq then return end
         if Core.IsValidObj(pc) then
             local updatedSpec = GetSpectatorModeState(pc)
             if updatedSpec ~= nil then
@@ -48,17 +53,8 @@ local function ToggleCinematicFreecam()
     Core.Log("Cinematic Freecam: " .. (isSpec and "ON" or "OFF"))
 end
 
-function Feature.Init()
-    Core.RegisterConfigurableKeybind({
-        ConfigKey   = "CinematicFreecamKey",
-        DefaultKey  = "C",
-        MappingName = "Eqol_CinematicFreecam",
-        Label       = "Cinematic Freecam",
-        OnPress     = ToggleCinematicFreecam,
-    })
-end
-
-function Feature.OnClientRestart()
+local function ResetFreecamState()
+    ToggleSeq = ToggleSeq + 1
     if FreecamActive then
         local pc = Core.GetLocalPlayerController()
         if Core.IsValidObj(pc) then
@@ -70,6 +66,24 @@ function Feature.OnClientRestart()
         end
         FreecamActive = false
     end
+end
+
+function Feature.Init()
+    Core.RegisterConfigurableKeybind({
+        ConfigKey   = "CinematicFreecamKey",
+        DefaultKey  = "C",
+        MappingName = "Eqol_CinematicFreecam",
+        Label       = "Cinematic Freecam",
+        OnPress     = ToggleCinematicFreecam,
+    })
+end
+
+function Feature.OnClientRestart()
+    ResetFreecamState()
+end
+
+function Feature.OnMapLoad()
+    ResetFreecamState()
 end
 
 return Feature

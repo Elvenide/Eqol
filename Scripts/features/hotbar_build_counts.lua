@@ -23,8 +23,10 @@ local COLOR_OK = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
 local COLOR_ZERO = { R = 0.96, G = 0.36, B = 0.32, A = 1.0 }
 local BG_BADGE = { R = 0.02, G = 0.03, B = 0.05, A = 0.78 }
 
-local TrackedHuds = {}    -- hudAddr -> { Hud, HotbarWidget, Slots = { ... } }
-local AttachedSlots = {}  -- slotAddr -> { SlotWidget, Badge, Label }
+local TrackedHuds = {}          -- hudAddr -> { Hud, HotbarWidget, Slots = { ... } }
+local AttachedSlots = {}        -- slotAddr -> { SlotWidget, Badge, Label }
+local CostStacksByBuildable = {} -- buildableAddr -> { Buildable = UBuildable, Stacks = table|false }
+local CachedItemCls = nil
 local PollActive = false
 local DiagLogged = false
 
@@ -127,8 +129,23 @@ end
 
 local function GetBuildableCostStacks(buildable)
     if not Core.IsValidObj(buildable) then return nil end
+
+    local bAddr = buildable:GetAddress()
+    local cached = CostStacksByBuildable[bAddr]
+    if cached and Core.IsValidObj(cached.Buildable) then
+        return cached.Stacks or nil
+    end
+
     local stacks = {}
-    local itemCls = Core.FindOrLoadClass(PATHS.ItemClass)
+    if not Core.IsValidObj(CachedItemCls) then
+        CachedItemCls = Core.FindOrLoadClass(PATHS.ItemClass)
+    end
+    local itemCls = CachedItemCls
+
+    local function cacheAndReturn(res)
+        CostStacksByBuildable[bAddr] = { Buildable = buildable, Stacks = res or false }
+        return res
+    end
 
     local function collectFromArr(arr)
         if not arr then return end
@@ -167,28 +184,28 @@ local function GetBuildableCostStacks(buildable)
         end
     end
 
-    -- 1. Verified UBuildable properties: ItemCost & ItemDetails.Recipe.Inputs
+    -- 1. Verified UBuildable properties: ItemCost, then bUseItemCost (pre-crafted item), then ItemDetails.Recipe.Inputs
     local okIC, itemCost = pcall(function() return buildable.ItemCost end)
     if okIC and itemCost then
         collectFromCostObj(itemCost)
-        if #stacks > 0 then return stacks end
+        if #stacks > 0 then return cacheAndReturn(stacks) end
     end
 
     local okID, itemDetails = pcall(function() return buildable.ItemDetails end)
     if okID and Core.IsValidObj(itemDetails) then
+        -- Check bUseItemCost BEFORE Recipe.Inputs so pre-crafted buildables count the item itself, not raw recipe ingredients
+        local okUse, useItem = pcall(function() return buildable.bUseItemCost end)
+        if okUse and useItem == true then
+            stacks[#stacks + 1] = { Item = itemDetails, Amount = 1 }
+            return cacheAndReturn(stacks)
+        end
         local okRec, rec = pcall(function() return itemDetails.Recipe end)
         if okRec and Core.IsValidObj(rec) then
             local okIn, inArr = pcall(function() return rec.Inputs end)
             if okIn and inArr then
                 collectFromArr(inArr)
-                if #stacks > 0 then return stacks end
+                if #stacks > 0 then return cacheAndReturn(stacks) end
             end
-        end
-        -- If bItemCostAsBuildingCost or no recipe inputs, check if ItemDetails itself is the item consumed
-        local okUse, useItem = pcall(function() return buildable.bUseItemCost end)
-        if okUse and useItem == true then
-            stacks[#stacks + 1] = { Item = itemDetails, Amount = 1 }
-            return stacks
         end
     end
 
@@ -199,7 +216,7 @@ local function GetBuildableCostStacks(buildable)
             local ok, res = pcall(function() return fn(buildable) end)
             if ok and res then
                 collectFromCostObj(res)
-                if #stacks > 0 then return stacks end
+                if #stacks > 0 then return cacheAndReturn(stacks) end
             end
         end
     end
@@ -208,11 +225,11 @@ local function GetBuildableCostStacks(buildable)
         local ok, val = pcall(function() return buildable[prop] end)
         if ok and val then
             collectFromCostObj(val)
-            if #stacks > 0 then return stacks end
+            if #stacks > 0 then return cacheAndReturn(stacks) end
         end
     end
 
-    return (#stacks > 0) and stacks or nil
+    return cacheAndReturn((#stacks > 0) and stacks or nil)
 end
 
 local function ComputeCraftableCount(buildable, inv, invCounts, hasCountsMap)
@@ -282,7 +299,7 @@ local function GetHotbarBuildablesData(pc, hud, hotbarWidget)
                                 result.byName[ks:lower()] = u
                                 local num = tonumber(ks:match("(%d+)$"))
                                 if num then
-                                    local idx1 = (num == 0) and 10 or num
+                                    local idx1 = (num % 10) + 1
                                     result.byIndex[idx1] = u
                                 end
                             end
@@ -649,8 +666,8 @@ local function StartPoll()
     local function Tick()
         local ok, anyValid = pcall(RefreshHotbarCounts)
         if not ok then
-            Core.Log("[HotbarCounts] RefreshHotbarCounts error: " .. tostring(anyValid))
-            PollActive = false
+            Core.Log("[HotbarCounts] RefreshHotbarCounts error (retrying): " .. tostring(anyValid))
+            ExecuteInGameThreadWithDelay(2000, Tick)
             return
         end
         if anyValid then
@@ -737,12 +754,18 @@ function Feature.PruneCaches()
             AttachedSlots[slotAddr] = nil
         end
     end
+    for bAddr, entry in pairs(CostStacksByBuildable) do
+        if not entry or not Core.IsValidObj(entry.Buildable) then
+            CostStacksByBuildable[bAddr] = nil
+        end
+    end
 end
 
 function Feature.OnMapLoad()
     -- Prune only invalid HUDs instead of wiping TrackedHuds unconditionally,
     -- because InitGameState + LoadMap can both fire OnMapLoad for the same live HUD.
     Feature.PruneCaches()
+    CachedItemCls = nil
     DiagLogged = false
 end
 

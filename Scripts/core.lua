@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.18"
+Core.VERSION = "0.1.19"
 
 Core.PATHS = {
     PlayerControllerClass = "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C",
@@ -585,8 +585,8 @@ local function RestoreSuppressedCharacterInput()
     SuppressedCharacterInputPC = nil
 end
 
-local function SyncCharacterInputSuppression()
-    local anyFocused = IsAnyTrackedTextInputFocused()
+local function SyncCharacterInputSuppression(precomputedFocused)
+    local anyFocused = (precomputedFocused ~= nil) and precomputedFocused or IsAnyTrackedTextInputFocused()
     local pc = Core.GetLocalPlayerController()
     if anyFocused then
         if Core.IsValidObj(pc) and pc.CharacterInputEnabled == true then
@@ -600,9 +600,14 @@ local function SyncCharacterInputSuppression()
     return anyFocused
 end
 
+local KEY_LMB = nil
+
 local function EnsureTextInputFocusWatcher()
     if TextInputFocusWatcherActive then return end
     TextInputFocusWatcherActive = true
+    if KEY_LMB == nil then
+        pcall(function() KEY_LMB = { KeyName = FName("LeftMouseButton") } end)
+    end
 
     local function WatcherTick()
         if next(TrackedTextInputs) == nil then
@@ -613,15 +618,16 @@ local function EnsureTextInputFocusWatcher()
 
         local pc = Core.GetLocalPlayerController()
         local mouseDown = false
-        if Core.IsValidObj(pc) then
+        if Core.IsValidObj(pc) and KEY_LMB ~= nil then
             local okMD, md = pcall(function()
-                return pc:IsInputKeyDown({ KeyName = FName("LeftMouseButton") })
-                    or pc:WasInputKeyJustPressed({ KeyName = FName("LeftMouseButton") })
+                return pc:IsInputKeyDown(KEY_LMB)
+                    or pc:WasInputKeyJustPressed(KEY_LMB)
             end)
             mouseDown = okMD and md == true
         end
 
         local anyVisible = false
+        local anyFocused = false
         for addr, entry in pairs(TrackedTextInputs) do
             if not Core.IsValidObj(entry.Input) then
                 TrackedTextInputs[addr] = nil
@@ -640,15 +646,18 @@ local function EnsureTextInputFocusWatcher()
                     elseif mouseDown then
                         entry.ExplicitFocus = IsWidgetOrBoxHovered(entry.Input, box)
                     end
+                    if entry.ExplicitFocus == true then
+                        anyFocused = true
+                    end
                 end
             end
         end
 
-        SyncCharacterInputSuppression()
-        ExecuteInGameThreadWithDelay(anyVisible and 10 or 200, WatcherTick)
+        SyncCharacterInputSuppression(anyFocused)
+        ExecuteInGameThreadWithDelay(anyVisible and 40 or 250, WatcherTick)
     end
 
-    ExecuteInGameThreadWithDelay(10, WatcherTick)
+    ExecuteInGameThreadWithDelay(40, WatcherTick)
 end
 
 function Core.RegisterTextInput(textInputWidget, ownerWindow)

@@ -156,12 +156,8 @@ EnsureCodexSearchBar = function(codexContent)
         end)
     end
 
+    -- Targeted removal only: never ClearChildren() on parentContainer in case future updates add siblings
     pcall(function() entryList:RemoveFromParent() end)
-    pcall(function()
-        if parentContainer.GetChildrenCount and parentContainer:GetChildrenCount() > 0 and parentContainer.ClearChildren then
-            parentContainer:ClearChildren()
-        end
-    end)
 
     local sbSlot = parentContainer:AddChild(leftColVBox)
     if Core.IsValidObj(sbSlot) then
@@ -200,6 +196,18 @@ EnsureCodexSearchBar = function(codexContent)
 
     local initTab = 0
     pcall(function() initTab = tonumber(codexContent.SelectedTab) or 0 end)
+
+    -- Opportunistically prune stale entries before inserting
+    for k, old in pairs(InjectedCodex) do
+        if not old or not Core.IsValidObj(old.CodexContent) or not Core.IsValidObj(old.SearchInput) then
+            InjectedCodex[k] = nil
+        end
+    end
+    for k, old in pairs(InputToCodex) do
+        if not old or not Core.IsValidObj(old.CodexContent) or not Core.IsValidObj(old.SearchInput) then
+            InputToCodex[k] = nil
+        end
+    end
 
     local st = {
         CodexContent = codexContent,
