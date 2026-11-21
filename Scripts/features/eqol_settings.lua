@@ -163,19 +163,14 @@ local function SetCleanTabLabel(tabWidget, labelStr)
     if not Core.IsValidObj(tabWidget) then return end
     local txt = Core.MakeText(labelStr)
     pcall(function()
-        if tabWidget.SetTitle then
-            tabWidget:SetTitle(txt)
-        elseif tabWidget.SetText then
-            tabWidget:SetText(txt)
-        elseif tabWidget.SetTabName then
-            tabWidget:SetTabName(txt)
+        -- WBP_CleanTab_C stores its label in the `Text` FText property (default "Confirm")
+        -- and copies `Text` -> `WBP_Text` on PreConstruct / Refresh.
+        tabWidget.Text = txt
+        if Core.IsValidObj(tabWidget.WBP_Text) and tabWidget.WBP_Text.SetText then
+            tabWidget.WBP_Text:SetText(txt)
         end
-        for _, prop in ipairs({ "WBP_Text", "Text", "Title", "Label", "TabText", "NameText" }) do
-            local ok, v = pcall(function() return tabWidget[prop] end)
-            if ok and Core.IsValidObj(v) and v.SetText then
-                v:SetText(txt)
-                break
-            end
+        if tabWidget.Refresh then
+            tabWidget:Refresh()
         end
     end)
 end
@@ -571,6 +566,10 @@ local function EnsureEqolSettingsTab(menu)
             if okCreate and Core.IsValidObj(nativeTab) then
                 isNativeCleanTab = true
                 tabWidget = nativeTab
+                pcall(function()
+                    nativeTab.WidgetSwitcher = switcher
+                    nativeTab.Index = eqolIdx
+                end)
                 SetCleanTabLabel(nativeTab, "Eqol")
                 ApplyCleanTabState(nativeTab, false)
                 ExecuteInGameThreadAfterFrames(1, function()

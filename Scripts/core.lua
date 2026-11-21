@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.27"
+Core.VERSION = "0.1.28"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -1184,13 +1184,31 @@ local function EnsureMenuKeybindRows(menu)
     end
 end
 
+local LastSettingsMenuSyncClock = {}
+
+local function ScheduleSettingsMenuSync(menu)
+    if not Core.IsValidObj(menu) then return end
+    local addr = menu:GetAddress()
+    local now = os.clock()
+    if LastSettingsMenuSyncClock[addr] and (now - LastSettingsMenuSyncClock[addr]) < 0.12 then
+        return
+    end
+    LastSettingsMenuSyncClock[addr] = now
+    -- Defer off the Esc/PauseMenu construction frame so pressing Esc has zero hitch
+    ExecuteInGameThreadWithDelay(60, function()
+        if Core.IsValidObj(menu) then
+            EnsureMenuKeybindRows(menu)
+        end
+    end)
+end
+
 function Core.EnsureKeybindHooks()
     if not SharedRemapHooksDone then
         SharedRemapHooksDone = true
         WatchedWidgetClasses["WBP_SettingsMenu_C"] = WatchedWidgetClasses["WBP_SettingsMenu_C"] or {}
         table.insert(WatchedWidgetClasses["WBP_SettingsMenu_C"], function(menu)
             Core.EnsureKeybindHooks()
-            EnsureMenuKeybindRows(menu)
+            ScheduleSettingsMenuSync(menu)
         end)
     end
 
@@ -1198,30 +1216,21 @@ function Core.EnsureKeybindHooks()
         "Core_SettingsMenu_Setup",
         "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Setup",
         function(Context)
-            local menu = Context:get()
-            ExecuteInGameThreadWithDelay(1, function()
-                if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
-            end)
+            ScheduleSettingsMenuSync(Context:get())
         end
     )
     Core.TryRegisterHook(
         "Core_SettingsMenu_Refresh",
         "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:Refresh",
         function(Context)
-            local menu = Context:get()
-            ExecuteInGameThreadWithDelay(1, function()
-                if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
-            end)
+            ScheduleSettingsMenuSync(Context:get())
         end
     )
     Core.TryRegisterHook(
         "Core_SettingsMenu_RefreshInGame",
         "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C:RefreshInGame",
         function(Context)
-            local menu = Context:get()
-            ExecuteInGameThreadWithDelay(1, function()
-                if Core.IsValidObj(menu) then EnsureMenuKeybindRows(menu) end
-            end)
+            ScheduleSettingsMenuSync(Context:get())
         end
     )
     Core.TryRegisterHook(

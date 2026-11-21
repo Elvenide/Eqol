@@ -50,6 +50,7 @@ for _, clsName in ipairs(WALKTHROUGH_SIM_CLASSES) do
 end
 
 local OrigMeshState            = {} -- compAddr -> { ... }
+local SavedColliderBounds      = {} -- cid -> { env, dataAddr, anchorObj, pCid, pMin, pMax, origMin, origMax }
 local ProcessedHeightActors    = {} -- actorAddr -> true
 local ProcessedCollisionActors = {} -- actorAddr -> true
 local PatchedSimCDOs           = {} -- clsName -> true
@@ -398,6 +399,18 @@ local function CleanTrackedEnvs()
                                         readErr = readErr + 1
                                         if not firstErr then firstErr = "Colliders TArray reallocated mid-pass" end
                                     else
+                                        if not SavedColliderBounds[cid] then
+                                            SavedColliderBounds[cid] = {
+                                                env = env,
+                                                dataAddr = dataAddr,
+                                                anchorObj = anchorObj,
+                                                pCid = slot.pCid,
+                                                pMin = slot.pMin,
+                                                pMax = slot.pMax,
+                                                origMin = oldMin,
+                                                origMax = oldMax,
+                                            }
+                                        end
                                         local okWrite, errW = pcall(function()
                                             anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
                                             anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
@@ -631,6 +644,7 @@ local function ResetWorldCaches()
     DebouncedScanScheduled = false
     DebouncedScanGen = DebouncedScanGen + 1
     OrigMeshState = {}
+    SavedColliderBounds = {}
     ProcessedHeightActors = {}
     ProcessedCollisionActors = {}
     WalkthroughSimIDs = {}
@@ -842,6 +856,39 @@ end
 
 local function RestoreWalkthroughCollision()
     ProcessedCollisionActors = {}
+    ProcessedEnvNums = {}
+
+    -- 1. Restore original MinX..MaxX bounds in CharacterCollisionEnvironment.Colliders
+    for cid, b in pairs(SavedColliderBounds) do
+        if b and Core.IsValidObj(b.env) and Core.IsValidObj(b.anchorObj) then
+            pcall(function()
+                local cols = b.env.Colliders
+                local curDataAddr = cols and cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
+                if curDataAddr == b.dataAddr and b.anchorObj[b.pCid] == cid then
+                    b.anchorObj[b.pMin] = b.origMin
+                    b.anchorObj[b.pMax] = b.origMax
+                end
+            end)
+        end
+    end
+
+    -- 2. Restore bColliderEnabled = true on splitter/balancer simulation objects
+    for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
+        local ok, list = pcall(FindAllOf, simCls)
+        if ok and list then
+            for _, s in ipairs(list) do
+                if Core.IsValidObj(s) then
+                    pcall(function()
+                        if s.bColliderEnabled == false then
+                            s.bColliderEnabled = true
+                        end
+                    end)
+                end
+            end
+        end
+    end
+
+    -- 3. Restore ECC_Pawn = ECR_BLOCK on 3D actors
     for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
         local ok, list = pcall(FindAllOf, clsShort)
         if ok and list then
@@ -869,6 +916,8 @@ function Feature.Init()
         OnToggle    = function(enabled)
             if enabled then
                 ProcessedCollisionActors = {}
+                ProcessedEnvNums = {}
+                NeedsEnvClean = true
                 ScheduleStaggeredScan(50)
             else
                 RestoreWalkthroughCollision()
