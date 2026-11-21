@@ -1222,13 +1222,26 @@ local function FindHudIconTexture(kind, hud)
             "/Game/Textures/T_MatSciIcon.T_MatSciIcon",
         },
         Power = {
-            "/Game/Materials/UI_Textures/T_PowerIcon.T_PowerIcon",
+            "/Game/Materials/Icons/UI/T_UI_Power.T_UI_Power",
+            "/Game/Materials/Icons/UI/T_UI_Electricity.T_UI_Electricity",
+            "/Game/Materials/Icons/UI/T_UI_Energy.T_UI_Energy",
+            "/Game/Materials/Icons/UI/T_UI_Lightning.T_UI_Lightning",
+            "/Game/Materials/Icons/UI/T_UI_Bolt.T_UI_Bolt",
+            "/Game/Materials/Icons/T_Power.T_Power",
             "/Game/Materials/Icons/T_PowerIcon.T_PowerIcon",
-            "/Game/Textures/Icons/T_PowerIcon.T_PowerIcon",
-            "/Game/Materials/UI_Textures/T_ElectricityIcon.T_ElectricityIcon",
+            "/Game/Materials/Icons/T_Electricity.T_Electricity",
             "/Game/Materials/Icons/T_ElectricityIcon.T_ElectricityIcon",
-            "/Game/Materials/UI_Textures/T_EnergyIcon.T_EnergyIcon",
+            "/Game/Materials/Icons/T_Energy.T_Energy",
             "/Game/Materials/Icons/T_EnergyIcon.T_EnergyIcon",
+            "/Game/Materials/Icons/T_Lightning.T_Lightning",
+            "/Game/Materials/UI_Textures/T_Power.T_Power",
+            "/Game/Materials/UI_Textures/T_PowerIcon.T_PowerIcon",
+            "/Game/Materials/UI_Textures/T_Electricity.T_Electricity",
+            "/Game/Materials/UI_Textures/T_ElectricityIcon.T_ElectricityIcon",
+            "/Game/Materials/UI_Textures/T_Energy.T_Energy",
+            "/Game/Materials/UI_Textures/T_EnergyIcon.T_EnergyIcon",
+            "/Game/Textures/Icons/T_PowerIcon.T_PowerIcon",
+            "/Game/Textures/Icons/T_Power.T_Power",
         },
         StationMap = {
             "/Game/Materials/UI_Textures/T_StationMapIcon.T_StationMapIcon",
@@ -1253,32 +1266,59 @@ local function FindHudIconTexture(kind, hud)
         local okAll, allTex = pcall(FindAllOf, "Texture2D")
         if okAll and allTex then
             local patterns = (kind == "Power")
-                and { "powericon", "electric", "lightning", "energyicon", "bolt", "t_power" }
+                and { "lightning", "bolt", "electric", "power", "energy", "battery", "charge" }
                 or { "stationicon", "mapicon", "radar", "blueprint", "gridicon" }
+            local bestTex, bestScore = nil, -1
+            local bestName = nil
             for _, t in ipairs(allTex) do
                 if Core.IsValidObj(t) then
-                    local okN, tn = pcall(function() return t:GetFName():ToString():lower() end)
-                    if okN and tn and tn:find("icon", 1, true) then
-                        for _, pat in ipairs(patterns) do
-                            if tn:find(pat, 1, true) then
-                                tex = t
-                                break
+                    local okF, full = pcall(function() return t:GetFullName() end)
+                    local okN, short = pcall(function() return t:GetFName():ToString() end)
+                    if okF and okN and type(full) == "string" and type(short) == "string" then
+                        local fullLow = full:lower()
+                        local shortLow = short:lower()
+                        local isUiAsset = fullLow:find("/icons/", 1, true)
+                            or fullLow:find("/ui_textures/", 1, true)
+                            or fullLow:find("/ui/", 1, true)
+                            or shortLow:find("icon", 1, true)
+                            or shortLow:find("t_ui_", 1, true)
+                        local isExcluded = shortLow:find("_n", 1, true)
+                            or shortLow:find("normal", 1, true)
+                            or shortLow:find("mask", 1, true)
+                            or shortLow:find("noise", 1, true)
+                            or shortLow:find("particle", 1, true)
+                            or shortLow:find("beam", 1, true)
+                            or shortLow:find("logo", 1, true)
+                        if isUiAsset and not isExcluded then
+                            for pIdx, pat in ipairs(patterns) do
+                                if shortLow:find(pat, 1, true) then
+                                    local score = (#patterns - pIdx) * 10
+                                    if fullLow:find("/icons/ui/", 1, true) then score = score + 8 end
+                                    if shortLow:find("t_ui_", 1, true) or shortLow:find("icon", 1, true) then score = score + 5 end
+                                    if score > bestScore then
+                                        bestScore = score
+                                        bestTex = t
+                                        bestName = full
+                                    end
+                                    break
+                                end
                             end
                         end
                     end
                 end
-                if Core.IsValidObj(tex) then break end
+            end
+            if Core.IsValidObj(bestTex) then
+                tex = bestTex
+                Core.Log(string.format("[Logistics] Matched %s HUD icon texture: %s", kind, tostring(bestName)))
             end
         end
     end
 
-    -- Reliable fallbacks from existing HUD input icons
+    -- Reliable fallbacks from existing HUD input icons (never reuse BuildingInput hammer for Power!)
     if not Core.IsValidObj(tex) and Core.IsValidObj(hud) then
         if kind == "StationMap" and Core.IsValidObj(hud.MapInput) then
             pcall(function() tex = hud.MapInput.Icon end)
-        elseif kind == "Power" and Core.IsValidObj(hud.BuildingInput) then
-            pcall(function() tex = hud.BuildingInput.Icon end)
-        elseif Core.IsValidObj(hud.ResearchInput) then
+        elseif kind ~= "Power" and Core.IsValidObj(hud.ResearchInput) then
             pcall(function() tex = hud.ResearchInput.Icon end)
         end
     end
