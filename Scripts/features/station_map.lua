@@ -46,7 +46,7 @@ local DEFAULT_CANVAS_W = 1060.0
 local DEFAULT_CANVAS_H = 740.0
 
 local COLORS = {
-    WindowBg      = { R = 0.024, G = 0.032, B = 0.044, A = 0.96 },
+    WindowBg      = { R = 0.006, G = 0.006, B = 0.006, A = 1.00 }, -- ~#121212 in sRGB
     GridLine      = { R = 0.240, G = 0.300, B = 0.380, A = 0.28 },
     GridMajor     = { R = 0.340, G = 0.430, B = 0.540, A = 0.48 },
     ModuleFill    = { R = 0.085, G = 0.115, B = 0.155, A = 0.92 },
@@ -3751,12 +3751,37 @@ RebuildFloorButtons = function()
         end
     end
 
-    if Core.IsValidObj(MapUI.FloorUpBtn) then
-        pcall(function() MapUI.FloorUpBtn:SetColorAndOpacity({ R = 1, G = 1, B = 1, A = (topIdx < total) and 1.0 or 0.35 }) end)
+    local canUp = (topIdx < total)
+    local canDown = (botIdx > 1)
+    local navBgOn  = { R = 0.13, G = 0.15, B = 0.18, A = 0.92 }
+    local navBgOff = { R = 0.10, G = 0.11, B = 0.13, A = 0.65 }
+
+    local function applyNavBtnState(wrap, btnWidget, btnText, enabled)
+        if Core.IsValidObj(btnWidget) then
+            pcall(function()
+                if btnWidget.SetIsEnabled then btnWidget:SetIsEnabled(enabled) end
+                if btnWidget.SetBackgroundColour then btnWidget:SetBackgroundColour(enabled and navBgOn or navBgOff) end
+            end)
+        end
+        if Core.IsValidObj(btnText) then
+            pcall(function()
+                if Core.IsValidObj(btnText.TextBlock) and btnText.TextBlock.SetColorAndOpacity then
+                    btnText.TextBlock:SetColorAndOpacity({
+                        SpecifiedColor = enabled and COLORS.PlayerLocal or APPLY_TXT_DISABLED,
+                        ColorUseRule = 0,
+                    })
+                end
+            end)
+        end
+        if Core.IsValidObj(wrap) then
+            pcall(function()
+                if wrap.SetRenderOpacity then wrap:SetRenderOpacity(enabled and 1.0 or 0.40) end
+            end)
+        end
     end
-    if Core.IsValidObj(MapUI.FloorDownBtn) then
-        pcall(function() MapUI.FloorDownBtn:SetColorAndOpacity({ R = 1, G = 1, B = 1, A = (botIdx > 1) and 1.0 or 0.35 }) end)
-    end
+
+    applyNavBtnState(MapUI.FloorUpBtn, MapUI.FloorUpBtnWidget, MapUI.FloorUpBtnText, canUp)
+    applyNavBtnState(MapUI.FloorDownBtn, MapUI.FloorDownBtnWidget, MapUI.FloorDownBtnText, canDown)
 end
 
 --------------------------------------------------------------------------------
@@ -4545,16 +4570,14 @@ local function GetMapCanvasCursorPos(pc)
                     if okWG and wGeom then
                         local okWS, wSz = pcall(function() return slateLib:GetLocalSize(wGeom) end)
                         if okWS and wSz and IsFiniteNum(tonumber(wSz.X)) and IsFiniteNum(tonumber(wSz.Y)) and wSz.X > 100 and wSz.Y > 100 then
-                            fullW = wSz.X / 0.88
-                            fullH = wSz.Y / 0.90
+                            fullW = wSz.X
+                            fullH = wSz.Y
                         end
                     end
                 end
                 if fullW and fullH then
-                    local winLeft = fullW * 0.06
-                    local winTop = fullH * 0.05
-                    lx = vx - (winLeft + 10.0)
-                    ly = vy - (winTop + 66.0)
+                    lx = vx
+                    ly = vy
                 end
             end
         end
@@ -5220,6 +5243,38 @@ local function OpenStationMap()
             pcall(function() win.ContentBorder:AddChild(mapBg) end)
         end
         win:SetContentForSlot(FName("Content"), mapBg)
+
+        -- Walk up from mapBg to the root of WBP_WindowBase_C, collapsing sibling window chrome
+        -- (titlebar, outer frame, top gold line) and zeroing all padding/margins for true edge-to-edge fullscreen
+        local cur = mapBg
+        for _ = 1, 8 do
+            if not Core.IsValidObj(cur) then break end
+            local curAddr = cur:GetAddress()
+            local sl = cur.Slot
+            if Core.IsValidObj(sl) then
+                if sl.SetPadding then pcall(function() sl:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
+                if sl.SetHorizontalAlignment then pcall(function() sl:SetHorizontalAlignment(0) end) end
+                if sl.SetVerticalAlignment then pcall(function() sl:SetVerticalAlignment(0) end) end
+                if sl.SetAnchors then pcall(function() sl:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } }) end) end
+                if sl.SetOffsets then pcall(function() sl:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
+            end
+            local okP, par = pcall(function() return cur:GetParent() end)
+            if not okP or not Core.IsValidObj(par) then break end
+            if par.SetPadding then pcall(function() par:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
+            if par.SetBrushColor then pcall(function() par:SetBrushColor(COLORS.Transparent) end) end
+            if par.GetChildrenCount and par.GetChildAt then
+                pcall(function()
+                    local cnt = par:GetChildrenCount()
+                    for i = 0, cnt - 1 do
+                        local ch = par:GetChildAt(i)
+                        if Core.IsValidObj(ch) and ch:GetAddress() ~= curAddr then
+                            ch:SetVisibility(1)
+                        end
+                    end
+                end)
+            end
+            cur = par
+        end
     end)
 
     -- Shared base-game overlay palette (matching World Map & Ship/Station Designer)
@@ -5332,45 +5387,33 @@ local function OpenStationMap()
             { key = "X",      label = "Delete Selected" },
         }
         local hintLabelCol = { R = 0.86, G = 0.88, B = 0.92, A = 0.96 }
+        local capOutlineCol = { R = 0.36, G = 0.40, B = 0.48, A = 0.90 }
+        local capFillCol    = { R = 0.06, G = 0.07, B = 0.09, A = 0.94 }
         for rIdx, def in ipairs(keybindDefs) do
             local rowHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
             if Core.IsValidObj(rowHBox) then
                 pcall(function() rowHBox:SetVisibility(3) end) -- HitTestInvisible
-                local keyBadge = Core.CreateUserWidget(PATHS.InputKeyClass, win, pc)
-                if Core.IsValidObj(keyBadge) then
-                    local keyStr = def.key
-                    local function applyKeyText()
-                        pcall(function()
-                            keyBadge:SetVisibility(3)
-                            if Core.IsValidObj(keyBadge.WBP_Text) then
-                                keyBadge.WBP_Text:SetText(Core.MakeText(keyStr))
-                            end
-                        end)
-                    end
-                    applyKeyText()
-                    ExecuteInGameThreadAfterFrames(1, function()
-                        if Core.IsValidObj(keyBadge) then applyKeyText() end
+                local capOuter = CreateRawFast(PATHS.BorderClass, outer)
+                local capInner = CreateRawFast(PATHS.BorderClass, outer)
+                local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+                if Core.IsValidObj(capOuter) and Core.IsValidObj(capInner) and Core.IsValidObj(capTxt) then
+                    pcall(function()
+                        capOuter:SetBrushColor(capOutlineCol)
+                        capOuter:SetPadding({ Left = 1.0, Top = 1.0, Right = 1.0, Bottom = 1.0 })
+                        capOuter:SetVisibility(3)
+                        capInner:SetBrushColor(capFillCol)
+                        capInner:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
+                        capInner:SetVisibility(3)
+                        capTxt:SetVisibility(3)
+                        capTxt:SetSize(10)
+                        capTxt:SetText(Core.MakeText(def.key))
+                        if Core.IsValidObj(capTxt.TextBlock) and capTxt.TextBlock.SetColorAndOpacity then
+                            capTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
+                        end
+                        capInner:AddChild(capTxt)
+                        capOuter:AddChild(capInner)
                     end)
-                else
-                    -- Fallback styled keycap badge if WBP_InputKey_C is unavailable
-                    local capBorder = CreateRawFast(PATHS.BorderClass, outer)
-                    local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
-                    if Core.IsValidObj(capBorder) and Core.IsValidObj(capTxt) then
-                        pcall(function()
-                            capBorder:SetBrushColor({ R = 0.14, G = 0.16, B = 0.20, A = 0.94 })
-                            capBorder:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
-                            capBorder:SetVisibility(3)
-                            capTxt:SetVisibility(3)
-                            capTxt:SetSize(10)
-                            capTxt:SetText(Core.MakeText(def.key))
-                            capBorder:AddChild(capTxt)
-                        end)
-                        keyBadge = capBorder
-                    end
-                end
-
-                if Core.IsValidObj(keyBadge) then
-                    local kSlot = rowHBox:AddChildToHorizontalBox(keyBadge)
+                    local kSlot = rowHBox:AddChildToHorizontalBox(capOuter)
                     if Core.IsValidObj(kSlot) then
                         pcall(function() kSlot:SetVerticalAlignment(2) end)
                     end
@@ -5420,7 +5463,7 @@ local function OpenStationMap()
     local floorOuterVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorInnerVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorSlotsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "↑", 15, 60.0, 30.0, btnBgDark, COLORS.PlayerLocal, function()
+    local floorUpWrap, floorUpBtn, floorUpText = CreateLabeledButton(win, pc, outer, "↑", 15, 60.0, 30.0, btnBgDark, COLORS.PlayerLocal, function()
         ExecuteInGameThreadWithDelay(10, function()
             local total = #CurrentFloors
             if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
@@ -5429,7 +5472,7 @@ local function OpenStationMap()
             end
         end)
     end)
-    local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "↓", 15, 60.0, 30.0, btnBgDark, COLORS.PlayerLocal, function()
+    local floorDownWrap, floorDownBtn, floorDownText = CreateLabeledButton(win, pc, outer, "↓", 15, 60.0, 30.0, btnBgDark, COLORS.PlayerLocal, function()
         ExecuteInGameThreadWithDelay(10, function()
             local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
             if FloorPageTopIdx and FloorPageTopIdx > minTop then
@@ -5594,7 +5637,11 @@ local function OpenStationMap()
         FloorFrame = floorFrame,
         FloorSlotsBox = floorSlotsBox,
         FloorUpBtn = floorUpWrap,
+        FloorUpBtnWidget = floorUpBtn,
+        FloorUpBtnText = floorUpText,
         FloorDownBtn = floorDownWrap,
+        FloorDownBtnWidget = floorDownBtn,
+        FloorDownBtnText = floorDownText,
         ApplyPanel = applyPanel,
         ApplyBtn = applyWrap,
         ApplyBtnWidget = applyBtn,
