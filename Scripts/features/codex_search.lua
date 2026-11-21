@@ -101,6 +101,7 @@ local function ApplyCodexFilter(st, overrideQuery)
 end
 
 local function SyncTabAndFilter(codexContent)
+    if not Core.IsFeatureEnabled("CodexSearch") then return end
     if not Core.IsValidObj(codexContent) then return end
     local st = EnsureCodexSearchBar(codexContent)
     if not st then return end
@@ -232,9 +233,10 @@ end
 Feature.WatchWidgets = {
     -- Watch only WBP_CodexContent_C (always constructed inside WBP_Codex_C) to avoid double-trigger on open
     WBP_CodexContent_C = function(codexContent)
+        if not Core.IsFeatureEnabled("CodexSearch") then return end
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(60, function()
-            if Core.IsValidObj(codexContent) then
+            if Core.IsFeatureEnabled("CodexSearch") and Core.IsValidObj(codexContent) then
                 SyncTabAndFilter(codexContent)
             end
         end)

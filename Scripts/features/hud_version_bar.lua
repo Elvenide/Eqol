@@ -148,13 +148,23 @@ end
 -- Trigger a prompt one-shot scan when major HUD/menu widgets construct
 Feature.WatchWidgets = {
     WBP_CharacterHUD_C = function()
+        if not Core.IsFeatureEnabled("HudVersionBar") then return end
         if not Core.IsValidObj(TargetTextBlock) then
-            ExecuteInGameThreadWithDelay(200, TryHookVersionTextBlock)
+            ExecuteInGameThreadWithDelay(200, function()
+                if Core.IsFeatureEnabled("HudVersionBar") then
+                    TryHookVersionTextBlock()
+                end
+            end)
         end
     end,
     WBP_MainMenu_C = function()
+        if not Core.IsFeatureEnabled("HudVersionBar") then return end
         if not Core.IsValidObj(TargetTextBlock) then
-            ExecuteInGameThreadWithDelay(200, TryHookVersionTextBlock)
+            ExecuteInGameThreadWithDelay(200, function()
+                if Core.IsFeatureEnabled("HudVersionBar") then
+                    TryHookVersionTextBlock()
+                end
+            end)
         end
     end,
 }

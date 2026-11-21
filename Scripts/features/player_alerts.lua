@@ -183,14 +183,22 @@ function Feature.RegisterHooks()
     Core.TryRegisterHook(
         "PC_AddRemotePlayer_Alert",
         "/Script/MainSequence.DMSPlayerController:Client_AddRemotePlayer",
-        function()
+        function(Context)
+            local pc = Context and Context:get() or nil
+            if not Core.IsValidObj(pc) then return end
+            local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
+            if not (okL and isLocal) then return end
             ExecuteInGameThreadWithDelay(250, function() PollPlayerPresence(true) end)
         end
     )
     Core.TryRegisterHook(
         "PC_RemovePlayer_Alert",
         "/Script/MainSequence.DMSPlayerController:Client_RemovePlayer",
-        function()
+        function(Context)
+            local pc = Context and Context:get() or nil
+            if not Core.IsValidObj(pc) then return end
+            local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
+            if not (okL and isLocal) then return end
             ExecuteInGameThreadWithDelay(250, function() PollPlayerPresence(true) end)
         end
     )

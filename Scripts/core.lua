@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.31"
+Core.VERSION = "0.1.32"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -435,17 +435,25 @@ function Core.GetWidgetOuter(parentWidget)
     return parentWidget
 end
 
+local VerifiedHooksThisMap = {} -- hookKey -> true (cleared on DispatchMapLoad for /Game/ Blueprint hooks)
+
 function Core.TryRegisterHook(hookKey, ufuncPath, callbackFn)
-    if RegisteredHookAddresses[hookKey] then
+    local isBP = (type(ufuncPath) == "string" and ufuncPath:sub(1, 6) == "/Game/")
+    if RegisteredHookAddresses[hookKey] and (not isBP or VerifiedHooksThisMap[hookKey]) then
         return true
     end
     local ufunc = StaticFindObject(ufuncPath)
     if not Core.IsValidObj(ufunc) then return false end
 
     local addr = ufunc:GetAddress()
+    if RegisteredHookAddresses[hookKey] == addr then
+        VerifiedHooksThisMap[hookKey] = true
+        return true
+    end
     local ok = pcall(RegisterHook, ufuncPath, callbackFn)
     if ok then
         RegisteredHookAddresses[hookKey] = addr
+        VerifiedHooksThisMap[hookKey] = true
         return true
     end
     return false
@@ -905,6 +913,7 @@ function Core.DispatchClientRestart()
 end
 
 function Core.DispatchMapLoad()
+    VerifiedHooksThisMap = {}
     Core.PruneAllCaches()
     Core.EnsureAllHooks()
     for _, feature in ipairs(Features) do
@@ -1171,8 +1180,19 @@ end
 local SettingsMenuCallbacks = {}
 
 function Core.OnSettingsMenuReady(cb)
-    if type(cb) == "function" then
-        table.insert(SettingsMenuCallbacks, cb)
+    if type(cb) ~= "function" then return end
+    table.insert(SettingsMenuCallbacks, cb)
+    -- Replay for any WBP_SettingsMenu_C already tracked before this callback registered
+    -- (prevents registration-order races on UE4SS hot-reload or pre-existing Settings menus).
+    local existingMenus = TrackedWidgetsByClass["WBP_SettingsMenu_C"]
+    if existingMenus then
+        for addr, m in pairs(existingMenus) do
+            if Core.IsValidObj(m) then
+                pcall(cb, m)
+            else
+                existingMenus[addr] = nil
+            end
+        end
     end
 end
 

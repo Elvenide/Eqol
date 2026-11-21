@@ -10,6 +10,7 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 
 ## Features
 
+- **[In-Game Eqol Settings Tab](docs/eqol-settings.md)** — Native **Eqol** tab inside **Settings** to toggle individual Eqol features on or off live without restarting.
 - **[Power Overview Hotkey & Summary Bars](docs/power-overview.md)** — Open the Power Overview from anywhere inside a space station (`P`, rebindable in Settings → Controls, with top-right HUD indicator) and view Production, Consumption, and Power Satisfaction progress bars at a glance.
 - **[Full Station Map UI](docs/station-map.md)** — Interactive floor-by-floor 2D station map (`N`, rebindable in Settings → Controls, with top-right HUD indicator) featuring pan/zoom, walls, ports, hover tooltips, drag box-select, rotate (`R`), delete (`X`), full machine config copy-paste (including recipes, filters, priorities, and disabled ports), and ghost staging (`Apply`/`Discard`).
 - **[Logistics UI Screen](docs/logistics.md)** — Icon-heavy station storage overview and live machine production/consumption rate monitor with bottleneck indicators (`L`, rebindable in Settings → Controls, with top-right HUD indicator).

@@ -518,9 +518,14 @@ local DesignerWatcherActive = false
 
 local function EnsureDesignerWatcher()
     if DesignerWatcherActive then return end
+    if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
     DesignerWatcherActive = true
 
     local function WatcherTick()
+        if not Core.IsFeatureEnabled("DesignerPowerStats") then
+            DesignerWatcherActive = false
+            return
+        end
         local anyVisible = false
         for addr, st in pairs(InjectedDesigners) do
             if not Core.IsValidObj(st.Hud) then
@@ -941,7 +946,7 @@ local function CreateDesignerStatColumn(hud, pc, outer, statsHBox, refColVBox, r
     CopyTextStyle(lblTxt, refLabelText, labelSize or 15, accentCol)
     CopyTextStyle(valTxt, refValueText, 18, COLORS.WhiteValue)
 
-    return valTxt, lblTxt
+    return valTxt, lblTxt, colVBox
 end
 
 local function FindStatsContainerPanel(hud)
@@ -975,6 +980,7 @@ local function FindStatsContainerPanel(hud)
 end
 
 RefreshDesignerPowerStats = function(hud)
+    if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
     if not Core.IsValidObj(hud) then return end
     local addr = hud:GetAddress()
     local st = InjectedDesigners[addr]
@@ -1045,13 +1051,13 @@ RefreshDesignerPowerStats = function(hud)
             end
         end)
 
-        local pwrTxt, pwrLbl = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power", nextCol, labelColor, labelSize)
+        local pwrTxt, pwrLbl, colRoot = CreateDesignerStatColumn(hud, pc, outer, statsPanel, refCol, refLabelText, hullText, "Power", nextCol, labelColor, labelSize)
         if not Core.IsValidObj(pwrTxt) then
             Core.Log("[DesignerStats Warn] CreateDesignerStatColumn returned nil")
             return
         end
 
-        st = { Hud = hud, PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
+        st = { Hud = hud, Root = colRoot, PowerText = pwrTxt, PowerLabel = pwrLbl, LabelColor = labelColor }
         InjectedDesigners[addr] = st
         EnsureDesignerWatcher()
     end
@@ -1079,11 +1085,61 @@ end
 -- Feature Lifecycle
 --------------------------------------------------------------------------------
 
+-- Returns true if the hooked Designer / BPC_Designer_C instance belongs to the local player
+-- (or cannot be attributed to a non-local remote controller on a listen-server host).
+local function IsDesignerContextLocal(ctxObj)
+    local localPC = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(localPC) then return false end
+    if not Core.IsValidObj(ctxObj) then return true end
+
+    local ownerPC = nil
+    pcall(function()
+        if ctxObj.GetOwner then
+            local o = ctxObj:GetOwner()
+            if Core.IsValidObj(o) then
+                if o.IsLocalPlayerController then
+                    ownerPC = o
+                elseif o.GetController then
+                    ownerPC = o:GetController()
+                elseif o.Controller then
+                    ownerPC = o.Controller
+                end
+            end
+        end
+        if not Core.IsValidObj(ownerPC) and ctxObj.OwningPlayerController then
+            ownerPC = ctxObj.OwningPlayerController
+        end
+        if not Core.IsValidObj(ownerPC) and ctxObj.PlayerController then
+            ownerPC = ctxObj.PlayerController
+        end
+        if not Core.IsValidObj(ownerPC) and ctxObj.GetOwningPlayer then
+            ownerPC = ctxObj:GetOwningPlayer()
+        end
+    end)
+
+    if Core.IsValidObj(ownerPC) then
+        local okL, isLocal = pcall(function() return ownerPC:IsLocalPlayerController() end)
+        if okL then
+            return isLocal == true
+        end
+        return ownerPC:GetAddress() == localPC:GetAddress()
+    end
+
+    -- Fallback: check if any tracked local Designer HUD is actually visible
+    for _, st in pairs(InjectedDesigners) do
+        if st and Core.IsValidObj(st.Hud) and IsHudVisible(st.Hud) then
+            return true
+        end
+    end
+    return false
+end
+
 Feature.WatchWidgets = {
     WBP_DesignerHUD_C = function(hud)
+        if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(150, function()
-            if Core.IsValidObj(hud) and not InjectedDesigners[hud:GetAddress()] and IsHudVisible(hud) then
+            if Core.IsFeatureEnabled("DesignerPowerStats") and Core.IsValidObj(hud) and not InjectedDesigners[hud:GetAddress()] and IsHudVisible(hud) then
                 LastTriggerSource = "WatchWidget_WBP_DesignerHUD_C"
                 RefreshDesignerPowerStats(hud)
             end
@@ -1096,6 +1152,7 @@ function Feature.RegisterHooks()
         "DesignerHUD_Refresh",
         PATHS.DesignerHUDClass .. ":Refresh",
         function(Context)
+            if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
             local hud = Context:get()
             if Core.IsValidObj(hud) then
                 ScheduleAllDesignersRefresh("HUD_Refresh", hud)
@@ -1107,6 +1164,7 @@ function Feature.RegisterHooks()
         "DesignerHUD_RefreshStats",
         PATHS.DesignerHUDClass .. ":RefreshStats",
         function(Context)
+            if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
             local hud = Context:get()
             if Core.IsValidObj(hud) then
                 ScheduleAllDesignersRefresh("RefreshStats", hud)
@@ -1117,7 +1175,10 @@ function Feature.RegisterHooks()
     Core.TryRegisterHook(
         "Designer_RefreshBlueprintStats",
         "/Script/MainSequence.Designer:RefreshBlueprintStats",
-        function()
+        function(Context)
+            if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
+            local ctxObj = Context and Context:get() or nil
+            if not IsDesignerContextLocal(ctxObj) then return end
             ScheduleAllDesignersRefresh("Designer_RefreshBlueprintStats")
         end
     )
@@ -1125,7 +1186,10 @@ function Feature.RegisterHooks()
     Core.TryRegisterHook(
         "BPCDesigner_Confirm",
         PATHS.BPCDesignerClass .. ":Confirm",
-        function()
+        function(Context)
+            if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
+            local ctxObj = Context and Context:get() or nil
+            if not IsDesignerContextLocal(ctxObj) then return end
             ActorBlockInfoCache = {}
             for _, st in pairs(InjectedDesigners) do
                 st.ResetBaseline = true
@@ -1140,7 +1204,10 @@ function Feature.RegisterHooks()
     Core.TryRegisterHook(
         "BPCDesigner_RemoveBlock",
         PATHS.BPCDesignerClass .. ":RemoveBlock",
-        function()
+        function(Context)
+            if not Core.IsFeatureEnabled("DesignerPowerStats") then return end
+            local ctxObj = Context and Context:get() or nil
+            if not IsDesignerContextLocal(ctxObj) then return end
             ScheduleAllDesignersRefresh("RemoveBlock")
         end
     )

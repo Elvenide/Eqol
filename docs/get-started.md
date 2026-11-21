@@ -40,6 +40,7 @@
 
 3. **Launch Main Sequence**:
    - Eqol will automatically create/update `Eqol\config.json` with default settings on first launch.
+   - Open **Settings → Eqol** at any time to toggle individual features on or off, or **Settings → Controls** to rebind Eqol hotkeys.
 
 ## Uninstalling
 

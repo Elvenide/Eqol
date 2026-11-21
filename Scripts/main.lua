@@ -41,7 +41,11 @@ Core.RegisterFeature(require("features.eqol_settings"))
 Core.InitAll()
 Core.EnsureAllHooks()
 
-pcall(RegisterHook, "/Script/Engine.PlayerController:ClientRestart", function()
+pcall(RegisterHook, "/Script/Engine.PlayerController:ClientRestart", function(Context)
+    local pc = Context and Context:get() or nil
+    if not Core.IsValidObj(pc) then return end
+    local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
+    if not (okL and isLocal) then return end
     Core.DispatchClientRestart()
 end)
 

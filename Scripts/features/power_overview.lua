@@ -166,7 +166,7 @@ local function SyncIMCSystemBinding(forceRebuild)
     local keyP = { KeyName = FName("P") }
     local changed = false
 
-    if Core.Config.PowerOverviewKey == "P" then
+    if Core.IsFeatureEnabled("PowerOverview") and Core.Config.PowerOverviewKey == "P" then
         if not UnmappedPFromSystem or forceRebuild then
             local wasUnmapped = UnmappedPFromSystem
             local okUnmap = pcall(function() imcSystem:UnmapKey(iaEscape, keyP) end)
@@ -391,6 +391,10 @@ local function EnsureOverviewBars(overviewWidget)
     end
 
     state = {
+        Overview = overviewWidget,
+        Bar1Box = bar1Box,
+        Bar2Box = bar2Box,
+        SatVBox = satVBox,
         Bar1 = bar1,
         Bar2 = bar2,
         Bar3 = bar3,
@@ -400,11 +404,25 @@ local function EnsureOverviewBars(overviewWidget)
     return state
 end
 
+local function SetOverviewBarsVisible(state, visible)
+    if not state then return end
+    local vis = visible and 0 or 1
+    if Core.IsValidObj(state.Bar1Box) then pcall(function() state.Bar1Box:SetVisibility(vis) end) end
+    if Core.IsValidObj(state.Bar2Box) then pcall(function() state.Bar2Box:SetVisibility(vis) end) end
+    if Core.IsValidObj(state.SatVBox) then pcall(function() state.SatVBox:SetVisibility(vis) end) end
+end
+
 local function UpdateOverviewBars(overviewWidget)
     if not Core.IsValidObj(overviewWidget) then return end
+    if not Core.IsFeatureEnabled("PowerOverview") then
+        local existing = InjectedOverviews[overviewWidget:GetAddress()]
+        if existing then SetOverviewBarsVisible(existing, false) end
+        return
+    end
 
     local state = EnsureOverviewBars(overviewWidget)
     if not state then return end
+    SetOverviewBarsVisible(state, true)
 
     local frame = overviewWidget.Frame
     if not Core.IsValidObj(frame) then return end
@@ -523,6 +541,18 @@ function Feature.RegisterHooks()
         AllHooksLogged = true
         SyncIMCSystemBinding(false)
         Core.Log("All PowerOverview Blueprint hooks registered")
+    end
+end
+
+function Feature.OnToggle(enabled)
+    SyncIMCSystemBinding(true)
+    for _, st in pairs(InjectedOverviews) do
+        if st then
+            SetOverviewBarsVisible(st, enabled)
+            if enabled and Core.IsValidObj(st.Overview) then
+                UpdateOverviewBars(st.Overview)
+            end
+        end
     end
 end
 

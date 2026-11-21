@@ -739,6 +739,7 @@ local function EnsureHudHotbarTracked(hud)
 end
 
 local function TryAttachExistingHuds()
+    if not Core.IsFeatureEnabled("HotbarBuildCounts") then return end
     local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
     if okHuds and huds then
         for _, hud in ipairs(huds) do
@@ -751,8 +752,9 @@ end
 
 Feature.WatchWidgets = {
     WBP_CharacterHUD_C = function(hud)
+        if not Core.IsFeatureEnabled("HotbarBuildCounts") then return end
         ExecuteInGameThreadWithDelay(250, function()
-            if Core.IsValidObj(hud) then
+            if Core.IsFeatureEnabled("HotbarBuildCounts") and Core.IsValidObj(hud) then
                 EnsureHudHotbarTracked(hud)
             end
         end)
@@ -760,6 +762,7 @@ Feature.WatchWidgets = {
 }
 
 function Feature.OnClientRestart()
+    if not Core.IsFeatureEnabled("HotbarBuildCounts") then return end
     ExecuteInGameThreadWithDelay(600, TryAttachExistingHuds)
 end
 
