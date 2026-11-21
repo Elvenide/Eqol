@@ -62,6 +62,12 @@ local function CollectReflectedProps(uobj)
     return out
 end
 
+local function SafeIsA(obj, cls)
+    if not (Core.IsValidObj(obj) and Core.IsValidObj(cls)) then return false end
+    local ok, res = pcall(function() return obj:IsA(cls) end)
+    return ok and res == true
+end
+
 local function FindSettingsSwitcherAndTabBar(menu)
     local switcherCls = Core.FindOrLoadClass(PATHS.WidgetSwitcherCls)
     local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetCls)
@@ -77,7 +83,7 @@ local function FindSettingsSwitcherAndTabBar(menu)
         for _ = 1, 5 do
             local okP, p = pcall(function() return cur:GetParent() end)
             if not okP or not Core.IsValidObj(p) then break end
-            if Core.IsValidObj(switcherCls) and p:IsA(switcherCls) then
+            if SafeIsA(p, switcherCls) then
                 switcher = p
                 break
             end
@@ -96,11 +102,11 @@ local function FindSettingsSwitcherAndTabBar(menu)
             if #propSummary < 24 then
                 propSummary[#propSummary + 1] = entry.name .. ":" .. cn
             end
-            if not Core.IsValidObj(switcher) and Core.IsValidObj(switcherCls) and v:IsA(switcherCls) then
+            if not Core.IsValidObj(switcher) and SafeIsA(v, switcherCls) then
                 switcher = v
             end
             local low = entry.name:lower()
-            if not Core.IsValidObj(refTabBtn) and Core.IsValidObj(btnCls) and v:IsA(btnCls) then
+            if not Core.IsValidObj(refTabBtn) and SafeIsA(v, btnCls) then
                 if low:find("control", 1, true) or low:find("audio", 1, true)
                     or low:find("graphic", 1, true) or low:find("video", 1, true)
                     or low:find("game", 1, true) or low:find("tab", 1, true)
@@ -113,16 +119,16 @@ local function FindSettingsSwitcherAndTabBar(menu)
 
     if Core.IsValidObj(refTabBtn) and refTabBtn.GetParent then
         local okP, p = pcall(function() return refTabBtn:GetParent() end)
-        if okP and Core.IsValidObj(p) and Core.IsValidObj(panelCls) and p:IsA(panelCls) then
+        if okP and SafeIsA(p, panelCls) then
             tabBar = p
         end
     end
 
-    -- Fallback: find any PanelWidget on menu that holds 2..7 WBP_Button_C children (the tab strip)
+    -- Fallback: find any PanelWidget on menu that holds 2..8 WBP_Button_C children (the tab strip)
     if not Core.IsValidObj(tabBar) then
         for _, entry in ipairs(props) do
             local v = entry.val
-            if Core.IsValidObj(v) and Core.IsValidObj(panelCls) and v:IsA(panelCls) and v.GetAllChildren then
+            if SafeIsA(v, panelCls) and v.GetAllChildren then
                 local okCh, ch = pcall(function() return v:GetAllChildren() end)
                 if okCh and ch then
                     local btns = {}
@@ -130,7 +136,7 @@ local function FindSettingsSwitcherAndTabBar(menu)
                     if okLen and type(len) == "number" and len >= 2 and len <= 8 then
                         for i = 1, len do
                             local cw = Core.UnwrapArrayElem(ch[i])
-                            if Core.IsValidObj(cw) and Core.IsValidObj(btnCls) and cw:IsA(btnCls) then
+                            if SafeIsA(cw, btnCls) then
                                 btns[#btns + 1] = cw
                             end
                         end
@@ -493,13 +499,6 @@ function Feature.RegisterHooks()
                 end)
             end
         )
-    end
-
-    local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
-    if okMenus and menus then
-        for _, m in ipairs(menus) do
-            if Core.IsValidObj(m) then EnsureEqolSettingsTab(m) end
-        end
     end
 end
 
