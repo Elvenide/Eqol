@@ -402,17 +402,18 @@ local MMBIconSearched = false
 local TELEM_RED    = { R = 0.6105, G = 0.0000, B = 0.0612, A = 1.00 } -- #cd0046 (matches Station Map missing materials)
 local TELEM_ORANGE = { R = 0.9200, G = 0.4500, B = 0.0400, A = 0.96 }
 local TELEM_GREEN  = { R = 0.1400, G = 0.7200, B = 0.2400, A = 0.96 }
-local TELEM_GOLD   = { R = 0.9400, G = 0.6600, B = 0.1000, A = 1.00 }
+local TELEM_GOLD   = { R = 0.8800, G = 0.3600, B = 0.0150, A = 1.00 } -- Matches vanilla Main Sequence HUD amber-gold
 local TELEM_BOOST  = { R = 0.2000, G = 0.8400, B = 1.0000, A = 1.00 }
 local TELEM_DIM    = { R = 0.2600, G = 0.2800, B = 0.3200, A = 0.85 }
 local TELEM_EMPTY  = { R = 0.0300, G = 0.0350, B = 0.0450, A = 0.78 }
-local TELEM_PANEL  = { R = 0.0150, G = 0.0180, B = 0.0240, A = 0.74 }
+local TELEM_PANEL  = { R = 0.0150, G = 0.0180, B = 0.0240, A = 0.76 }
 local TELEM_WHITE  = { R = 0.9400, G = 0.9500, B = 0.9800, A = 1.00 }
 local TELEM_MUTED  = { R = 0.6800, G = 0.7200, B = 0.7800, A = 0.90 }
 
-local BOOST_BAR_H = 134.0
-local WING_CARD_W = 188.0
+local BOOST_BAR_H = 132.0
+local WING_CARD_W = 192.0
 local WING_CARD_H = 176.0
+local WING_CHAMFER = 14.0
 
 local function ReadNumericOrFixed(val)
     if type(val) == "number" then return val end
@@ -665,26 +666,106 @@ local function EnsureShipLegend(pc)
         end)
     end
 
-    -- Helper for tiny gold hairline accent bars
-    local function makeHairline(col, hPx)
+    -- Helper to build a chamfered wing card (192x176) with 45-deg angled corners on chamferSide ("right" or "left")
+    -- and identical 2px TELEM_GOLD top/bottom borders + angled corner bevels matching the vanilla HUD brackets.
+    local function createChamferedWingCard(chamferSide)
         local sb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-        local bdr = Core.CreateRawWidget("/Script/UMG.Border", outer)
-        if Core.IsValidObj(sb) and Core.IsValidObj(bdr) then
+        local ov = Core.CreateRawWidget("/Script/UMG.Overlay", outer)
+        local bgCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
+        if not (Core.IsValidObj(sb) and Core.IsValidObj(ov) and Core.IsValidObj(bgCanvas)) then
+            return nil, nil
+        end
+
+        local W = WING_CARD_W
+        local H = WING_CARD_H
+        local C = WING_CHAMFER
+        local isRight = (chamferSide == "right")
+
+        local function addRect(x, y, w, h, col, z, angleDeg)
+            local b = Core.CreateRawWidget("/Script/UMG.Border", outer)
+            if not Core.IsValidObj(b) then return end
             pcall(function()
-                sb:SetHeightOverride(hPx or 2.0)
-                sb:SetVisibility(3)
-                bdr:SetBrushColor(col)
-                bdr:SetVisibility(3)
-                sb:AddChild(bdr)
+                b:SetBrushColor(col)
+                b:SetVisibility(3)
+                if angleDeg and angleDeg ~= 0 then
+                    b:SetRenderTransformAngle(angleDeg)
+                end
+                local sl = bgCanvas:AddChildToCanvas(b)
+                if Core.IsValidObj(sl) then
+                    sl:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.0, Y = 0.0 } })
+                    sl:SetAlignment({ X = 0.0, Y = 0.0 })
+                    sl:SetPosition({ X = x, Y = y })
+                    sl:SetSize({ X = w, Y = h })
+                    sl:SetZOrder(z or 0)
+                end
             end)
         end
-        return sb
+
+        pcall(function()
+            sb:SetWidthOverride(W)
+            sb:SetHeightOverride(H)
+            sb:SetVisibility(1) -- Collapsed until 3rd-person active
+            ov:SetVisibility(3)
+            bgCanvas:SetVisibility(3)
+            bgCanvas:SetClipping(1)
+        end)
+
+        -- 1. Chamfered dark background fill: middle full-width body + 1px stair-stepped 45-deg top/bottom chamfers
+        addRect(0.0, C, W, H - 2.0 * C, TELEM_PANEL, 0)
+        for step = 0, math.floor(C) - 1 do
+            local inset = C - step
+            local rowW = W - inset
+            local rowX = isRight and 0.0 or inset
+            addRect(rowX, step, rowW, 1.0, TELEM_PANEL, 0)
+            addRect(rowX, H - 1.0 - step, rowW, 1.0, TELEM_PANEL, 0)
+        end
+
+        -- 2. Identical 2px TELEM_GOLD top & bottom borders + matching 45-deg diagonal corner bevels
+        local lineW = W - C
+        local lineX = isRight and 0.0 or C
+        addRect(lineX, 0.0, lineW, 2.0, TELEM_GOLD, 2)
+        addRect(lineX, H - 2.0, lineW, 2.0, TELEM_GOLD, 2)
+
+        local diagLen = math.sqrt(C * C * 2.0) + 1.0
+        local function addDiag(cx, cy, angleDeg)
+            local b = Core.CreateRawWidget("/Script/UMG.Border", outer)
+            if not Core.IsValidObj(b) then return end
+            pcall(function()
+                b:SetBrushColor(TELEM_GOLD)
+                b:SetVisibility(3)
+                b:SetRenderTransformAngle(angleDeg)
+                local sl = bgCanvas:AddChildToCanvas(b)
+                if Core.IsValidObj(sl) then
+                    sl:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.0, Y = 0.0 } })
+                    sl:SetAlignment({ X = 0.5, Y = 0.5 })
+                    sl:SetPosition({ X = cx, Y = cy })
+                    sl:SetSize({ X = diagLen, Y = 2.0 })
+                    sl:SetZOrder(3)
+                end
+            end)
+        end
+
+        if isRight then
+            addDiag(W - C * 0.5, C * 0.5, 45.0)
+            addDiag(W - C * 0.5, H - C * 0.5, -45.0)
+        else
+            addDiag(C * 0.5, C * 0.5, -45.0)
+            addDiag(C * 0.5, H - C * 0.5, 45.0)
+        end
+
+        local bgSlot = ov:AddChildToOverlay(bgCanvas)
+        if Core.IsValidObj(bgSlot) then
+            pcall(function()
+                bgSlot:SetHorizontalAlignment(0)
+                bgSlot:SetVerticalAlignment(0)
+            end)
+        end
+        pcall(function() sb:AddChild(ov) end)
+        return sb, ov
     end
 
-    -- Left-Center 3rd-Person Telemetry Card (unified 188x176 card beside left-center HUD bracket)
-    local leftWing = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-    local leftCardBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
-    local leftOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+    -- Left-Center 3rd-Person Telemetry Card (unified 192x176 card with right corners chamfered)
+    local leftWing, leftOv = createChamferedWingCard("right")
     local leftInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
     local boostFillSlot = nil
     local boostFillBorder = nil
@@ -693,23 +774,8 @@ local function EnsureShipLegend(pc)
     local fuelUseTxt = nil
     local fuelAvailTxt = nil
 
-    if Core.IsValidObj(leftWing) and Core.IsValidObj(leftCardBg) and Core.IsValidObj(leftOuterV) and Core.IsValidObj(leftInnerH) then
-        pcall(function()
-            leftWing:SetWidthOverride(WING_CARD_W)
-            leftWing:SetHeightOverride(WING_CARD_H)
-            leftWing:SetVisibility(1) -- Collapsed until 3rd-person active
-            leftCardBg:SetBrushColor(TELEM_PANEL)
-            leftCardBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-            leftCardBg:SetVisibility(3)
-            leftOuterV:SetVisibility(3)
-            leftInnerH:SetVisibility(3)
-        end)
-
-        local topLine = makeHairline(TELEM_GOLD, 2.0)
-        if Core.IsValidObj(topLine) then
-            local tlS = leftOuterV:AddChildToVerticalBox(topLine)
-            if Core.IsValidObj(tlS) then pcall(function() tlS:SetHorizontalAlignment(0) end) end
-        end
+    if Core.IsValidObj(leftWing) and Core.IsValidObj(leftOv) and Core.IsValidObj(leftInnerH) then
+        pcall(function() leftInnerH:SetVisibility(3) end)
 
         -- Left column inside card: Vertical smooth boost progress bar + BOOST micro-label
         local boostColVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
@@ -777,7 +843,7 @@ local function EnsureShipLegend(pc)
                 pcall(function()
                     speedTxt:SetVisibility(3)
                     speedTxt:SetSize(15)
-                    speedTxt:SetText(Core.MakeText("0 m/s"))
+                    speedTxt:SetText(Core.MakeText("— 0 m/s"))
                 end)
                 SetWBPTextCol(speedTxt, TELEM_GOLD)
                 local spS = infoInnerV:AddChildToVerticalBox(speedTxt)
@@ -828,26 +894,14 @@ local function EnsureShipLegend(pc)
             end
         end
 
-        local lBodySlot = leftOuterV:AddChildToVerticalBox(leftInnerH)
+        local lBodySlot = leftOv:AddChildToOverlay(leftInnerH)
         if Core.IsValidObj(lBodySlot) then
             pcall(function()
-                lBodySlot:SetSize({ Value = 1.0, SizeRule = 1 })
                 lBodySlot:SetHorizontalAlignment(0)
                 lBodySlot:SetVerticalAlignment(0)
-                lBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 10.0, Bottom = 10.0 })
+                lBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 14.0, Bottom = 10.0 })
             end)
         end
-
-        local botLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
-        if Core.IsValidObj(botLine) then
-            local blS = leftOuterV:AddChildToVerticalBox(botLine)
-            if Core.IsValidObj(blS) then pcall(function() blS:SetHorizontalAlignment(0) end) end
-        end
-
-        pcall(function()
-            leftCardBg:AddChild(leftOuterV)
-            leftWing:AddChild(leftCardBg)
-        end)
 
         local lwSlot = rootOverlay:AddChildToOverlay(leftWing)
         if Core.IsValidObj(lwSlot) then
@@ -859,32 +913,15 @@ local function EnsureShipLegend(pc)
         end
     end
 
-    -- Right-Center 3rd-Person Hull Card (identical unified 188x176 card beside right-center HUD bracket)
-    local rightWing = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-    local rightCardBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
-    local rightOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+    -- Right-Center 3rd-Person Hull Card (identical unified 192x176 card with left corners chamfered)
+    local rightWing, rightOv = createChamferedWingCard("left")
     local rightInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
     local hullValTxt = nil
     local hullTitleTxt = nil
     local hullSegs = {} -- [1]=bottom, [2]=middle, [3]=top
 
-    if Core.IsValidObj(rightWing) and Core.IsValidObj(rightCardBg) and Core.IsValidObj(rightOuterV) and Core.IsValidObj(rightInnerH) then
-        pcall(function()
-            rightWing:SetWidthOverride(WING_CARD_W)
-            rightWing:SetHeightOverride(WING_CARD_H)
-            rightWing:SetVisibility(1) -- Collapsed until 3rd-person active
-            rightCardBg:SetBrushColor(TELEM_PANEL)
-            rightCardBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-            rightCardBg:SetVisibility(3)
-            rightOuterV:SetVisibility(3)
-            rightInnerH:SetVisibility(3)
-        end)
-
-        local hTopLine = makeHairline(TELEM_GOLD, 2.0)
-        if Core.IsValidObj(hTopLine) then
-            local htS = rightOuterV:AddChildToVerticalBox(hTopLine)
-            if Core.IsValidObj(htS) then pcall(function() htS:SetHorizontalAlignment(0) end) end
-        end
+    if Core.IsValidObj(rightWing) and Core.IsValidObj(rightOv) and Core.IsValidObj(rightInnerH) then
+        pcall(function() rightInnerH:SetVisibility(3) end)
 
         -- Left column inside card: HULL label & numeric integrity readout
         local hullInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
@@ -960,26 +997,14 @@ local function EnsureShipLegend(pc)
             if Core.IsValidObj(svSlot) then pcall(function() svSlot:SetVerticalAlignment(2) end) end
         end
 
-        local rBodySlot = rightOuterV:AddChildToVerticalBox(rightInnerH)
+        local rBodySlot = rightOv:AddChildToOverlay(rightInnerH)
         if Core.IsValidObj(rBodySlot) then
             pcall(function()
-                rBodySlot:SetSize({ Value = 1.0, SizeRule = 1 })
                 rBodySlot:SetHorizontalAlignment(0)
                 rBodySlot:SetVerticalAlignment(0)
-                rBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 10.0, Bottom = 10.0 })
+                rBodySlot:SetPadding({ Left = 14.0, Top = 10.0, Right = 10.0, Bottom = 10.0 })
             end)
         end
-
-        local hBotLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
-        if Core.IsValidObj(hBotLine) then
-            local hbS = rightOuterV:AddChildToVerticalBox(hBotLine)
-            if Core.IsValidObj(hbS) then pcall(function() hbS:SetHorizontalAlignment(0) end) end
-        end
-
-        pcall(function()
-            rightCardBg:AddChild(rightOuterV)
-            rightWing:AddChild(rightCardBg)
-        end)
 
         local rwSlot = rootOverlay:AddChildToOverlay(rightWing)
         if Core.IsValidObj(rwSlot) then
@@ -1066,13 +1091,38 @@ local function UpdateShipLegend()
     end)
 end
 
+local TelemetryTrack = {
+    ShipAddr = nil,
+    SeenMaxBoost = 180.0,
+    LastLocX = nil,
+    LastLocY = nil,
+    LastLocZ = nil,
+    LastLocClock = nil,
+    LastFuel = nil,
+    LastFuelClock = nil,
+    SmoothedFuelRate = nil,
+}
+
 local function UpdateShipTelemetry(shipActor, shipObj, pc)
     if not (IsThirdPerson and LegendUI and Core.IsValidObj(LegendUI.LeftWing) and Core.IsValidObj(shipObj)) then
         return
     end
     local ui = LegendUI
+    local now = os.clock()
+    local shipAddr = shipObj:GetAddress()
+    if TelemetryTrack.ShipAddr ~= shipAddr then
+        TelemetryTrack.ShipAddr = shipAddr
+        TelemetryTrack.SeenMaxBoost = 180.0
+        TelemetryTrack.LastLocX = nil
+        TelemetryTrack.LastLocY = nil
+        TelemetryTrack.LastLocZ = nil
+        TelemetryTrack.LastLocClock = nil
+        TelemetryTrack.LastFuel = nil
+        TelemetryTrack.LastFuelClock = nil
+        TelemetryTrack.SmoothedFuelRate = nil
+    end
 
-    -- 1. Boost charge & active boosting state
+    -- 1. Boost charge & active boosting state (BoostCharge counts down from ~180 to 0)
     local boostCharge = nil
     local maxBoost = nil
     local isBoosting = IsShipActivelyBoosting(shipObj, pc)
@@ -1080,11 +1130,13 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         boostCharge = ReadNumericOrFixed(shipObj.BoostCharge)
         maxBoost = ReadNumericOrFixed(shipObj.MaxBoostCharge)
     end)
+    if boostCharge and boostCharge > TelemetryTrack.SeenMaxBoost then
+        TelemetryTrack.SeenMaxBoost = boostCharge
+    end
+    local effMaxBoost = (maxBoost and maxBoost > 0.001) and maxBoost or TelemetryTrack.SeenMaxBoost
     local boostPct = 0.0
-    if boostCharge and maxBoost and maxBoost > 0.001 then
-        boostPct = Core.Clamp(boostCharge / maxBoost, 0.0, 1.0)
-    elseif boostCharge then
-        boostPct = Core.Clamp(boostCharge, 0.0, 1.0)
+    if boostCharge and effMaxBoost and effMaxBoost > 0.001 then
+        boostPct = Core.Clamp(boostCharge / effMaxBoost, 0.0, 1.0)
     end
     if Core.IsValidObj(ui.BoostFillSlot) then
         pcall(function() ui.BoostFillSlot:SetSize({ X = 0.0, Y = math.max(0.0, BOOST_BAR_H * boostPct) }) end)
@@ -1097,15 +1149,23 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.BoostLabelTxt, isBoosting and TELEM_BOOST or TELEM_MUTED)
     end
 
-    -- 2. Live speed & movement direction (forward / reverse / stopped)
+    -- 2. Live speed & movement direction (shipObj:GetVelocity() -> shipObj.Velocity -> actor location delta fallback)
     local speedMs = 0.0
     local forwardDot = 0.0
     local gotVel = false
     pcall(function()
-        if shipObj.Velocity then
-            local vx = ReadNumericOrFixed(shipObj.Velocity.X)
-            local vy = ReadNumericOrFixed(shipObj.Velocity.Y)
-            local vz = ReadNumericOrFixed(shipObj.Velocity.Z)
+        local vObj = nil
+        if shipObj.GetVelocity then
+            local okV, v = pcall(function() return shipObj:GetVelocity() end)
+            if okV and v ~= nil then vObj = v end
+        end
+        if vObj == nil and shipObj.Velocity ~= nil then
+            vObj = shipObj.Velocity
+        end
+        if vObj ~= nil then
+            local vx = ReadNumericOrFixed(vObj.X)
+            local vy = ReadNumericOrFixed(vObj.Y)
+            local vz = ReadNumericOrFixed(vObj.Z)
             if vx and vy and vz then
                 speedMs = math.sqrt(vx * vx + vy * vy + vz * vz)
                 gotVel = true
@@ -1118,18 +1178,31 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
             end
         end
     end)
-    if not gotVel and Core.IsValidObj(shipActor) and shipActor.GetVelocity then
+    if (not gotVel or speedMs < 0.01) and Core.IsValidObj(shipActor) and shipActor.K2_GetActorLocation then
         pcall(function()
-            local v = shipActor:GetVelocity()
-            if v then
-                local vx, vy, vz = tonumber(v.X) or 0, tonumber(v.Y) or 0, tonumber(v.Z) or 0
-                speedMs = math.sqrt(vx * vx + vy * vy + vz * vz) / 100.0 -- Unreal cm/s -> m/s
-                if shipActor.GetActorForwardVector then
-                    local fwd = shipActor:GetActorForwardVector()
-                    if fwd then
-                        forwardDot = (vx * (tonumber(fwd.X) or 0) + vy * (tonumber(fwd.Y) or 0) + vz * (tonumber(fwd.Z) or 0)) / 100.0
+            local loc = shipActor:K2_GetActorLocation()
+            if loc then
+                local lx, ly, lz = tonumber(loc.X) or 0, tonumber(loc.Y) or 0, tonumber(loc.Z) or 0
+                if TelemetryTrack.LastLocClock and (now - TelemetryTrack.LastLocClock) > 0.02 then
+                    local dt = now - TelemetryTrack.LastLocClock
+                    local vx = (lx - TelemetryTrack.LastLocX) / dt / 100.0 -- cm/s -> m/s
+                    local vy = (ly - TelemetryTrack.LastLocY) / dt / 100.0
+                    local vz = (lz - TelemetryTrack.LastLocZ) / dt / 100.0
+                    local dSpeed = math.sqrt(vx * vx + vy * vy + vz * vz)
+                    if dSpeed < 50000.0 then -- ignore teleports/chunk origin shifts
+                        speedMs = dSpeed
+                        if shipActor.GetActorForwardVector then
+                            local fwd = shipActor:GetActorForwardVector()
+                            if fwd then
+                                forwardDot = vx * (tonumber(fwd.X) or 0) + vy * (tonumber(fwd.Y) or 0) + vz * (tonumber(fwd.Z) or 0)
+                            end
+                        end
                     end
                 end
+                TelemetryTrack.LastLocX = lx
+                TelemetryTrack.LastLocY = ly
+                TelemetryTrack.LastLocZ = lz
+                TelemetryTrack.LastLocClock = now
             end
         end)
     end
@@ -1143,14 +1216,47 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
     end
 
-    -- 3. Fuel usage & fuel availability
-    local fuelUse = nil
+    -- 3. Fuel availability (GetRemainingFuel / RemainingFuelDouble / RemainingFuel) & usage (PowerGrid / FuelConsumptionRate / live delta)
     local fuelAvail = nil
+    local fuelUse = nil
     pcall(function()
+        if shipObj.GetRemainingFuel then fuelAvail = ReadNumericOrFixed(shipObj:GetRemainingFuel()) end
+        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuelDouble) end
+        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuel) end
+        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.Fuel) end
+
         fuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
-        fuelAvail = ReadNumericOrFixed(shipObj.Fuel)
-        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.Energy) end
+        if fuelUse == nil then fuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
+        if fuelUse == nil and shipObj.GetPowerGrid then
+            local pg = shipObj:GetPowerGrid()
+            if Core.IsValidObj(pg) then
+                fuelUse = ReadNumericOrFixed(pg.PowerConsumptionRate)
+                    or ReadNumericOrFixed(pg.PowerDraw)
+                    or ReadNumericOrFixed(pg.TotalConsumption)
+            end
+        end
     end)
+    if fuelAvail ~= nil then
+        if fuelUse == nil and TelemetryTrack.LastFuel ~= nil and TelemetryTrack.LastFuelClock ~= nil then
+            local dtF = now - TelemetryTrack.LastFuelClock
+            if dtF >= 0.25 then
+                local rate = math.max(0.0, (TelemetryTrack.LastFuel - fuelAvail) / dtF)
+                if TelemetryTrack.SmoothedFuelRate == nil then
+                    TelemetryTrack.SmoothedFuelRate = rate
+                else
+                    TelemetryTrack.SmoothedFuelRate = TelemetryTrack.SmoothedFuelRate * 0.6 + rate * 0.4
+                end
+                TelemetryTrack.LastFuel = fuelAvail
+                TelemetryTrack.LastFuelClock = now
+            end
+        elseif TelemetryTrack.LastFuel == nil then
+            TelemetryTrack.LastFuel = fuelAvail
+            TelemetryTrack.LastFuelClock = now
+        end
+        if fuelUse == nil and TelemetryTrack.SmoothedFuelRate ~= nil then
+            fuelUse = TelemetryTrack.SmoothedFuelRate
+        end
+    end
     if Core.IsValidObj(ui.FuelUseTxt) then
         local uStr = fuelUse and ("Using: " .. FormatEnergyValue(fuelUse, true)) or "Using: 0.0 MJ/s"
         pcall(function() ui.FuelUseTxt:SetText(Core.MakeText(uStr)) end)
@@ -1162,15 +1268,15 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.FuelAvailTxt, lowFuel and TELEM_RED or TELEM_GOLD)
     end
 
-    -- 4. Hull integrity & 3-segment vertical bar (3 green / 2 orange / 1 red / 3 red + red text when destroyed)
+    -- 4. Hull integrity (GetCurrentHull / GetTotalHull) & 3-segment vertical bar
     local curHull = nil
     local maxHull = nil
     pcall(function()
         if shipObj.GetCurrentHull then curHull = ReadNumericOrFixed(shipObj:GetCurrentHull()) end
         if curHull == nil then curHull = ReadNumericOrFixed(shipObj.Hull) end
-        if shipObj.GetMaxHull then maxHull = ReadNumericOrFixed(shipObj:GetMaxHull()) end
+        if shipObj.GetTotalHull then maxHull = ReadNumericOrFixed(shipObj:GetTotalHull()) end
+        if maxHull == nil and shipObj.GetMaxHull then maxHull = ReadNumericOrFixed(shipObj:GetMaxHull()) end
         if maxHull == nil then maxHull = ReadNumericOrFixed(shipObj.MaxHull) end
-        if maxHull == nil then maxHull = ReadNumericOrFixed(shipObj.Hull) end
     end)
     if curHull ~= nil then
         local maxH = (maxHull and maxHull > 0) and maxHull or math.max(1.0, curHull)
@@ -1207,7 +1313,7 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
     if not TelemetryDiagLogged then
         TelemetryDiagLogged = true
         Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%s fuel=%s hull=%s/%s",
-            tostring(boostCharge), tostring(maxBoost), speedMs,
+            tostring(boostCharge), tostring(effMaxBoost), speedMs,
             tostring(fuelUse), tostring(fuelAvail), tostring(curHull), tostring(maxHull)))
     end
 end
