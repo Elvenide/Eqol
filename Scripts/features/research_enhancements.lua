@@ -319,7 +319,7 @@ local function ScheduleResearchFilter(st, overrideQuery)
     PendingFilterToken = PendingFilterToken + 1
     local myToken = PendingFilterToken
     st.PendingQuery = overrideQuery
-    ExecuteWithDelay(50, function()
+    ExecuteInGameThreadWithDelay(50, function()
         if myToken ~= PendingFilterToken then return end
         ApplyResearchFilter(st, st.PendingQuery)
     end)

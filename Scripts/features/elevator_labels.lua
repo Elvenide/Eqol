@@ -400,7 +400,8 @@ local function LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCo
                     pcall(function()
                         local sm = c.StaticMesh
                         if Core.IsValidObj(sm) then
-                            smName = SafeObjName(sm)
+                            -- NOTE: Never call sm:GetFName() (UE4SS 0x18 crash trigger; see learning.md §6)
+                            smName = "StaticMesh"
                             local eb = sm.ExtendedBounds
                             if eb and eb.BoxExtent then
                                 extStr = string.format(" ext=(%.0f,%.0f,%.0f)",
@@ -494,39 +495,6 @@ local function LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCo
     end
 end
 
-local function GetActorStaticMeshDiag(actor)
-    if not Core.IsValidObj(actor) then return nil end
-    local parts = {}
-    pcall(function()
-        local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
-        if not Core.IsValidObj(smCls) or not actor.K2_GetComponentsByClass then return end
-        local comps = actor:K2_GetComponentsByClass(smCls)
-        local list, n = ExtractArray(comps)
-        for i = 1, math.min(n, 4) do
-            local c = list[i]
-            if Core.IsValidObj(c) then
-                local smName = "none"
-                local extStr = ""
-                pcall(function()
-                    local sm = c.StaticMesh
-                    if Core.IsValidObj(sm) then
-                        smName = SafeObjName(sm)
-                        local eb = sm.ExtendedBounds
-                        if eb and eb.BoxExtent and eb.Origin then
-                            extStr = string.format(" orig=(%.1f,%.1f,%.1f) ext=(%.1f,%.1f,%.1f)",
-                                tonumber(eb.Origin.X) or 0, tonumber(eb.Origin.Y) or 0, tonumber(eb.Origin.Z) or 0,
-                                tonumber(eb.BoxExtent.X) or 0, tonumber(eb.BoxExtent.Y) or 0, tonumber(eb.BoxExtent.Z) or 0)
-                        end
-                    end
-                end)
-                parts[#parts + 1] = smName .. extStr
-            end
-        end
-    end)
-    if #parts == 0 then return nil end
-    return table.concat(parts, "; ")
-end
-
 local function GetStopFrameInfo(stopObj)
     local actor, actorSrc = GetActorFromSimObj(stopObj)
     local pos = nil
@@ -552,20 +520,20 @@ local function GetStopFrameInfo(stopObj)
         end)
         pcall(function()
             local f = actor:GetActorForwardVector()
-            local r = actor:GetActorRightVector()
             local u = actor:GetActorUpVector()
             if f and type(f.X) == "number" then fw = { X = f.X, Y = f.Y, Z = f.Z } end
-            if r and type(r.X) == "number" then rt = { X = r.X, Y = r.Y, Z = r.Z } end
             if u and type(u.X) == "number" then up = { X = u.X, Y = u.Y, Z = u.Z } end
+            -- Compute Right = Up x Forward (UE left-handed +Y = +Z x +X); avoids actor:GetActorRightVector() 0x18 crash (learning.md §6)
+            local rx = up.Y * fw.Z - up.Z * fw.Y
+            local ry = up.Z * fw.X - up.X * fw.Z
+            local rz = up.X * fw.Y - up.Y * fw.X
+            local rLen = math.sqrt(rx * rx + ry * ry + rz * rz)
+            if rLen > 0.001 then
+                rt = { X = rx / rLen, Y = ry / rLen, Z = rz / rLen }
+            end
         end)
         if pos then
             hasActor = true
-            diag = {
-                doorLocal = SafeCompLocalPos(actor.BPC_Door, pos, fw, rt, up),
-                wigLocal  = SafeCompLocalPos(actor.Widget, pos, fw, rt, up),
-                callLocal = SafeCompLocalPos(actor.CallInteraction, pos, fw, rt, up),
-                meshDiag  = GetActorStaticMeshDiag(actor),
-            }
         end
     end
 
@@ -1015,36 +983,6 @@ local function UpdateElevatorPortIcons()
     if count > 0 or #CachedWorldPorts > 0 then
         LogOnce(string.format("vis:%d:%d", count, #CachedWorldPorts),
             "Step[Render] Visible in range (<=30m): %d / %d", count, #CachedWorldPorts)
-    end
-
-    if nearest and nearest.distSq < (1500.0 * 1500.0) then
-        local nw = nearest.wp
-        local nearKey = string.format("near:%s:%d:%d", tostring(nw.ShaftHex), nw.ColIdx, nw.StopIdx)
-        if not LoggedShafts[nearKey] then
-            LoggedShafts[nearKey] = true
-            local actLocStr = "nil"
-            local visStr = "nil"
-            pcall(function()
-                local cl = nearest.entry.Comp:K2_GetComponentLocation()
-                if cl then
-                    actLocStr = string.format("(%.1f,%.1f,%.1f)", tonumber(cl.X) or 0, tonumber(cl.Y) or 0, tonumber(cl.Z) or 0)
-                end
-                if nearest.entry.Comp.IsVisible then
-                    visStr = tostring(nearest.entry.Comp:IsVisible())
-                end
-            end)
-            local rotP = nearest.rot and (tonumber(nearest.rot.Pitch) or 0) or 0
-            local rotY = nearest.rot and (tonumber(nearest.rot.Yaw) or 0) or 0
-            local rotR = nearest.rot and (tonumber(nearest.rot.Roll) or 0) or 0
-            local cRotStr = camRot and string.format("(P=%.1f,Y=%.1f,R=%.1f)", camRot.Pitch, camRot.Yaw, camRot.Roll) or "nil"
-            Core.Log(string.format(
-                "[ElevatorLabels] Step[NearestPort] %s col#%d stop#%d item=%s dist=%.1f rel=(front=%.1f,right=%.1f,up=%.1f) target=(%.1f,%.1f,%.1f) compLoc=%s vis=%s rot=(P=%.1f,Y=%.1f,R=%.1f) n=(%.2f,%.2f,%.2f) u=(%.2f,%.2f,%.2f) cam=(%.1f,%.1f,%.1f) camRot=%s",
-                tostring(nw.ShaftHex), nw.ColIdx, nw.StopIdx, SafeObjName(nw.Item),
-                math.sqrt(nearest.distSq), nearest.frontDot, nearest.rightDot, nearest.upDot,
-                nw.X, nw.Y, nw.Z, actLocStr, visStr, rotP, rotY, rotR,
-                nw.Nx, nw.Ny, nw.Nz, nw.Ux, nw.Uy, nw.Uz,
-                camLoc.X, camLoc.Y, camLoc.Z, cRotStr))
-        end
     end
 
     for i = count + 1, #IconPool do

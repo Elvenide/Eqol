@@ -748,16 +748,46 @@ function StationData.GetPlatformConnectors(platform)
 
     local actor = StationData.GetObjectActor(platform)
     if Core.IsValidObj(actor) then
+        local ox, oy, oz = 0.0, 0.0, 0.0
+        local fx, fy, fz = 1.0, 0.0, 0.0
+        local rx, ry, rz = 0.0, 1.0, 0.0
+        local ux, uy, uz = 0.0, 0.0, 1.0
+        local hasBasis = false
+        pcall(function()
+            local loc = actor:K2_GetActorLocation()
+            if loc and type(loc.X) == "number" then
+                ox, oy, oz = loc.X, loc.Y or 0.0, loc.Z or 0.0
+                hasBasis = true
+            end
+            local fw = actor:GetActorForwardVector()
+            local up = actor:GetActorUpVector()
+            if fw and type(fw.X) == "number" then fx, fy, fz = fw.X, fw.Y or 0.0, fw.Z or 0.0 end
+            if up and type(up.X) == "number" then ux, uy, uz = up.X, up.Y or 0.0, up.Z or 1.0 end
+            -- UE left-handed +Y = +Z x +X (avoids GetActorRightVector / K2_GetComponentLocation 0x18 crashes per learning.md §6)
+            local crx = uy * fz - uz * fy
+            local cry = uz * fx - ux * fz
+            local crz = ux * fy - uy * fx
+            local rLen = math.sqrt(crx * crx + cry * cry + crz * crz)
+            if rLen > 0.001 then
+                rx, ry, rz = crx / rLen, cry / rLen, crz / rLen
+            end
+        end)
+
         local okComps, comps = pcall(function() return actor.ConnectorComponents end)
-        if okComps and comps then
+        if hasBasis and okComps and comps then
             StationData.ForEachArray(comps, function(_, elem)
                 local comp = Core.UnwrapArrayElem(elem)
                 if Core.IsValidObj(comp) then
-                    local okL, loc = pcall(function() return comp:K2_GetComponentLocation() end)
-                    if okL and loc and type(loc.X) == "number" then
+                    local okRL, rl = pcall(function() return comp.RelativeLocation end)
+                    if okRL and rl and type(rl.X) == "number" then
+                        local lx = tonumber(rl.X) or 0.0
+                        local ly = tonumber(rl.Y) or 0.0
+                        local lz = tonumber(rl.Z) or 0.0
+                        local wx = ox + lx * fx + ly * rx + lz * ux
+                        local wy = oy + lx * fy + ly * ry + lz * uy
                         local occupied = false
                         pcall(function() occupied = comp.bOccupied == true end)
-                        table.insert(connectors, { x = loc.X, y = loc.Y or 0, occupied = occupied })
+                        table.insert(connectors, { x = wx, y = wy, occupied = occupied })
                     end
                 end
             end)
@@ -790,10 +820,16 @@ function StationData.GetStationFrameTransform(station)
         if loc and type(loc.X) == "number" then ox, oy, oz = loc.X, loc.Y or 0.0, loc.Z or 0.0 end
         local fw = act:GetActorForwardVector()
         if fw and type(fw.X) == "number" then fx, fy, fz = fw.X, fw.Y or 0.0, fw.Z or 0.0 end
-        local rt = act:GetActorRightVector()
-        if rt and type(rt.X) == "number" then rx, ry, rz = rt.X, rt.Y or 1.0, rt.Z or 0.0 end
         local up = act:GetActorUpVector()
         if up and type(up.X) == "number" then ux, uy, uz = up.X, up.Y or 0.0, up.Z or 1.0 end
+        -- Compute Right = Up x Forward (UE left-handed +Y = +Z x +X); avoids act:GetActorRightVector() 0x18 crash (learning.md §6)
+        local crx = uy * fz - uz * fy
+        local cry = uz * fx - ux * fz
+        local crz = ux * fy - uy * fx
+        local rLen = math.sqrt(crx * crx + cry * cry + crz * crz)
+        if rLen > 0.001 then
+            rx, ry, rz = crx / rLen, cry / rLen, crz / rLen
+        end
     end)
     return {
         ox = ox, oy = oy, oz = oz,
@@ -1183,13 +1219,18 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                     if not okF or type(full) ~= "string" then return nil end
                     return full:match("^%S+ (.+)$") or full
                 end
+                local DISALLOWED_WALL_ANCHOR_CLASSES = {
+                    ["/Script/CoreUObject.Object"] = true,
+                    ["/Script/Engine.Actor"] = true,
+                    ["/Script/Engine.ActorComponent"] = true,
+                }
                 local function recordAnchor(obj)
                     if not Core.IsValidObj(obj) then return nil end
                     local addr = obj:GetAddress()
                     if type(addr) ~= "number" then return nil end
                     if CachedWallAnchors[addr] then return CachedWallAnchors[addr] end
                     local cp = getClsPath(obj)
-                    if cp then
+                    if cp and not DISALLOWED_WALL_ANCHOR_CLASSES[cp] then
                         CachedWallAnchors[addr] = { obj = obj, addr = addr, clsPath = cp }
                         return CachedWallAnchors[addr]
                     end
@@ -1213,7 +1254,9 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                     end
                 end
                 if not anchor then
-                    for _, searchCls in ipairs({ "DMSObject", "Actor", "Object" }) do
+                    -- Never fall back to FindAllOf("Object") or FindAllOf("Actor"): enumerating all engine
+                    -- UObjects freezes the game thread and risks polluting core engine UClasses with custom properties.
+                    for _, searchCls in ipairs({ "DMSObject", "StationObject" }) do
                         local okA, list = pcall(FindAllOf, searchCls)
                         if okA and list then
                             for _, obj in ipairs(list) do
@@ -2941,11 +2984,11 @@ function StationData.GetMachineFootprintCells(machine, buildableOpt)
                 StationData.ForEachArray(compsRaw, function(_, elem)
                     local c = Core.UnwrapArrayElem(elem)
                     if Core.IsValidObj(c) and c.StaticMesh and c.StaticMesh.ExtendedBounds then
+                        -- Never call c:IsVisible() or c.StaticMesh:GetFName() (UE4SS 0x18 crash triggers; learning.md §6)
                         local hidden = (c.bHiddenInGame == true)
-                        local okVis, vis = pcall(function() return c:IsVisible() end)
-                        local smName = ""
-                        pcall(function() smName = c.StaticMesh:GetFName():ToString() end)
-                        if not hidden and (not okVis or vis ~= false) and not smName:find("Collision", 1, true) then
+                        local compName = ""
+                        pcall(function() compName = c:GetFName():ToString() end)
+                        if not hidden and not compName:find("Collision", 1, true) then
                             local eb = c.StaticMesh.ExtendedBounds
                             if eb.BoxExtent and eb.Origin then
                                 local rs = c.RelativeScale3D

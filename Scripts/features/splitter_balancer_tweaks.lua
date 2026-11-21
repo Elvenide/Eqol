@@ -119,13 +119,19 @@ local function GetObjectClassPath(obj)
     return full:match("^%S+ (.+)$") or full
 end
 
+local DISALLOWED_ANCHOR_CLASSES = {
+    ["/Script/CoreUObject.Object"] = true,
+    ["/Script/Engine.Actor"] = true,
+    ["/Script/Engine.ActorComponent"] = true,
+}
+
 local function RecordAnchorCandidate(obj)
     if not Core.IsValidObj(obj) then return end
     local addr = obj:GetAddress()
     if type(addr) ~= "number" then return end
     if CachedAnchors[addr] then return end
     local clsPath = GetObjectClassPath(obj)
-    if clsPath then
+    if clsPath and not DISALLOWED_ANCHOR_CLASSES[clsPath] then
         CachedAnchors[addr] = { obj = obj, addr = addr, clsPath = clsPath }
     end
 end
@@ -150,7 +156,9 @@ local function FindAnchorForRange(minAddr, maxAddr, preferredEnv)
         if Fits(entry) then return entry end
     end
 
-    for _, searchCls in ipairs({ "DMSObject", "Actor", "ActorComponent", "Object" }) do
+    -- Never fall back to FindAllOf("Object") or FindAllOf("ActorComponent"): enumerating all engine
+    -- UObjects freezes the game thread and risks polluting core engine UClasses with custom properties.
+    for _, searchCls in ipairs({ "DMSObject", "StationObject" }) do
         local ok, list = pcall(FindAllOf, searchCls)
         if ok and list then
             for i = 1, #list do
@@ -383,27 +391,33 @@ local function CleanTrackedEnvs()
                                 elseif oldMin == COLLIDER_DISABLE_MIN and oldMax == COLLIDER_DISABLE_MAX then
                                     alreadyOff = alreadyOff + 1
                                 else
-                                    local okWrite, errW = pcall(function()
-                                        anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
-                                        anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
-                                    end)
-                                    if okWrite then
-                                        local okV, newMin, newMax = pcall(function()
-                                            return anchorObj[slot.pMin], anchorObj[slot.pMax]
+                                    local curDataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
+                                    if curDataAddr ~= dataAddr then
+                                        readErr = readErr + 1
+                                        if not firstErr then firstErr = "Colliders TArray reallocated mid-pass" end
+                                    else
+                                        local okWrite, errW = pcall(function()
+                                            anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
+                                            anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
                                         end)
-                                        if okV and newMin == COLLIDER_DISABLE_MIN and newMax == COLLIDER_DISABLE_MAX then
-                                            modified = modified + 1
-                                            if not sampleMsg then
-                                                sampleMsg = string.format("id=%d X:[%d..%d]->[%d..%d]",
-                                                    cid, oldMin, oldMax, newMin, newMax)
+                                        if okWrite then
+                                            local okV, newMin, newMax = pcall(function()
+                                                return anchorObj[slot.pMin], anchorObj[slot.pMax]
+                                            end)
+                                            if okV and newMin == COLLIDER_DISABLE_MIN and newMax == COLLIDER_DISABLE_MAX then
+                                                modified = modified + 1
+                                                if not sampleMsg then
+                                                    sampleMsg = string.format("id=%d X:[%d..%d]->[%d..%d]",
+                                                        cid, oldMin, oldMax, newMin, newMax)
+                                                end
+                                            else
+                                                readErr = readErr + 1
+                                                if not firstErr then firstErr = "verify failed" end
                                             end
                                         else
                                             readErr = readErr + 1
-                                            if not firstErr then firstErr = "verify failed" end
+                                            if not firstErr then firstErr = tostring(errW) end
                                         end
-                                    else
-                                        readErr = readErr + 1
-                                        if not firstErr then firstErr = tostring(errW) end
                                     end
                                 end
                             end
@@ -491,11 +505,10 @@ local function ShouldScaleMeshComponent(comp)
     pcall(function() sm = comp.StaticMesh end)
     if not Core.IsValidObj(sm) then return false end
 
+    -- Skip hidden helper/trigger meshes (never call sm:GetFName(); UE4SS 0x18 crash trigger per learning.md §6)
     local hidden = false
     pcall(function() hidden = (comp.bHiddenInGame == true) end)
-    local smName = SafeName(sm)
-    -- Skip hidden helper/trigger cubes; scale the actual model meshes (and any visible hull parts)
-    if hidden and smName == "Cube" then
+    if hidden then
         return false
     end
     return true
