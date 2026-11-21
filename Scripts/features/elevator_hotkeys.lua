@@ -12,20 +12,28 @@ local Feature = {
 }
 
 local PATHS = {
-    SetConfigInputCDO = "/Script/MainSequence.Default__SetConfigInput",
+    SetConfigInputCDO         = "/Script/MainSequence.Default__SetConfigInput",
+    WBPPlayerAlertStatusClass = "/Game/Blueprints/Widgets/HUDs/WBP_PlayerAlertStatus.WBP_PlayerAlertStatus_C",
 }
 
 local POD_MAX_XY_DIST_SQ = 240.0 * 240.0
 local POD_MIN_DZ = -160.0
 local POD_MAX_DZ = 360.0
+local ALERT_SCAN_COOLDOWN = 8.0
+local NAV_POLL_MS         = 150
+local NAV_TIMEOUT_SEC     = 30.0
 
 local CachedElevators = {}      -- addr -> elevActor
 local CachedChats = {}          -- addr -> WBP_Chat_C
+local CachedAlertWidget = nil
+local LastAlertScanTime = -999.0
 local LastElevatorScanClock = -10.0
 local LastChatScanClock = -10.0
 local LastExitBuildClock = -10.0
 local LastFloorHotkeyClock = -10.0
 local MODIFIER_KEYS = nil
+local NavigationToken = 0
+local ActiveNavigation = nil    -- { Token, BottomElev, TargetStackIdx, FloorNum, MaxClock }
 
 local function IsAnyModifierKeyDown(pc)
     if not Core.IsValidObj(pc) then return false end
@@ -287,95 +295,123 @@ Feature.WatchWidgets = {
             CachedChats[chat:GetAddress()] = chat
         end
     end,
+    WBP_PlayerAlerts_C = function(w)
+        if Core.IsValidObj(w) then
+            CachedAlertWidget = w
+        end
+    end,
 }
 
-local DepartureToken = 0
+local function ClearActiveNavigation()
+    NavigationToken = NavigationToken + 1
+    ActiveNavigation = nil
+end
 
--- Closes elevator pod/shaft doors immediately so the elevator departs without waiting for the
--- vanilla door-open timeout. Uses standard reflected DoorOpenProgress property + actor door calls.
-local function CloseElevatorDoorsImmediately(bottomElev, forceZero)
-    if not Core.IsValidObj(bottomElev) then return false end
+local function PushElevatorAlert(messageStr)
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then return false end
 
-    local hadOpenDoor = false
-    pcall(function()
-        local actors = bottomElev.Actors
-        if actors then
-            StationData.ForEachArray(actors, function(_, aElem)
-                local bActor = Core.UnwrapArrayElem(aElem)
-                if Core.IsValidObj(bActor) then
-                    if bActor.ClosePodDoors then
-                        pcall(function() bActor:ClosePodDoors() end)
-                    end
-                    if Core.IsValidObj(bActor.PodActor) and bActor.PodActor.SetDoorsOpen then
-                        pcall(function() bActor.PodActor:SetDoorsOpen(false) end)
+    local targetWidget = nil
+    if Core.IsValidObj(CachedAlertWidget) and Core.IsValidObj(CachedAlertWidget.Container) then
+        targetWidget = CachedAlertWidget
+    else
+        CachedAlertWidget = nil
+        local now = os.clock()
+        if (now - LastAlertScanTime) >= ALERT_SCAN_COOLDOWN then
+            LastAlertScanTime = now
+            local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
+            if okAlerts and found and #found > 0 then
+                local fallback = nil
+                for _, w in ipairs(found) do
+                    if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
+                        if not fallback then fallback = w end
+                        local okVP, inVP = pcall(function() return w:IsInViewport() end)
+                        local okVis, isVis = pcall(function() return w:IsVisible() end)
+                        if (okVP and inVP) or (okVis and isVis) then
+                            targetWidget = w
+                            break
+                        end
                     end
                 end
-            end)
+                targetWidget = targetWidget or fallback
+                if Core.IsValidObj(targetWidget) then
+                    CachedAlertWidget = targetWidget
+                end
+            end
         end
-    end)
+    end
+    if not Core.IsValidObj(targetWidget) or not Core.IsValidObj(targetWidget.Container) then
+        return false
+    end
 
-    local okStack, stack = pcall(function() return bottomElev.ElevatorStack end)
-    if okStack and stack then
-        StationData.ForEachArray(stack, function(_, elem)
-            local stopObj = Core.UnwrapArrayElem(elem)
-            if not Core.IsValidObj(stopObj) then return end
-            local curOpen = tonumber(stopObj.DoorOpenProgress) or 0
-            if curOpen > 0 then
-                hadOpenDoor = true
-                local maxOpen = tonumber(stopObj.DoorOpenMaxProgress) or 0
-                if forceZero then
-                    pcall(function() stopObj.DoorOpenProgress = 0 end)
-                else
-                    pcall(function() stopObj.DoorOpenProgress = (maxOpen > 0) and maxOpen or 1 end)
-                end
+    local pushed = false
+    local entryW = Core.CreateUserWidget(PATHS.WBPPlayerAlertStatusClass, targetWidget, pc)
+    if Core.IsValidObj(entryW) then
+        pcall(function()
+            if Core.IsValidObj(entryW.WBP_RichText) then
+                entryW.WBP_RichText:SetText(Core.MakeText(tostring(messageStr or "")))
+            end
+            if targetWidget.Container.AddChildToVerticalBox then
+                targetWidget.Container:AddChildToVerticalBox(entryW)
+            else
+                targetWidget.Container:AddChild(entryW)
+            end
+            pushed = true
+        end)
+        ExecuteInGameThreadWithDelay(3000, function()
+            if Core.IsValidObj(entryW) then
                 pcall(function()
-                    local sActors = stopObj.Actors
-                    if sActors then
-                        StationData.ForEachArray(sActors, function(_, aElem)
-                            local sActor = Core.UnwrapArrayElem(aElem)
-                            if Core.IsValidObj(sActor) and sActor.CloseDoors then
-                                pcall(function() sActor:CloseDoors() end)
-                            end
-                        end)
+                    if entryW.RemoveSelf then
+                        entryW:RemoveSelf()
+                    elseif entryW.RemoveFromParent then
+                        entryW:RemoveFromParent()
                     end
                 end)
             end
         end)
     end
-    return hadOpenDoor
+    return pushed
 end
 
-local function StartQuickDeparture(bottomElev, targetStackIdx)
-    DepartureToken = DepartureToken + 1
-    local myToken = DepartureToken
-    local pressedClock = os.clock()
-    local maxClock = pressedClock + 0.45
-    local forceZeroDone = false
+local function IsElevatorAtTargetIdle(bottomElev, targetStackIdx)
+    if not Core.IsValidObj(bottomElev) then return true end
+    local curF = nil
+    local isMoving = false
+    pcall(function()
+        curF = tonumber(bottomElev.CurrentFloor)
+        isMoving = (bottomElev.bMoving == true)
+    end)
+    return (curF == targetStackIdx and not isMoving)
+end
 
-    CloseElevatorDoorsImmediately(bottomElev, false)
+-- Locks further elevator floor hotkey presses until the elevator arrives at targetStackIdx
+-- (or hits the safety timeout / map reload). Never mutates simulation state directly.
+local function BeginElevatorNavigationLock(bottomElev, targetStackIdx, floorNum)
+    NavigationToken = NavigationToken + 1
+    local myToken = NavigationToken
+    local nav = {
+        Token = myToken,
+        BottomElev = bottomElev,
+        TargetStackIdx = targetStackIdx,
+        FloorNum = floorNum,
+        MaxClock = os.clock() + NAV_TIMEOUT_SEC,
+    }
+    ActiveNavigation = nav
 
-    local function Step()
-        if myToken ~= DepartureToken then return end
-        if not Core.IsValidObj(bottomElev) then return end
-
-        local isMoving = false
-        pcall(function() isMoving = (bottomElev.bMoving == true) end)
-        if isMoving then return end
-
-        local now = os.clock()
-        if now > maxClock then return end
-
-        if (now - pressedClock) >= 0.05 and not forceZeroDone then
-            forceZeroDone = true
-            CloseElevatorDoorsImmediately(bottomElev, true)
-        else
-            CloseElevatorDoorsImmediately(bottomElev, false)
+    local function PollArrival()
+        if myToken ~= NavigationToken or ActiveNavigation ~= nav then return end
+        if not Core.IsValidObj(bottomElev) or os.clock() > nav.MaxClock then
+            ClearActiveNavigation()
+            return
         end
-
-        ExecuteInGameThreadWithDelay(25, Step)
+        if IsElevatorAtTargetIdle(bottomElev, targetStackIdx) then
+            ClearActiveNavigation()
+            return
+        end
+        ExecuteInGameThreadWithDelay(NAV_POLL_MS, PollArrival)
     end
 
-    ExecuteInGameThreadWithDelay(25, Step)
+    ExecuteInGameThreadWithDelay(NAV_POLL_MS, PollArrival)
 end
 
 function Feature.RegisterHooks()
@@ -406,6 +442,19 @@ local function GoToElevatorFloor(floorNum)
     if not Core.IsValidObj(pc) then return end
     if IsAnyModifierKeyDown(pc) then return end
 
+    -- Block further floor hotkey selections while a hotkey-initiated elevator trip is in progress
+    if ActiveNavigation then
+        if Core.IsValidObj(ActiveNavigation.BottomElev) and os.clock() <= ActiveNavigation.MaxClock then
+            if IsElevatorAtTargetIdle(ActiveNavigation.BottomElev, ActiveNavigation.TargetStackIdx) then
+                ClearActiveNavigation()
+            else
+                return
+            end
+        else
+            ClearActiveNavigation()
+        end
+    end
+
     local elevObj, openWidget = FindActivePlayerElevator(pc, false)
     if not Core.IsValidObj(elevObj) then return end
 
@@ -417,8 +466,10 @@ local function GoToElevatorFloor(floorNum)
     local curFloor = nil
     pcall(function() curFloor = tonumber(bottomElev.CurrentFloor) end)
 
+    local sentCommand = false
     if Core.IsValidObj(openWidget) and openWidget.OnFloorPressed then
-        pcall(function() openWidget:OnFloorPressed(stackIdx) end)
+        local okCall = pcall(function() openWidget:OnFloorPressed(stackIdx) end)
+        sentCommand = okCall == true
     else
         local setConfigCDO = Core.GetCDO(PATHS.SetConfigInputCDO)
         if not Core.IsValidObj(setConfigCDO) then return end
@@ -433,12 +484,14 @@ local function GoToElevatorFloor(floorNum)
         end
 
         if okCmd and Core.IsValidObj(cmd) then
-            pcall(function() pc:AddInputCommand(bottomElev.ID, cmd) end)
+            local okAdd = pcall(function() pc:AddInputCommand(bottomElev.ID, cmd) end)
+            sentCommand = okAdd == true
         end
     end
 
-    if curFloor ~= stackIdx then
-        StartQuickDeparture(bottomElev, stackIdx)
+    if sentCommand and curFloor ~= stackIdx then
+        PushElevatorAlert(string.format("Navigating to Floor %d", floorNum))
+        BeginElevatorNavigationLock(bottomElev, stackIdx, floorNum)
         Core.Log(string.format("[ElevatorHotkeys] GoToFloor=%s stackIdx=%s curFloor=%s",
             tostring(floorNum), tostring(stackIdx), tostring(curFloor)))
     end
@@ -452,7 +505,14 @@ local function GoToElevatorFloor(floorNum)
     end)
 end
 
+function Feature.OnToggle(enabled)
+    if not enabled then
+        ClearActiveNavigation()
+    end
+end
+
 function Feature.OnClientRestart()
+    ClearActiveNavigation()
     Feature.RegisterHooks()
     ExecuteInGameThreadWithDelay(300, function()
         RefreshElevatorCache()
@@ -461,6 +521,9 @@ function Feature.OnClientRestart()
 end
 
 function Feature.OnMapLoad()
+    ClearActiveNavigation()
+    CachedAlertWidget = nil
+    LastAlertScanTime = -999.0
     Feature.RegisterHooks()
     ExecuteInGameThreadWithDelay(300, function()
         RefreshElevatorCache()
@@ -478,6 +541,9 @@ function Feature.PruneCaches()
         if not Core.IsValidObj(chat) then
             CachedChats[addr] = nil
         end
+    end
+    if CachedAlertWidget and not Core.IsValidObj(CachedAlertWidget) then
+        CachedAlertWidget = nil
     end
 end
 

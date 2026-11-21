@@ -1037,7 +1037,8 @@ local function CheckMaterialsForPendingList(pc, list, delList)
         local refunds = {}
         for _, dm in ipairs(delList) do
             if dm and Core.IsValidObj(dm.machine) then
-                local bld = StationData.FindBuildableForMachineClass(dm.machine)
+                local bld = Core.IsValidObj(dm.buildable) and dm.buildable
+                    or (StationData.FindBuildableForMachineClass and StationData.FindBuildableForMachineClass(dm.machine) or nil)
                 if Core.IsValidObj(bld) then
                     CollectBuildableCosts(bld, 1, refunds)
                 end
@@ -1524,12 +1525,16 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
         end
     end
 
-    -- 2b. Disabled ports (delayed 200ms so SetRecipeInput takes effect first before toggling ports!)
+    -- 2b. Disabled ports: when a recipe was also set, poll until m.Recipe replicates
+    -- (handles high-RTT multiplayer without blind fixed delays) before toggling ports.
     if cfg.disabledPorts and #cfg.disabledPorts > 0 then
         local capM = targetMachine
         local capRecvId = receiverId
         local capPorts = cfg.disabledPorts
-        ExecuteInGameThreadWithDelay(200, function()
+        local expectedRecipeAddr = Core.IsValidObj(cfg.recipe) and cfg.recipe:GetAddress() or nil
+        local deadlineClock = os.clock() + 2.5
+
+        local function applyDisabledPortsNow()
             local curPC = Core.GetLocalPlayerController()
             if not Core.IsValidObj(capM) or not Core.IsValidObj(curPC) then return end
             local portInputCls = Core.FindOrLoadClass("/Script/MainSequence.MachinePortInput")
@@ -1556,7 +1561,28 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
                     end
                 end
             end
-        end)
+        end
+
+        if expectedRecipeAddr then
+            local function pollRecipeThenPorts()
+                if not Core.IsValidObj(capM) then return end
+                local recipeReady = false
+                pcall(function()
+                    local curR = capM.Recipe
+                    if Core.IsValidObj(curR) and curR:GetAddress() == expectedRecipeAddr then
+                        recipeReady = true
+                    end
+                end)
+                if recipeReady or os.clock() >= deadlineClock then
+                    applyDisabledPortsNow()
+                else
+                    ExecuteInGameThreadWithDelay(100, pollRecipeThenPorts)
+                end
+            end
+            ExecuteInGameThreadWithDelay(100, pollRecipeThenPorts)
+        else
+            ExecuteInGameThreadAfterFrames(1, applyDisabledPortsNow)
+        end
         applied = true
     end
 
@@ -3960,6 +3986,7 @@ local function CommitPendingGhosts()
     local qIdx = 1
     local deletedCount = 0
     local builtCount = 0
+    local disassembledMachines = {}
     local remaining = {}
     local remainingDeletes = {}
     local builtWithConfig = {}
@@ -3986,13 +4013,20 @@ local function CommitPendingGhosts()
             if deletedCount > 0 then table.insert(parts, string.format("deleted %d", deletedCount)) end
             local failN = #remaining + #remainingDeletes
             UpdateStatusBanner("Applied: " .. table.concat(parts, ", ") .. (failN > 0 and (" (" .. failN .. " failed)") or ""))
-            ExecuteInGameThreadWithDelay(350, function()
-                if SyncFloorMachinesIncremental then
-                    SyncFloorMachinesIncremental()
-                end
-                -- Also refresh cached floor machines if any built items were on a non-active floor
+
+            -- Poll for newly built machines (handles both instant SP and high-RTT MP replication)
+            local cfgApplied = 0
+            local configuredAddrs = {}
+            local matchedAddrs = {}
+            local pendingCfg = {}
+            for _, item in ipairs(builtWithConfig) do
+                table.insert(pendingCfg, item)
+            end
+            local pollDeadline = os.clock() + 3.0
+
+            local function syncCrossFloorsIfNeeded(items)
                 local needsCrossFloorSync = false
-                for _, item in ipairs(builtWithConfig) do
+                for _, item in ipairs(items) do
                     if item.floorIdx and item.floorIdx ~= SelectedFloorIdx then
                         needsCrossFloorSync = true
                         break
@@ -4009,69 +4043,88 @@ local function CommitPendingGhosts()
                         end
                     end
                 end
+            end
+
+            local function pollNewMachinesAndConfig()
+                if SyncFloorMachinesIncremental then
+                    SyncFloorMachinesIncremental()
+                end
+                if #pendingCfg == 0 then
+                    return
+                end
+                syncCrossFloorsIfNeeded(pendingCfg)
+
                 local pc2 = Core.GetLocalPlayerController()
-                if #builtWithConfig > 0 and Core.IsValidObj(pc2) then
-                    local cfgIdx = 1
-                    local cfgApplied = 0
-                    local configuredAddrs = {}
-                    local function pumpConfigBatch()
-                        local endIdx = math.min(#builtWithConfig, cfgIdx + 5)
-                        while cfgIdx <= endIdx do
-                            local item = builtWithConfig[cfgIdx]
-                            local fl = CurrentFloors[item.floorIdx] or CurrentFloors[SelectedFloorIdx]
-                            local bestM, bestD2 = nil, 45.0 * 45.0
-                            local expectedBldAddr = Core.IsValidObj(item.buildable) and item.buildable:GetAddress() or nil
-                            if fl and fl.machines then
-                                for _, me in ipairs(fl.machines) do
-                                    if Core.IsValidObj(me.machine) then
-                                        local mAddr = me.machine:GetAddress()
-                                        if not preExistingAddrs[mAddr] then
-                                            local bldMatch = true
-                                            if expectedBldAddr then
-                                                local mBld = StationData.GetMachineBuildable and StationData.GetMachineBuildable(me.machine) or nil
-                                                if Core.IsValidObj(mBld) and mBld:GetAddress() ~= expectedBldAddr then
-                                                    bldMatch = false
-                                                end
-                                            end
-                                            if bldMatch then
-                                                local dx = (me.x or 0) - item.x
-                                                local dy = (me.y or 0) - item.y
-                                                local d2 = dx * dx + dy * dy
-                                                if d2 < bestD2 then
-                                                    bestD2 = d2
-                                                    bestM = me.machine
-                                                end
-                                            end
+                if not Core.IsValidObj(pc2) then return end
+
+                local stillUnmatched = {}
+                for _, item in ipairs(pendingCfg) do
+                    local fl = CurrentFloors[item.floorIdx] or CurrentFloors[SelectedFloorIdx]
+                    local bestM, bestD2 = nil, 45.0 * 45.0
+                    local expectedBldAddr = Core.IsValidObj(item.buildable) and item.buildable:GetAddress() or nil
+                    if fl and fl.machines then
+                        for _, me in ipairs(fl.machines) do
+                            if Core.IsValidObj(me.machine) then
+                                local mAddr = me.machine:GetAddress()
+                                if not preExistingAddrs[mAddr] and not matchedAddrs[mAddr] then
+                                    local bldMatch = true
+                                    if expectedBldAddr then
+                                        local mBld = StationData.GetMachineBuildable and StationData.GetMachineBuildable(me.machine) or nil
+                                        if Core.IsValidObj(mBld) and mBld:GetAddress() ~= expectedBldAddr then
+                                            bldMatch = false
+                                        end
+                                    end
+                                    if bldMatch then
+                                        local dx = (me.x or 0) - item.x
+                                        local dy = (me.y or 0) - item.y
+                                        local d2 = dx * dx + dy * dy
+                                        if d2 < bestD2 then
+                                            bestD2 = d2
+                                            bestM = me.machine
                                         end
                                     end
                                 end
-                            end
-                            if Core.IsValidObj(bestM) then
-                                if ApplyMachineConfig(pc2, bestM, item.machineConfig) then
-                                    cfgApplied = cfgApplied + 1
-                                    table.insert(configuredAddrs, bestM:GetAddress())
-                                end
-                            end
-                            cfgIdx = cfgIdx + 1
-                        end
-                        if cfgIdx <= #builtWithConfig then
-                            ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
-                        else
-                            Core.Log(string.format("[StationMap] Applied machine configs to %d / %d configured machine(s)", cfgApplied, #builtWithConfig))
-                            if IsMapOpen() and #configuredAddrs > 0 and RefreshSingleMachineVisual then
-                                ExecuteInGameThreadWithDelay(150, function()
-                                    if IsMapOpen() then
-                                        for _, addr in ipairs(configuredAddrs) do
-                                            RefreshSingleMachineVisual(addr)
-                                        end
-                                    end
-                                end)
                             end
                         end
                     end
-                    ExecuteInGameThreadAfterFrames(1, pumpConfigBatch)
+                    if Core.IsValidObj(bestM) then
+                        local bestAddr = bestM:GetAddress()
+                        matchedAddrs[bestAddr] = true
+                        if ApplyMachineConfig(pc2, bestM, item.machineConfig) then
+                            cfgApplied = cfgApplied + 1
+                            table.insert(configuredAddrs, bestAddr)
+                        end
+                    else
+                        table.insert(stillUnmatched, item)
+                    end
                 end
-            end)
+
+                pendingCfg = stillUnmatched
+                if #pendingCfg > 0 and os.clock() < pollDeadline then
+                    ExecuteInGameThreadWithDelay(150, pollNewMachinesAndConfig)
+                else
+                    Core.Log(string.format("[StationMap] Applied machine configs to %d / %d configured machine(s)", cfgApplied, #builtWithConfig))
+                    if IsMapOpen() and #configuredAddrs > 0 and RefreshSingleMachineVisual then
+                        ExecuteInGameThreadWithDelay(150, function()
+                            if IsMapOpen() then
+                                for _, addr in ipairs(configuredAddrs) do
+                                    RefreshSingleMachineVisual(addr)
+                                end
+                            end
+                        end)
+                    end
+                end
+            end
+
+            ExecuteInGameThreadWithDelay(150, pollNewMachinesAndConfig)
+            if #pendingCfg == 0 then
+                -- Follow-up sync for higher-RTT MP clients when no config polling is active
+                ExecuteInGameThreadWithDelay(650, function()
+                    if IsMapOpen() and SyncFloorMachinesIncremental then
+                        SyncFloorMachinesIncremental()
+                    end
+                end)
+            end
         elseif lastErr then
             UpdateStatusBanner("Apply failed: " .. tostring(lastErr))
             RefreshSelectionLayer()
@@ -4096,6 +4149,7 @@ local function CommitPendingGhosts()
                 local ok, err = IssueRemoteDisassembleMachine(curPC, dm.machine)
                 if ok then
                     deletedCount = deletedCount + 1
+                    table.insert(disassembledMachines, dm.machine)
                 else
                     lastErr = err
                     table.insert(remainingDeletes, dm)
@@ -4108,10 +4162,34 @@ local function CommitPendingGhosts()
                 ExecuteInGameThreadAfterFrames(1, safePumpApplyBatch)
                 return
             elseif totalBuilds > 0 and not buildPhaseStarted then
-                -- Give simulation 200ms after disassembling overwritten machines so tiles are freed & materials refunded before building
+                -- Poll until disassembled machines actually vanish from the simulation (handles high-RTT MP),
+                -- with a 2.5s safety cap so builds always proceed.
                 buildPhaseStarted = true
                 UpdateStatusBanner(string.format("Applying changes: %d / %d...", builtCount + deletedCount, totalCount))
-                ExecuteInGameThreadWithDelay(200, safePumpApplyBatch)
+                local delDeadline = os.clock() + 2.5
+                local function waitForDisassembles()
+                    local anyStillAlive = false
+                    for _, m in ipairs(disassembledMachines) do
+                        if Core.IsValidObj(m) then
+                            local pendingKill = false
+                            pcall(function()
+                                if m.bPendingDestroy == true or m.bIsDestroyed == true then
+                                    pendingKill = true
+                                end
+                            end)
+                            if not pendingKill then
+                                anyStillAlive = true
+                                break
+                            end
+                        end
+                    end
+                    if not anyStillAlive or os.clock() >= delDeadline then
+                        safePumpApplyBatch()
+                    else
+                        ExecuteInGameThreadWithDelay(100, waitForDisassembles)
+                    end
+                end
+                ExecuteInGameThreadWithDelay(100, waitForDisassembles)
                 return
             end
         end

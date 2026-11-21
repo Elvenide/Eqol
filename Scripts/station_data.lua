@@ -1963,6 +1963,9 @@ local function FindBuildableForMachineClass(machine)
     return res
 end
 
+StationData.FindBuildableForMachineClass = FindBuildableForMachineClass
+StationData.GetMachineBuildable = FindBuildableForMachineClass
+
 function StationData.GetConveyorBeltTexture(machine)
     if not Core.IsValidObj(machine) then return nil end
     local clsAddr = nil

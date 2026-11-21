@@ -772,7 +772,7 @@ local function ClampValidDropTarget(oldTechs, fromIdx, desiredIdx)
     return fromIdx, false
 end
 
-local function ReorderResearchQueue(tree, fromIdx, toIdx, expectedTech)
+local function ReorderResearchQueue(tree, fromIdx, toIdx, snapshotTechs)
     if not Core.IsValidObj(tree) or fromIdx == toIdx then return end
     local queueBox = nil
     pcall(function() queueBox = tree.ResearchQueueContainer end)
@@ -795,9 +795,20 @@ local function ReorderResearchQueue(tree, fromIdx, toIdx, expectedTech)
             return
         end
     end
-    if Core.IsValidObj(expectedTech) and oldTechs[fromIdx]:GetAddress() ~= expectedTech:GetAddress() then
-        Core.Log("[ResearchEnhancements] Aborted queue reorder: queue changed mid-drag")
-        return
+
+    -- Validate the ENTIRE live queue against the drag-start snapshot so a concurrent
+    -- multiplayer edit or research completion mid-drag never corrupts or duplicates entries.
+    if type(snapshotTechs) == "table" then
+        if #snapshotTechs ~= count then
+            Core.Log(string.format("[ResearchEnhancements] Aborted queue reorder: queue length changed mid-drag (%d -> %d)", #snapshotTechs, count))
+            return
+        end
+        for i = 1, count do
+            if not Core.IsValidObj(snapshotTechs[i]) or oldTechs[i]:GetAddress() ~= snapshotTechs[i]:GetAddress() then
+                Core.Log(string.format("[ResearchEnhancements] Aborted queue reorder: queue changed at slot %d mid-drag", i))
+                return
+            end
+        end
     end
 
     local newTechs = BuildReorderedTechs(oldTechs, fromIdx, toIdx)
@@ -832,6 +843,8 @@ local function ReorderResearchQueue(tree, fromIdx, toIdx, expectedTech)
     RefreshUI()
     ExecuteInGameThreadWithDelay(20, RefreshUI)
     ExecuteInGameThreadWithDelay(80, RefreshUI)
+    ExecuteInGameThreadWithDelay(250, RefreshUI)
+    ExecuteInGameThreadWithDelay(600, RefreshUI)
 end
 
 local function FindOwningTreeForQueueParent(parentWidget)
@@ -1035,8 +1048,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
             local toIdx = dragState.TargetIdx
             ResetQueueChildVisuals(dragState.QueueBox)
             if treeOk and wasDragging and toIdx ~= fromIdx then
-                local expectedTech = dragState.SnapshotTechs and dragState.SnapshotTechs[fromIdx] or nil
-                ReorderResearchQueue(dragState.Tree, fromIdx, toIdx, expectedTech)
+                ReorderResearchQueue(dragState.Tree, fromIdx, toIdx, dragState.SnapshotTechs)
             end
             return false
         end

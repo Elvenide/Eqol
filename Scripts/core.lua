@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.30"
+Core.VERSION = "0.1.31"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -184,48 +184,83 @@ function Core.WriteConfig()
     f:close()
 end
 
-function Core.ReadConfig(defaults)
-    if defaults then
-        for k, v in pairs(defaults) do
-            if Core.Config[k] == nil then
-                Core.Config[k] = v
+local function ParseConfigRaw(raw)
+    local parsed = {}
+    if type(raw) ~= "string" or raw == "" then return parsed end
+    for k, v in raw:gmatch('"([^"]+)"%s*:%s*([^,\r\n}]+)') do
+        local trimmed = v:match("^%s*(.-)%s*$")
+        if trimmed == "true" then
+            parsed[k] = true
+        elseif trimmed == "false" then
+            parsed[k] = false
+        else
+            local sVal = trimmed:match('^"(.*)"$')
+            if sVal ~= nil then
+                parsed[k] = sVal
+            else
+                local nVal = tonumber(trimmed)
+                if nVal ~= nil then
+                    parsed[k] = nVal
+                end
             end
         end
     end
+    return parsed
+end
 
+function Core.ReadConfig(defaults)
     local path = Core.GetConfigPath()
     local f = io.open(path, "r")
     if not f then
+        if defaults then
+            for k, v in pairs(defaults) do
+                if Core.Config[k] == nil then
+                    Core.Config[k] = v
+                end
+            end
+        end
         Core.WriteConfig()
         return
     end
     local raw = f:read("*a") or ""
     f:close()
 
+    -- Parse ALL keys currently in config.json and merge unknown keys into Core.Config
+    -- BEFORE checking dirty/writing, so incremental feature registration never wipes
+    -- saved keys belonging to features that haven't called Core.ReadConfig yet.
+    local diskValues = ParseConfigRaw(raw)
+    for k, diskVal in pairs(diskValues) do
+        if Core.Config[k] == nil then
+            Core.Config[k] = diskVal
+        end
+    end
+
     local dirty = false
-    for k, defaultVal in pairs(Core.Config) do
-        local patKey = tostring(k):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+    local keysToCheck = defaults or Core.Config
+    for k, defaultVal in pairs(keysToCheck) do
+        if Core.Config[k] == nil then
+            Core.Config[k] = defaultVal
+        end
+        local diskVal = diskValues[k]
         if type(defaultVal) == "boolean" then
-            local bVal = raw:match('"' .. patKey .. '"%s*:%s*(%a+)')
-            if bVal == "true" then
-                Core.Config[k] = true
-            elseif bVal == "false" then
-                Core.Config[k] = false
+            if type(diskVal) == "boolean" then
+                Core.Config[k] = diskVal
             else
+                Core.Config[k] = defaultVal
                 dirty = true
             end
         elseif type(defaultVal) == "number" then
-            local nVal = raw:match('"' .. patKey .. '"%s*:%s*(-?%d+%.?%d*)')
-            if nVal and tonumber(nVal) then
-                Core.Config[k] = tonumber(nVal)
+            if type(diskVal) == "number" then
+                Core.Config[k] = diskVal
             else
+                Core.Config[k] = defaultVal
                 dirty = true
             end
         else
-            local sVal = raw:match('"' .. patKey .. '"%s*:%s*"([^"]*)"')
-            if sVal and sVal ~= "" then
-                Core.Config[k] = sVal
+            if type(diskVal) == "string" and diskVal ~= "" then
+                Core.Config[k] = diskVal
             else
+                Core.Config[k] = defaultVal
                 dirty = true
             end
         end

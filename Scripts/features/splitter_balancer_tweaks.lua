@@ -262,6 +262,7 @@ local function GetCDOFromUClass(uclass)
 end
 
 local LastWorldAddr = nil
+local LoggedMultiplayerDisable = false
 
 local function GetCurrentWorldAddr()
     local pc = Core.GetLocalPlayerController()
@@ -273,7 +274,67 @@ local function GetCurrentWorldAddr()
     return nil
 end
 
+-- Walk-through mutates local simulation collision envelopes / CDO bColliderEnabled.
+-- Automatically disable walk-through in multiplayer (both listen-server host and remote clients)
+-- to prevent client/server movement desync; visual 2/3 height scaling remains active.
+local function IsMultiplayerSession()
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) then
+        -- Controller not ready yet; treat as non-standalone until valid so we never mutate early
+        return true
+    end
+
+    local isMP = false
+
+    -- 1. Official Unreal Engine net-mode check via UKismetSystemLibrary:IsStandalone(WorldContext)
+    local ksl = Core.GetCDO("/Script/Engine.Default__KismetSystemLibrary")
+    if Core.IsValidObj(ksl) and ksl.IsStandalone then
+        local okSt, standalone = pcall(function() return ksl:IsStandalone(pc) end)
+        if okSt and standalone == false then
+            isMP = true
+        end
+    end
+
+    -- 2. Fallback: UWorld:GetNetMode() (0 = NM_Standalone, 1 = Dedicated, 2 = ListenServer, 3 = Client)
+    if not isMP then
+        local okW, w = pcall(function() return pc:GetWorld() end)
+        if okW and Core.IsValidObj(w) and w.GetNetMode then
+            local okNm, nm = pcall(function() return w:GetNetMode() end)
+            if okNm and type(nm) == "number" and nm ~= 0 then
+                isMP = true
+            end
+        end
+    end
+
+    -- 3. Fallback: GameState.PlayerArray > 1
+    if not isMP then
+        pcall(function()
+            local w = pc:GetWorld()
+            local gs = Core.IsValidObj(w) and w.GameState or nil
+            if Core.IsValidObj(gs) and gs.PlayerArray then
+                local len = gs.PlayerArray.GetArrayNum and gs.PlayerArray:GetArrayNum() or #gs.PlayerArray
+                if type(len) == "number" and len > 1 then
+                    isMP = true
+                end
+            end
+        end)
+    end
+
+    return isMP
+end
+
+local function RestorePatchedSimCDOs()
+    if next(PatchedSimCDOs) == nil then return end
+    for clsName, cdo in pairs(PatchedSimCDOs) do
+        if Core.IsValidObj(cdo) then
+            pcall(function() cdo.bColliderEnabled = true end)
+        end
+        PatchedSimCDOs[clsName] = nil
+    end
+end
+
 local function EnsureSimCDODisabled(simObj)
+    if IsMultiplayerSession() then return end
     if not Core.IsValidObj(simObj) then return end
     local clsName = SafeClassName(simObj)
     if PatchedSimCDOs[clsName] then return end
@@ -281,7 +342,7 @@ local function EnsureSimCDODisabled(simObj)
         local cls = simObj:GetClass()
         local cdo = GetCDOFromUClass(cls)
         if Core.IsValidObj(cdo) then
-            PatchedSimCDOs[clsName] = true
+            PatchedSimCDOs[clsName] = cdo
             local okVal, prev = pcall(function() return cdo.bColliderEnabled end)
             if okVal and prev == true then
                 cdo.bColliderEnabled = false
@@ -640,6 +701,7 @@ local function ResetWorldCaches()
     CachedPrimCls = nil
     CachedSmCls = nil
     NeedsEnvClean = false
+    LoggedMultiplayerDisable = false
 end
 
 local function RunStaggeredScan()
@@ -651,13 +713,25 @@ local function RunStaggeredScan()
     StaggeredScanPending = false
     local myGen = ScanGeneration
 
+    local isMP = IsMultiplayerSession()
+    local allowWalkthrough = not isMP
+    if isMP then
+        RestorePatchedSimCDOs()
+        if not LoggedMultiplayerDisable then
+            LoggedMultiplayerDisable = true
+            Core.Log("[SplitterBalancerTweaks] Multiplayer session detected; walk-through automatically disabled (2/3 height remains active).")
+        end
+    end
+
     -- Build a flat list of single-class scan tasks so we never run 16 FindAllOf calls in one frame
     local tasks = {}
     for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
         tasks[#tasks + 1] = { kind = "walk_actor", cls = clsShort }
     end
-    for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
-        tasks[#tasks + 1] = { kind = "walk_sim", cls = simCls }
+    if allowWalkthrough then
+        for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
+            tasks[#tasks + 1] = { kind = "walk_sim", cls = simCls }
+        end
     end
     for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
         tasks[#tasks + 1] = { kind = "ug_actor", cls = clsShort }
@@ -681,11 +755,13 @@ local function RunStaggeredScan()
                     local doHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
                     for _, actor in ipairs(list) do
                         if Core.IsValidObj(actor) then
-                            EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
+                            if allowWalkthrough then
+                                EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
+                            end
                             if doHeight then EnsureTargetHeight(actor) end
                         end
                     end
-                elseif t.kind == "walk_sim" then
+                elseif t.kind == "walk_sim" and allowWalkthrough then
                     for _, s in ipairs(list) do
                         if Core.IsValidObj(s) then
                             local sAddr = s:GetAddress()
@@ -707,7 +783,9 @@ local function RunStaggeredScan()
             end
             ExecuteInGameThreadAfterFrames(2, Step)
         else
-            pcall(CleanTrackedEnvs)
+            if allowWalkthrough then
+                pcall(CleanTrackedEnvs)
+            end
             StaggeredScanActive = false
             if StaggeredScanPending and myGen == ScanGeneration then
                 StaggeredScanPending = false
@@ -788,18 +866,19 @@ local function RegisterMachineObjectHook()
         local myGen = ScanGeneration
         ExecuteInGameThreadWithDelay(150, function()
             if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
+            local allowWalk = isWalk and (not IsMultiplayerSession())
             local wantHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
-            if not isWalk and not wantHeight then return end
-            if isWalk then
+            if not allowWalk and not wantHeight then return end
+            if allowWalk then
                 EnsureSimCDODisabled(obj)
                 DisableSimCollider(obj, {})
                 pcall(CleanTrackedEnvs)
             end
-            if wantHeight or isWalk then
-                if not ApplyDirectToMachineActors(obj, isWalk) then
+            if wantHeight or allowWalk then
+                if not ApplyDirectToMachineActors(obj, allowWalk) then
                     ExecuteInGameThreadWithDelay(400, function()
                         if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
-                        if not ApplyDirectToMachineActors(obj, isWalk) then
+                        if not ApplyDirectToMachineActors(obj, allowWalk) then
                             ScheduleStaggeredScan(300)
                         end
                     end)
