@@ -664,6 +664,40 @@ local function StartPilotLegendPoll()
     ExecuteInGameThreadWithDelay(500, Tick)
 end
 
+local function ReadNumericOrFixed(val)
+    if type(val) == "number" then return val end
+    if val ~= nil then
+        local okV, raw = pcall(function() return val.Value end)
+        if okV and type(raw) == "number" then
+            return raw / 65536.0
+        end
+    end
+    return nil
+end
+
+local function IsShipActivelyBoosting(shipObj, pc)
+    if Core.IsValidObj(shipObj) then
+        local okB, bBoosting = pcall(function() return shipObj.bBoosting end)
+        if okB and type(bBoosting) == "boolean" then
+            if not bBoosting then return false end
+            local okC, rawCharge = pcall(function() return shipObj.BoostCharge end)
+            if okC and rawCharge ~= nil then
+                local charge = ReadNumericOrFixed(rawCharge)
+                if charge ~= nil and charge <= 0.001 then
+                    return false
+                end
+            end
+            return true
+        end
+    end
+    -- Fallback only if bBoosting property is unavailable
+    if Core.IsValidObj(pc) and KEY_SPACE and pc.IsInputKeyDown then
+        local okK, down = pcall(function() return pc:IsInputKeyDown(KEY_SPACE) == true end)
+        if okK then return down end
+    end
+    return false
+end
+
 local ScrollPollGen = 0
 
 -- On-demand frame-synchronized scroll/MMB/boost loop: runs ONLY while IsThirdPerson is active (learning.md §8)
@@ -692,7 +726,7 @@ local function StartScrollPoll()
             return
         end
 
-        local shipActor = GetPilotedShipActor(pc)
+        local shipActor, shipObj = GetPilotedShipActor(pc)
         if not Core.IsValidObj(shipActor) then
             -- Player exited the pilot seat: restore original 1st-person camera and stop polling
             if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
@@ -714,10 +748,9 @@ local function StartScrollPoll()
         local needsApply = false
 
         if not blocking then
-            -- 1. Scroll-wheel manual zoom
+            -- 1. Scroll-wheel manual zoom & MMB reset
             local delta = 0.0
             local mmbPressed = false
-            local boostHeld = false
             pcall(function()
                 if KEY_MOUSE_WHEEL_AXIS and pc.GetInputAnalogKeyState then
                     delta = tonumber(pc:GetInputAnalogKeyState(KEY_MOUSE_WHEEL_AXIS)) or 0.0
@@ -732,10 +765,8 @@ local function StartScrollPoll()
                 if KEY_MMB and pc.WasInputKeyJustPressed then
                     mmbPressed = (pc:WasInputKeyJustPressed(KEY_MMB) == true)
                 end
-                if KEY_SPACE and pc.IsInputKeyDown then
-                    boostHeld = (pc:IsInputKeyDown(KEY_SPACE) == true)
-                end
             end)
+            local isBoosting = IsShipActivelyBoosting(shipObj, pc)
 
             if mmbPressed and math.abs(ZoomMultiplier - DEFAULT_ZOOM_MULT) > 0.001 then
                 ZoomMultiplier = DEFAULT_ZOOM_MULT
@@ -754,10 +785,10 @@ local function StartScrollPoll()
                 end
             end
 
-            -- 2. Smooth reactive boost camera (independent BoostBlend 0..1)
-            local targetBlend = boostHeld and 1.0 or 0.0
+            -- 2. Smooth reactive boost camera (tracks actual shipObj.bBoosting & BoostCharge)
+            local targetBlend = isBoosting and 1.0 or 0.0
             if math.abs(BoostBlend - targetBlend) > 0.001 then
-                local rate = boostHeld and 7.5 or 4.5
+                local rate = isBoosting and 7.5 or 4.5
                 local alpha = 1.0 - math.exp(-rate * dt)
                 BoostBlend = BoostBlend + (targetBlend - BoostBlend) * alpha
                 if math.abs(BoostBlend - targetBlend) < 0.002 then
