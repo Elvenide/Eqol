@@ -1152,8 +1152,34 @@ local function ReadCockpitFuelStrings(shipActor)
                     end
                 end
             end)
+            if not (Core.IsValidObj(CockpitTextCache.UsingTB) and Core.IsValidObj(CockpitTextCache.FuelTB)) then
+                -- Fallback one-time TextBlock scan (cockpit display often lives on a child actor / sub-widget)
+                local okAll, tbs = pcall(FindAllOf, "TextBlock")
+                if okAll and tbs then
+                    for _, tb in ipairs(tbs) do
+                        if Core.IsValidObj(tb) and tb.GetText then
+                            local okT, tObj = pcall(function() return tb:GetText() end)
+                            local s = (okT and tObj and tObj.ToString) and tObj:ToString() or (type(tObj) == "string" and tObj or "")
+                            if not Core.IsValidObj(CockpitTextCache.UsingTB) and s:find("Using:", 1, true) then
+                                CockpitTextCache.UsingTB = tb
+                            elseif not Core.IsValidObj(CockpitTextCache.FuelTB) and (s:find("Fuel::", 1, true) or s:find("Fuel: ", 1, true)) then
+                                -- Avoid matching our own 3P telemetry FuelAvailTxt!
+                                local ownTB = LegendUI and Core.IsValidObj(LegendUI.FuelAvailTxt) and LegendUI.FuelAvailTxt.TextBlock or nil
+                                if not (Core.IsValidObj(ownTB) and tb:GetAddress() == ownTB:GetAddress()) then
+                                    CockpitTextCache.FuelTB = tb
+                                end
+                            end
+                            if Core.IsValidObj(CockpitTextCache.UsingTB) and Core.IsValidObj(CockpitTextCache.FuelTB) then
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+
             if Core.IsValidObj(CockpitTextCache.UsingTB) or Core.IsValidObj(CockpitTextCache.FuelTB) then
-                Core.Log("[ShipCamera] Bound live cockpit fuel TextBlocks (exact vanilla values)")
+                Core.Log(string.format("[ShipCamera] Bound live cockpit fuel TextBlocks (using=%s fuel=%s)",
+                    tostring(Core.IsValidObj(CockpitTextCache.UsingTB)), tostring(Core.IsValidObj(CockpitTextCache.FuelTB))))
             end
         end
     end
@@ -1305,27 +1331,18 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
     end
 
-    -- 3. Fuel usage & fuel availability (prefer exact live cockpit TextBlocks; fallback to calibrated shipObj scaling)
+    -- 3. Fuel usage & fuel availability (prefer exact live cockpit TextBlocks; fallback to calibrated shipObj GetTotalFuel / FuelConsumptionRate)
     local cockpitUsingStr, cockpitFuelStr = ReadCockpitFuelStrings(shipActor)
-    local fuelAvail = nil
+    local totalFuel = nil
     local fuelUse = nil
     if not cockpitUsingStr or not cockpitFuelStr then
         pcall(function()
-            if shipObj.GetRemainingFuel then fuelAvail = ReadNumericOrFixed(shipObj:GetRemainingFuel()) end
-            if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuelDouble) end
-            if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuel) end
-            if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.Fuel) end
+            if shipObj.GetTotalFuel then totalFuel = ReadNumericOrFixed(shipObj:GetTotalFuel()) end
+            if totalFuel == nil then totalFuel = ReadNumericOrFixed(shipObj.RemainingFuelDouble) end
+            if totalFuel == nil then totalFuel = ReadNumericOrFixed(shipObj.RemainingFuel) end
 
             fuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
             if fuelUse == nil then fuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
-            if fuelUse == nil and shipObj.GetPowerGrid then
-                local pg = shipObj:GetPowerGrid()
-                if Core.IsValidObj(pg) then
-                    fuelUse = ReadNumericOrFixed(pg.PowerConsumptionRate)
-                        or ReadNumericOrFixed(pg.PowerDraw)
-                        or ReadNumericOrFixed(pg.TotalConsumption)
-                end
-            end
         end)
     end
     if Core.IsValidObj(ui.FuelUseTxt) then
@@ -1335,10 +1352,10 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
     end
     if Core.IsValidObj(ui.FuelAvailTxt) then
         local aStr = cockpitFuelStr
-            or (fuelAvail and ("Fuel: " .. FormatEnergyValue(fuelAvail * 6.0, false)) or "Fuel: --")
+            or (totalFuel and ("Fuel: " .. FormatEnergyValue(totalFuel * 0.005, false)) or "Fuel: --")
         pcall(function() ui.FuelAvailTxt:SetText(Core.MakeText(aStr)) end)
-        local lowFuel = (fuelAvail ~= nil and fuelAvail <= 0.1)
-            or (cockpitFuelStr ~= nil and cockpitFuelStr:find("0.0 ", 1, true) ~= nil)
+        local lowFuel = (totalFuel ~= nil and totalFuel <= 0.1)
+            or (cockpitFuelStr ~= nil and (cockpitFuelStr:find("0.0 ", 1, true) ~= nil or cockpitFuelStr:find("0 kJ", 1, true) ~= nil))
         SetWBPTextCol(ui.FuelAvailTxt, lowFuel and TELEM_RED or TELEM_GOLD)
     end
 
@@ -1386,9 +1403,9 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
 
     if not TelemetryDiagLogged then
         TelemetryDiagLogged = true
-        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%s fuel=%s hull=%s/%s",
+        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%s totalFuel=%s cockpit=(%s | %s) hull=%s/%s",
             tostring(boostCharge), tostring(effMaxBoost), speedMs,
-            tostring(fuelUse), tostring(fuelAvail), tostring(curHull), tostring(maxHull)))
+            tostring(fuelUse), tostring(totalFuel), tostring(cockpitUsingStr), tostring(cockpitFuelStr), tostring(curHull), tostring(maxHull)))
     end
 end
 
