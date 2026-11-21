@@ -423,7 +423,20 @@ local function EnsureEqolSettingsTab(menu)
 
     local addedSlot = nil
     pcall(function()
-        if tabBar.AddChildToHorizontalBox then
+        if tabBar.AddChildToGrid then
+            local refRow, refCol = 0, 0
+            if Core.IsValidObj(refTabBtn) and Core.IsValidObj(refTabBtn.Slot) then
+                pcall(function()
+                    refRow = tonumber(refTabBtn.Slot.Row) or 0
+                    refCol = tonumber(refTabBtn.Slot.Column) or 0
+                end)
+            end
+            local targetRow, targetCol = refRow, refCol + 1
+            if refRow > refCol then
+                targetRow, targetCol = refRow + 1, refCol
+            end
+            addedSlot = tabBar:AddChildToGrid(tabOverlay, targetRow, targetCol)
+        elseif tabBar.AddChildToHorizontalBox then
             addedSlot = tabBar:AddChildToHorizontalBox(tabOverlay)
         elseif tabBar.AddChildToVerticalBox then
             addedSlot = tabBar:AddChildToVerticalBox(tabOverlay)

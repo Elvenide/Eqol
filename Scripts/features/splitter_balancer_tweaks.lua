@@ -609,8 +609,17 @@ local function EnsureTargetHeight(actor)
     end
 end
 
+local StaggeredScanActive = false
+local StaggeredScanPending = false
+local DebouncedScanScheduled = false
+local DebouncedScanGen = 0
+
 local function ResetWorldCaches()
     ScanGeneration = ScanGeneration + 1
+    StaggeredScanActive = false
+    StaggeredScanPending = false
+    DebouncedScanScheduled = false
+    DebouncedScanGen = DebouncedScanGen + 1
     OrigMeshState = {}
     ProcessedHeightActors = {}
     ProcessedCollisionActors = {}
@@ -624,9 +633,6 @@ local function ResetWorldCaches()
     CachedSmCls = nil
     NeedsEnvClean = false
 end
-
-local StaggeredScanActive = false
-local StaggeredScanPending = false
 
 local function RunStaggeredScan()
     if not Core.IsFeatureEnabled("SplitterBalancerTweaks") then return end
@@ -703,12 +709,14 @@ local function RunStaggeredScan()
     ExecuteInGameThreadAfterFrames(1, Step)
 end
 
-local DebouncedScanScheduled = false
 local function ScheduleStaggeredScan(delayMs)
     if DebouncedScanScheduled then return end
     DebouncedScanScheduled = true
+    DebouncedScanGen = DebouncedScanGen + 1
+    local myDebGen = DebouncedScanGen
     local myGen = ScanGeneration
     ExecuteInGameThreadWithDelay(delayMs or 400, function()
+        if myDebGen ~= DebouncedScanGen then return end
         DebouncedScanScheduled = false
         if myGen == ScanGeneration then
             RunStaggeredScan()
