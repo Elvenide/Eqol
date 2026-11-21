@@ -10,14 +10,14 @@ local Feature = {
     Description = "Hotkey (default H) for 3rd-person ship perspective with scroll-wheel zoom.",
 }
 
-local MIN_ARM_DIST = 600.0
-local MAX_ARM_DIST = 8000.0
-local ZOOM_STEP = 350.0
+local MIN_ZOOM_MULT = 0.65
+local MAX_ZOOM_MULT = 3.00
+local ZOOM_MULT_STEP = 0.15
 
 local IsThirdPerson = false
-local ThirdPersonDist = 2200.0
+local ZoomMultiplier = 1.0
 local ScrollPollActive = false
-local SavedOriginalCamera = {} -- shipActorAddr -> { ShipActor, ShipObj, SpringArm, TargetArmLength, Cam, RelativeLocation }
+local SavedOriginalCamera = {} -- shipActorAddr -> { ShipActor, ShipObj, SpringArm, TargetArmLength, Cam, RelativeLocation, RelativeRotation, ShipRadius }
 local ActiveShipAddr = nil
 
 -- Hoisted FName key tables (avoids per-frame FName allocation; see learning.md §8)
@@ -117,6 +117,62 @@ local function FindShipCameraComponents(shipActor, pc)
     return springArm, cam
 end
 
+local function MeasureShipRadiusCm(shipActor)
+    local radius = 1400.0
+    if not Core.IsValidObj(shipActor) then return radius end
+
+    -- 1. Try native GetActorBounds(false, Origin, BoxExtent) which spans all custom-built blocks on the ship
+    local gotBounds = false
+    pcall(function()
+        if shipActor.GetActorBounds then
+            local outOrigin = {}
+            local outExtent = {}
+            shipActor:GetActorBounds(false, outOrigin, outExtent)
+            local ex = math.abs(tonumber(outExtent.X) or 0.0)
+            local ey = math.abs(tonumber(outExtent.Y) or 0.0)
+            local ez = math.abs(tonumber(outExtent.Z) or 0.0)
+            local r = math.sqrt(ex * ex + ey * ey + ez * ez)
+            if r > 150.0 then
+                radius = r
+                gotBounds = true
+            end
+        end
+    end)
+
+    -- 2. Fallback: scan StaticMeshComponents' local bounds if GetActorBounds returned zero/small
+    if not gotBounds and shipActor.K2_GetComponentsByClass then
+        pcall(function()
+            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            if not Core.IsValidObj(smCls) then return end
+            local arr = shipActor:K2_GetComponentsByClass(smCls)
+            if not arr then return end
+            local len = arr.GetArrayNum and arr:GetArrayNum() or #arr
+            local maxR = 0.0
+            for i = 1, len do
+                local c = Core.UnwrapArrayElem(arr[i])
+                if Core.IsValidObj(c) then
+                    local rl = c.RelativeLocation
+                    local lx = rl and (tonumber(rl.X) or 0.0) or 0.0
+                    local ly = rl and (tonumber(rl.Y) or 0.0) or 0.0
+                    local lz = rl and (tonumber(rl.Z) or 0.0) or 0.0
+                    local ext = 100.0
+                    local sm = c.StaticMesh
+                    if Core.IsValidObj(sm) and sm.ExtendedBounds and sm.ExtendedBounds.SphereRadius then
+                        ext = tonumber(sm.ExtendedBounds.SphereRadius) or 100.0
+                    end
+                    local d = math.sqrt(lx * lx + ly * ly + lz * lz) + ext
+                    if d > maxR then maxR = d end
+                end
+            end
+            if maxR > 150.0 then
+                radius = maxR
+            end
+        end)
+    end
+
+    return math.max(800.0, radius)
+end
+
 local function SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
     if not Core.IsValidObj(shipActor) then return nil end
     local addr = shipActor:GetAddress()
@@ -130,6 +186,8 @@ local function SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
         TargetArmLength = 0.0,
         Cam = cam,
         RelativeLocation = { X = 0.0, Y = 0.0, Z = 0.0 },
+        RelativeRotation = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 },
+        ShipRadius = MeasureShipRadiusCm(shipActor),
     }
     if Core.IsValidObj(springArm) then
         pcall(function()
@@ -143,6 +201,10 @@ local function SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
             local rel = cam.RelativeLocation
             if rel and type(rel.X) == "number" then
                 saved.RelativeLocation = { X = rel.X, Y = rel.Y or 0.0, Z = rel.Z or 0.0 }
+            end
+            local rot = cam.RelativeRotation
+            if rot and type(rot.Yaw) == "number" then
+                saved.RelativeRotation = { Pitch = rot.Pitch or 0.0, Yaw = rot.Yaw or 0.0, Roll = rot.Roll or 0.0 }
             end
         end)
     end
@@ -232,15 +294,23 @@ local function ApplyShipCameraState(pc)
     local saved = SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
     ActiveShipAddr = newAddr
 
-    Core.Log(string.format("[ShipCamera] Apply 3P=%s dist=%.0f actor=%s arm=%s cam=%s",
-        tostring(IsThirdPerson), ThirdPersonDist,
+    -- Re-measure ship radius when toggling into 3P in case the ship was redesigned/modified
+    if IsThirdPerson and saved then
+        saved.ShipRadius = MeasureShipRadiusCm(shipActor)
+    end
+    local shipRadius = (saved and saved.ShipRadius) or 1400.0
+    local backDist = shipRadius * 1.65 * ZoomMultiplier
+    local upHeight = shipRadius * 0.48 * ZoomMultiplier
+
+    Core.Log(string.format("[ShipCamera] Apply 3P=%s radius=%.0f back=%.0f up=%.0f actor=%s arm=%s cam=%s",
+        tostring(IsThirdPerson), shipRadius, backDist, upHeight,
         Core.IsValidObj(shipActor) and shipActor:GetClass():GetFName():ToString() or "nil",
         tostring(Core.IsValidObj(springArm)), tostring(Core.IsValidObj(cam))))
 
     if Core.IsValidObj(springArm) then
         pcall(function()
             if IsThirdPerson then
-                springArm.TargetArmLength = ThirdPersonDist
+                springArm.TargetArmLength = backDist
             else
                 springArm.TargetArmLength = saved and saved.TargetArmLength or 0.0
             end
@@ -249,10 +319,25 @@ local function ApplyShipCameraState(pc)
 
     if Core.IsValidObj(cam) and not Core.IsValidObj(springArm) then
         pcall(function()
+            local orig = saved and saved.RelativeLocation or { X = 0.0, Y = 0.0, Z = 0.0 }
+            local rot = saved and saved.RelativeRotation or { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
             if IsThirdPerson then
-                cam:K2_SetRelativeLocation({ X = -ThirdPersonDist, Y = 0.0, Z = ThirdPersonDist * 0.28 }, false, {}, false)
+                -- Offset cleanly behind and above the entire ship bounding sphere along the camera's true local basis
+                -- so the camera is always outside custom-built ships with the forward flight path unobstructed
+                local yawRad = math.rad(rot.Yaw or 0.0)
+                local pitchRad = math.rad(rot.Pitch or 0.0)
+                local fwdX = math.cos(pitchRad) * math.cos(yawRad)
+                local fwdY = math.cos(pitchRad) * math.sin(yawRad)
+                local fwdZ = math.sin(pitchRad)
+                local upX = -math.sin(pitchRad) * math.cos(yawRad)
+                local upY = -math.sin(pitchRad) * math.sin(yawRad)
+                local upZ = math.cos(pitchRad)
+
+                local tx = orig.X - fwdX * backDist + upX * upHeight
+                local ty = orig.Y - fwdY * backDist + upY * upHeight
+                local tz = orig.Z - fwdZ * backDist + upZ * upHeight
+                cam:K2_SetRelativeLocation({ X = tx, Y = ty, Z = tz }, false, {}, false)
             else
-                local orig = saved and saved.RelativeLocation or { X = 0.0, Y = 0.0, Z = 0.0 }
                 cam:K2_SetRelativeLocation(orig, false, {}, false)
             end
         end)
@@ -319,10 +404,10 @@ local function StartScrollPoll()
                 end
             end)
             if delta > 0.01 then
-                ThirdPersonDist = Core.Clamp(ThirdPersonDist - ZOOM_STEP, MIN_ARM_DIST, MAX_ARM_DIST)
+                ZoomMultiplier = Core.Clamp(ZoomMultiplier - ZOOM_MULT_STEP, MIN_ZOOM_MULT, MAX_ZOOM_MULT)
                 ApplyShipCameraState(pc)
             elseif delta < -0.01 then
-                ThirdPersonDist = Core.Clamp(ThirdPersonDist + ZOOM_STEP, MIN_ARM_DIST, MAX_ARM_DIST)
+                ZoomMultiplier = Core.Clamp(ZoomMultiplier + ZOOM_MULT_STEP, MIN_ZOOM_MULT, MAX_ZOOM_MULT)
                 ApplyShipCameraState(pc)
             end
         end
