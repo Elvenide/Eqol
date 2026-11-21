@@ -64,7 +64,7 @@ local COLORS = {
     GhostInvalid  = { R = 1.000, G = 0.320, B = 0.320, A = 0.58 },
     GhostBorderOk = { R = 0.350, G = 0.920, B = 0.650, A = 0.90 },
     GhostBorderBad= { R = 1.000, G = 0.300, B = 0.300, A = 0.90 },
-    WallFill      = { R = 0.030, G = 0.040, B = 0.056, A = 1.00 },
+    WallFill      = { R = 0.013, G = 0.017, B = 0.023, A = 1.00 },
     WallBorder    = { R = 0.860, G = 0.910, B = 0.970, A = 0.92 },
     FloorRailBg   = { R = 0.045, G = 0.060, B = 0.082, A = 0.95 },
     FloorSelected = { R = 0.940, G = 0.620, B = 0.080, A = 1.00 },
@@ -2346,6 +2346,18 @@ UpdateStatusBanner = function(textOverride)
     end
     if Core.IsValidObj(MapUI.StatusText) and textOverride then
         pcall(function() MapUI.StatusText:SetText(Core.MakeText(textOverride)) end)
+    end
+    local hasSelection = (selCount > 0)
+    local canRotate = (InteractionMode == "Paste" and #Clipboard > 0)
+        or (InteractionMode == "Place" and Core.IsValidObj(PendingBuildable))
+    if Core.IsValidObj(MapUI.HintCopyRow) then
+        pcall(function() MapUI.HintCopyRow:SetVisibility(hasSelection and 3 or 1) end)
+    end
+    if Core.IsValidObj(MapUI.HintDeleteRow) then
+        pcall(function() MapUI.HintDeleteRow:SetVisibility(hasSelection and 3 or 1) end)
+    end
+    if Core.IsValidObj(MapUI.HintRotateRow) then
+        pcall(function() MapUI.HintRotateRow:SetVisibility(canRotate and 3 or 1) end)
     end
 end
 
@@ -4748,44 +4760,16 @@ local function EnsureInputPoll()
             MouseState.lPanning = false
         end
 
-        -- Handle Right or Middle Mouse Button (drag to pan anywhere over map at 120 FPS; quick right-click cancels Place/Paste)
-        local panDown = rDown or mDown
-        if panDown and not MouseState.wasRDown then
-            if insideMap and not WaitingForBuildMenuSelection then
-                MouseState.rDownInMap = true
-                MouseState.rPanning = false
-                MouseState.rStartX = mx
-                MouseState.rStartY = my
-                MouseState.panStartCx = ViewTransform.cx
-                MouseState.panStartCy = ViewTransform.cy
-            else
-                MouseState.rDownInMap = false
-            end
-        elseif panDown and MouseState.rDownInMap and mx and my then
-            local dx = mx - MouseState.rStartX
-            local dy = my - MouseState.rStartY
-            if not MouseState.rPanning and (dx * dx + dy * dy) > 25.0 then
-                MouseState.rPanning = true
-            end
-            if MouseState.rPanning and cursorMoved then
-                ViewTransform.cx = MouseState.panStartCx - dx / ViewTransform.scale
-                ViewTransform.cy = MouseState.panStartCy - dy / ViewTransform.scale
-                ApplyViewTransform()
-            end
-        elseif not panDown and MouseState.wasRDown then
-            if MouseState.rDownInMap then
-                if MouseState.rPanning and mx and my then
-                    local dx = mx - MouseState.rStartX
-                    local dy = my - MouseState.rStartY
-                    ViewTransform.cx = MouseState.panStartCx - dx / ViewTransform.scale
-                    ViewTransform.cy = MouseState.panStartCy - dy / ViewTransform.scale
-                    ApplyViewTransform()
-                elseif InteractionMode == "Place" or InteractionMode == "Paste" then
-                    InteractionMode = "Select"
-                    PendingBuildable = nil
-                    UpdateStatusBanner()
-                    RefreshDynamicOverlay()
-                end
+        -- Handle Right Mouse Button (cancels Place/Paste mode; panning is handled via WASD/Arrows)
+        if rDown and not MouseState.wasRDown then
+            MouseState.rDownInMap = (insideMap and not WaitingForBuildMenuSelection)
+            MouseState.rPanning = false
+        elseif not rDown and MouseState.wasRDown then
+            if MouseState.rDownInMap and (InteractionMode == "Place" or InteractionMode == "Paste") then
+                InteractionMode = "Select"
+                PendingBuildable = nil
+                UpdateStatusBanner()
+                RefreshDynamicOverlay()
             end
             MouseState.rDownInMap = false
             MouseState.rPanning = false
@@ -4820,7 +4804,7 @@ local function EnsureInputPoll()
         end
 
         MouseState.wasLDown = lDown
-        MouseState.wasRDown = panDown
+        MouseState.wasRDown = rDown
 
         -- Only rebuild screen-space overlay when cursor actually moved (never churn when stationary during box-select)
         if MouseState.lDraggingBox or InteractionMode ~= "Select" then
@@ -4982,6 +4966,65 @@ CloseStationMap = function()
     end
 end
 
+local CachedLMBIconTex = nil
+local LMBIconSearched = false
+
+local function FindLMBIconTexture()
+    if Core.IsValidObj(CachedLMBIconTex) then return CachedLMBIconTex end
+    if LMBIconSearched then return nil end
+    LMBIconSearched = true
+
+    local candidatePaths = {
+        "/Game/Materials/UI_Textures/T_LMB.T_LMB",
+        "/Game/Materials/UI_Textures/T_MouseLeft.T_MouseLeft",
+        "/Game/Materials/UI_Textures/T_Mouse_Left.T_Mouse_Left",
+        "/Game/Materials/UI_Textures/T_LeftMouse.T_LeftMouse",
+        "/Game/Materials/UI_Textures/T_LeftMouseButton.T_LeftMouseButton",
+        "/Game/Materials/Icons/T_LMB.T_LMB",
+        "/Game/Materials/Icons/T_MouseLeft.T_MouseLeft",
+        "/Game/Materials/Icons/T_Mouse_Left.T_Mouse_Left",
+        "/Game/Textures/Icons/T_LMB.T_LMB",
+        "/Game/Textures/Icons/T_MouseLeft.T_MouseLeft",
+        "/Game/Textures/Icons/T_Mouse_Left.T_Mouse_Left",
+        "/Game/Textures/UI/T_MouseLeft.T_MouseLeft",
+        "/Game/Textures/UI/T_LMB.T_LMB",
+    }
+    for _, p in ipairs(candidatePaths) do
+        local tex = Core.FindOrLoadClass(p)
+        if Core.IsValidObj(tex) then
+            CachedLMBIconTex = tex
+            return tex
+        end
+    end
+
+    local mouseMatches = {}
+    local okAll, texList = pcall(FindAllOf, "Texture2D")
+    if okAll and texList then
+        for _, tex in ipairs(texList) do
+            if Core.IsValidObj(tex) then
+                local okN, fullName = pcall(function() return tex:GetFullName() end)
+                if okN and type(fullName) == "string" then
+                    local low = fullName:lower()
+                    if low:find("lmb", 1, true)
+                        or (low:find("mouse", 1, true) and (low:find("left", 1, true) or low:find("_l.", 1, true) or low:find("_l_", 1, true)))
+                    then
+                        CachedLMBIconTex = tex
+                        Core.Log("[StationMap] Found LMB icon texture: " .. fullName)
+                        return tex
+                    elseif low:find("mouse", 1, true) and #mouseMatches < 10 then
+                        mouseMatches[#mouseMatches + 1] = fullName
+                    end
+                end
+            end
+        end
+    end
+
+    if #mouseMatches > 0 then
+        Core.Log("[StationMap] Mouse Texture2D candidates: " .. table.concat(mouseMatches, " | "))
+    end
+    return nil
+end
+
 local function OpenStationMap()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
@@ -5043,9 +5086,15 @@ local function OpenStationMap()
         DestroyStationMap()
     end
 
-    local win = Core.CreateUserWidget(PATHS.WindowBaseClass, pc, pc)
+    local isPlainRoot = false
+    local win = Core.CreateUserWidget("/Script/UMG.UserWidget", pc, pc)
+    if Core.IsValidObj(win) and Core.IsValidObj(win.WidgetTree) then
+        isPlainRoot = true
+    else
+        win = Core.CreateUserWidget(PATHS.WindowBaseClass, pc, pc)
+    end
     if not Core.IsValidObj(win) then
-        Core.Log("StationMap: failed to construct WBP_WindowBase_C")
+        Core.Log("StationMap: failed to construct fullscreen root widget")
         return
     end
 
@@ -5054,34 +5103,35 @@ local function OpenStationMap()
     MapWinInViewport = true
     local outer = Core.GetWidgetOuter(win)
 
-    pcall(function()
-        win:SetWindowName(Core.MakeText("Station Map"))
-        win:AddToViewport(200)
-        win:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
-        if win.SetAlignmentInViewport then
-            win:SetAlignmentInViewport({ X = 0.0, Y = 0.0 })
-        end
-        if Core.IsValidObj(win.WBP_WindowHeader) then
-            win.WBP_WindowHeader:SetVisibility(1) -- Collapsed (fullscreen map, no titlebar)
-        end
-        -- Strip outer WBP_WindowBase_C padding/chrome so the map fills 100% of the screen edge-to-edge
-        local cur = win.Content
-        for _ = 1, 5 do
-            if not Core.IsValidObj(cur) then break end
-            if cur.SetPadding then
-                pcall(function() cur:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end)
+    if not isPlainRoot then
+        pcall(function()
+            win:SetWindowName(Core.MakeText("Station Map"))
+            win:AddToViewport(200)
+            win:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+            if win.SetAlignmentInViewport then
+                win:SetAlignmentInViewport({ X = 0.0, Y = 0.0 })
             end
-            if cur.SetBrushColor then
-                pcall(function() cur:SetBrushColor(COLORS.Transparent) end)
+            if Core.IsValidObj(win.WBP_WindowHeader) then
+                win.WBP_WindowHeader:SetVisibility(1) -- Collapsed (fullscreen map, no titlebar)
             end
-            local sl = cur.Slot
-            if Core.IsValidObj(sl) and sl.SetPadding then
-                pcall(function() sl:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end)
+            local cur = win.Content
+            for _ = 1, 5 do
+                if not Core.IsValidObj(cur) then break end
+                if cur.SetPadding then
+                    pcall(function() cur:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end)
+                end
+                if cur.SetBrushColor then
+                    pcall(function() cur:SetBrushColor(COLORS.Transparent) end)
+                end
+                local sl = cur.Slot
+                if Core.IsValidObj(sl) and sl.SetPadding then
+                    pcall(function() sl:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end)
+                end
+                local okP, par = pcall(function() return cur:GetParent() end)
+                cur = okP and par or nil
             end
-            local okP, par = pcall(function() return cur:GetParent() end)
-            cur = okP and par or nil
-        end
-    end)
+        end)
+    end
     SetStationMapCursorMode(pc, win, true)
 
     local mapBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
@@ -5229,46 +5279,53 @@ local function OpenStationMap()
         end
         mapBg:AddChild(mapOverlay)
 
-        local attached = false
-        if Core.IsValidObj(win.Content) then
-            local okC = pcall(function() win.Content:AddChild(mapBg) end)
-            if okC then attached = true end
-        end
-        if not attached and Core.IsValidObj(win.ContentBorder) then
-            pcall(function() win.ContentBorder:AddChild(mapBg) end)
-        end
-        win:SetContentForSlot(FName("Content"), mapBg)
+        if isPlainRoot then
+            win.WidgetTree.RootWidget = mapBg
+            win:AddToViewport(200)
+            win:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+            if win.SetAlignmentInViewport then
+                win:SetAlignmentInViewport({ X = 0.0, Y = 0.0 })
+            end
+        else
+            local attached = false
+            if Core.IsValidObj(win.Content) then
+                local okC = pcall(function() win.Content:AddChild(mapBg) end)
+                if okC then attached = true end
+            end
+            if not attached and Core.IsValidObj(win.ContentBorder) then
+                pcall(function() win.ContentBorder:AddChild(mapBg) end)
+            end
+            win:SetContentForSlot(FName("Content"), mapBg)
 
-        -- Walk up from mapBg to the root of WBP_WindowBase_C, collapsing sibling window chrome
-        -- (titlebar, outer frame, top gold line) and zeroing all padding/margins for true edge-to-edge fullscreen
-        local cur = mapBg
-        for _ = 1, 8 do
-            if not Core.IsValidObj(cur) then break end
-            local curAddr = cur:GetAddress()
-            local sl = cur.Slot
-            if Core.IsValidObj(sl) then
-                if sl.SetPadding then pcall(function() sl:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
-                if sl.SetHorizontalAlignment then pcall(function() sl:SetHorizontalAlignment(0) end) end
-                if sl.SetVerticalAlignment then pcall(function() sl:SetVerticalAlignment(0) end) end
-                if sl.SetAnchors then pcall(function() sl:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } }) end) end
-                if sl.SetOffsets then pcall(function() sl:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
-            end
-            local okP, par = pcall(function() return cur:GetParent() end)
-            if not okP or not Core.IsValidObj(par) then break end
-            if par.SetPadding then pcall(function() par:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
-            if par.SetBrushColor then pcall(function() par:SetBrushColor(COLORS.Transparent) end) end
-            if par.GetChildrenCount and par.GetChildAt then
-                pcall(function()
-                    local cnt = par:GetChildrenCount()
-                    for i = 0, cnt - 1 do
-                        local ch = par:GetChildAt(i)
-                        if Core.IsValidObj(ch) and ch:GetAddress() ~= curAddr then
-                            ch:SetVisibility(1)
+            local cur = mapBg
+            for _ = 1, 8 do
+                if not Core.IsValidObj(cur) then break end
+                local curAddr = cur:GetAddress()
+                local sl = cur.Slot
+                if Core.IsValidObj(sl) then
+                    if sl.SetPadding then pcall(function() sl:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
+                    if sl.SetHorizontalAlignment then pcall(function() sl:SetHorizontalAlignment(0) end) end
+                    if sl.SetVerticalAlignment then pcall(function() sl:SetVerticalAlignment(0) end) end
+                    if sl.SetAnchors then pcall(function() sl:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } }) end) end
+                    if sl.SetOffsets then pcall(function() sl:SetOffsets({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
+                end
+                local okP, par = pcall(function() return cur:GetParent() end)
+                if not okP or not Core.IsValidObj(par) then break end
+                if par.SetPadding then pcall(function() par:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 }) end) end
+                if par.SetBrushColor then pcall(function() par:SetBrushColor(COLORS.Transparent) end) end
+                if par.GetChildrenCount and par.GetChildAt then
+                    pcall(function()
+                        local cnt = par:GetChildrenCount()
+                        for i = 0, cnt - 1 do
+                            local ch = par:GetChildAt(i)
+                            if Core.IsValidObj(ch) and ch:GetAddress() ~= curAddr then
+                                ch:SetVisibility(1)
+                            end
                         end
-                    end
-                end)
+                    end)
+                end
+                cur = par
             end
-            cur = par
         end
     end)
 
@@ -5368,43 +5425,71 @@ local function OpenStationMap()
         end
     end
 
-    -- 3. Bottom-Left Keybind Hints Overlay (matching World Map bottom-left WBP_InputKey style)
+    -- 3. Bottom-Left Keybind Hints Overlay (matching World Map bottom-left style)
     local keybindsVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local hintCopyRow, hintDeleteRow, hintRotateRow = nil, nil, nil
     if Core.IsValidObj(keybindsVBox) then
         pcall(function() keybindsVBox:SetVisibility(4) end) -- SelfHitTestInvisible
+        local lmbTex = FindLMBIconTexture()
         local keybindDefs = {
-            { key = "LMB",    label = "Select / Box Select (Shift: Multi)" },
-            { key = "RMB",    label = "Pan Map" },
-            { key = "SCROLL", label = "Zoom" },
-            { key = "B",      label = "Build Machine" },
-            { key = "CTRL+C", label = "Copy Selected" },
-            { key = "R",      label = "Rotate" },
-            { key = "X",      label = "Delete Selected" },
+            { id = "select", key = "LMB",    iconTex = lmbTex, label = "Box Select",      conditional = false },
+            { id = "pan",    key = "WASD",   iconTex = nil,    label = "Pan Map",         conditional = false },
+            { id = "zoom",   key = "SCROLL", iconTex = nil,    label = "Zoom",            conditional = false },
+            { id = "copy",   key = "CTRL+C", iconTex = nil,    label = "Copy Selected",   conditional = true  },
+            { id = "delete", key = "X",      iconTex = nil,    label = "Delete Selected", conditional = true  },
+            { id = "rotate", key = "R",      iconTex = nil,    label = "Rotate",          conditional = true  },
         }
         local hintLabelCol = { R = 0.86, G = 0.88, B = 0.92, A = 0.96 }
         local capFillCol   = { R = 0.0194, G = 0.0194, B = 0.0194, A = 0.96 } -- ~#262626 in sRGB
         for rIdx, def in ipairs(keybindDefs) do
             local rowHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
             if Core.IsValidObj(rowHBox) then
-                pcall(function() rowHBox:SetVisibility(3) end) -- HitTestInvisible
+                pcall(function() rowHBox:SetVisibility(def.conditional and 1 or 3) end) -- Conditional rows start Collapsed
                 local capBg = CreateRawFast(PATHS.BorderClass, outer)
-                local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
-                if Core.IsValidObj(capBg) and Core.IsValidObj(capTxt) then
-                    pcall(function()
-                        capBg:SetBrushColor(capFillCol)
-                        capBg:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
-                        capBg:SetVisibility(3)
-                        capTxt:SetVisibility(3)
-                        capTxt:SetSize(10)
-                        capTxt:SetText(Core.MakeText(def.key))
-                        if Core.IsValidObj(capTxt.TextBlock) and capTxt.TextBlock.SetColorAndOpacity then
-                            capTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
+                if Core.IsValidObj(capBg) then
+                    local builtBadge = false
+                    if Core.IsValidObj(def.iconTex) then
+                        local iconSb = CreateRawFast(PATHS.SizeBoxClass, outer)
+                        local iconImg = CreateRawFast(PATHS.ImageClass, outer)
+                        if Core.IsValidObj(iconSb) and Core.IsValidObj(iconImg) then
+                            pcall(function()
+                                capBg:SetBrushColor(capFillCol)
+                                capBg:SetPadding({ Left = 4.0, Top = 3.0, Right = 4.0, Bottom = 3.0 })
+                                capBg:SetVisibility(3)
+                                iconSb:SetWidthOverride(18.0)
+                                iconSb:SetHeightOverride(18.0)
+                                iconSb:SetVisibility(3)
+                                iconImg:SetBrushFromTexture(def.iconTex, false)
+                                iconImg:SetVisibility(3)
+                                iconSb:AddChild(iconImg)
+                                capBg:AddChild(iconSb)
+                            end)
+                            builtBadge = true
                         end
-                        capBg:AddChild(capTxt)
-                    end)
-                    local kSlot = rowHBox:AddChildToHorizontalBox(capBg)
-                    if Core.IsValidObj(kSlot) then
-                        pcall(function() kSlot:SetVerticalAlignment(2) end)
+                    end
+                    if not builtBadge then
+                        local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
+                        if Core.IsValidObj(capTxt) then
+                            pcall(function()
+                                capBg:SetBrushColor(capFillCol)
+                                capBg:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
+                                capBg:SetVisibility(3)
+                                capTxt:SetVisibility(3)
+                                capTxt:SetSize(10)
+                                capTxt:SetText(Core.MakeText(def.key))
+                                if Core.IsValidObj(capTxt.TextBlock) and capTxt.TextBlock.SetColorAndOpacity then
+                                    capTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
+                                end
+                                capBg:AddChild(capTxt)
+                            end)
+                            builtBadge = true
+                        end
+                    end
+                    if builtBadge then
+                        local kSlot = rowHBox:AddChildToHorizontalBox(capBg)
+                        if Core.IsValidObj(kSlot) then
+                            pcall(function() kSlot:SetVerticalAlignment(2) end)
+                        end
                     end
                 end
 
@@ -5433,6 +5518,11 @@ local function OpenStationMap()
                         rSlot:SetHorizontalAlignment(1) -- Left
                         rSlot:SetPadding({ Left = 0.0, Top = (rIdx == 1) and 0.0 or 5.0, Right = 0.0, Bottom = 0.0 })
                     end)
+                end
+
+                if def.id == "copy" then hintCopyRow = rowHBox
+                elseif def.id == "delete" then hintDeleteRow = rowHBox
+                elseif def.id == "rotate" then hintRotateRow = rowHBox
                 end
             end
         end
@@ -5637,6 +5727,9 @@ local function OpenStationMap()
         ApplyBtnText = applyBtnText,
         DiscardBtn = discardWrap,
         CloseBtnFrame = closeBtnFrame,
+        HintCopyRow = hintCopyRow,
+        HintDeleteRow = hintDeleteRow,
+        HintRotateRow = hintRotateRow,
         SelPillWrap = selPillWrap,
         SelPillText = selPillText,
         DelPillWrap = delPillWrap,
