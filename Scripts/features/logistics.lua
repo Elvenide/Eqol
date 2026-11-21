@@ -487,12 +487,55 @@ local function SetLogisticsCursorMode(pc, win, active)
     end
 end
 
-local function CloseLogisticsWindow()
+local ActiveLogisticsVisible = false
+local CachedWidgetClasses = {}
+local CachedWblCDO = nil
+
+local function CreateRawFast(classPath, outer)
+    local cls = CachedWidgetClasses[classPath]
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(classPath)
+        if Core.IsValidObj(cls) then CachedWidgetClasses[classPath] = cls end
+    end
+    if not Core.IsValidObj(cls) or not Core.IsValidObj(outer) then return nil end
+    local ok, w = pcall(StaticConstructObject, cls, outer)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
+
+local function CreateUserWidgetFast(classPath, worldContext, owningPC)
+    if not Core.IsValidObj(CachedWblCDO) then
+        CachedWblCDO = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
+    end
+    local cls = CachedWidgetClasses[classPath]
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(classPath)
+        if Core.IsValidObj(cls) then CachedWidgetClasses[classPath] = cls end
+    end
+    if not Core.IsValidObj(CachedWblCDO) or not Core.IsValidObj(cls) or not Core.IsValidObj(worldContext) then
+        return nil
+    end
+    local ok, w = pcall(function() return CachedWblCDO:Create(worldContext, cls, owningPC) end)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
+
+local function DestroyLogisticsWindow()
+    ActiveLogisticsVisible = false
     if Core.IsValidObj(ActiveLogisticsWin) then
+        if Core.IsValidObj(ActiveLogisticsWin.WBP_WindowHeader) and Core.IsValidObj(ActiveLogisticsWin.WBP_WindowHeader.CloseButton) then
+            Core.UnregisterWBPButtonClick(ActiveLogisticsWin.WBP_WindowHeader.CloseButton)
+        end
         pcall(function() ActiveLogisticsWin:RemoveFromParent() end)
     end
     ActiveLogisticsWin = nil
     ActiveLogisticsUI = nil
+    SetLogisticsCursorMode(Core.GetLocalPlayerController(), nil, false)
+end
+
+local function CloseLogisticsWindow()
+    ActiveLogisticsVisible = false
+    if Core.IsValidObj(ActiveLogisticsWin) then
+        pcall(function() ActiveLogisticsWin:SetVisibility(1) end) -- Collapsed for instant reopen (learning.md §8)
+    end
     SetLogisticsCursorMode(Core.GetLocalPlayerController(), nil, false)
 end
 
@@ -506,9 +549,9 @@ local function FormatRate(rate)
 end
 
 local function AddItemRateChip(parentHBox, window, pc, outer, item, rate, tintColor)
-    local chipBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, window, pc)
-    local rateTxt = Core.CreateUserWidget(PATHS.WBPTextClass, window, pc)
+    local chipBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+    local itemW = CreateUserWidgetFast(PATHS.WBPItemClass, window, pc)
+    local rateTxt = CreateUserWidgetFast(PATHS.WBPTextClass, window, pc)
     if not (Core.IsValidObj(chipBox) and Core.IsValidObj(itemW) and Core.IsValidObj(rateTxt)) then
         return
     end
@@ -984,7 +1027,7 @@ end
 
 local function StartLogisticsLivePoll(win, ui)
     local function PollTick()
-        if ActiveLogisticsWin ~= win or ActiveLogisticsUI ~= ui or not Core.IsValidObj(win) then
+        if not ActiveLogisticsVisible or ActiveLogisticsWin ~= win or ActiveLogisticsUI ~= ui or not Core.IsValidObj(win) then
             return
         end
         local openAndVisible = false
@@ -1015,13 +1058,34 @@ local function OpenLogisticsWindow()
         return
     end
 
-    local win = Core.CreateUserWidget(PATHS.WindowBaseClass, pc, pc)
+    if Core.IsValidObj(ActiveLogisticsWin) and ActiveLogisticsUI then
+        local win = ActiveLogisticsWin
+        ActiveLogisticsVisible = true
+        ActiveLogisticsUI.PC = pc
+        ActiveLogisticsUI.Station = station
+        ActiveLogisticsUI.WalkFrame = walkFrame
+        pcall(function()
+            local inVp = win.IsInViewport and win:IsInViewport()
+            if not inVp then
+                win:AddToViewport(50)
+                win:SetAnchorsInViewport({ Minimum = { X = 0.22, Y = 0.08 }, Maximum = { X = 0.78, Y = 0.92 } })
+            end
+            win:SetVisibility(0)
+        end)
+        SetLogisticsCursorMode(pc, win, true)
+        RefreshLogisticsUI(ActiveLogisticsUI)
+        StartLogisticsLivePoll(win, ActiveLogisticsUI)
+        return
+    end
+
+    local win = CreateUserWidgetFast(PATHS.WindowBaseClass, pc, pc)
     if not Core.IsValidObj(win) then
         Core.Log("Logistics: failed to construct WBP_WindowBase_C")
         return
     end
 
     ActiveLogisticsWin = win
+    ActiveLogisticsVisible = true
     local outer = Core.GetWidgetOuter(win)
 
     pcall(function()
@@ -1032,11 +1096,13 @@ local function OpenLogisticsWindow()
     SetLogisticsCursorMode(pc, win, true)
 
     if Core.IsValidObj(win.WBP_WindowHeader) and Core.IsValidObj(win.WBP_WindowHeader.CloseButton) then
-        Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, CloseLogisticsWindow)
+        Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, function()
+            ExecuteInGameThreadWithDelay(10, CloseLogisticsWindow)
+        end)
     end
 
-    local rootBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local mainHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
+    local rootBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+    local mainHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
     if not (Core.IsValidObj(rootBox) and Core.IsValidObj(mainHBox)) then return end
 
     local attached = false
@@ -1174,7 +1240,7 @@ local function ToggleLogistics()
         return
     end
 
-    if Core.IsValidObj(ActiveLogisticsWin) then
+    if ActiveLogisticsVisible and Core.IsValidObj(ActiveLogisticsWin) then
         CloseLogisticsWindow()
         return
     end
@@ -1640,6 +1706,8 @@ function Feature.Init()
     end
 end
 
+local InitialLogisticsWidgetScanDone = false
+
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
         "WindowBase_CloseWindow_Logistics",
@@ -1752,19 +1820,31 @@ function Feature.RegisterHooks()
         end
     )
 
-    local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
-    if okMenus and menus then
-        for _, m in ipairs(menus) do
-            if Core.IsValidObj(m) then EnsureSettingsKeybindRow(m) end
+    if not InitialLogisticsWidgetScanDone then
+        InitialLogisticsWidgetScanDone = true
+        local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
+        if okMenus and menus then
+            for _, m in ipairs(menus) do
+                if Core.IsValidObj(m) then EnsureSettingsKeybindRow(m) end
+            end
         end
-    end
 
-    local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-    if okHuds and huds then
-        for _, h in ipairs(huds) do
-            if Core.IsValidObj(h) then EnsureHudKeybindIndicator(h) end
+        local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
+        if okHuds and huds then
+            for _, h in ipairs(huds) do
+                if Core.IsValidObj(h) then
+                    EnsureHudKeybindIndicator(h)
+                    StartHudIndicatorPoll()
+                end
+            end
         end
     end
+end
+
+function Feature.OnMapLoad()
+    DestroyLogisticsWindow()
+    CachedWidgetClasses = {}
+    CachedWblCDO = nil
 end
 
 function Feature.PruneCaches()

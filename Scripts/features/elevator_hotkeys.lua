@@ -22,7 +22,6 @@ local CachedChats = {}          -- addr -> WBP_Chat_C
 local LastElevatorScanClock = -10.0
 local LastChatScanClock = -10.0
 local LastExitBuildClock = -10.0
-local PendingDeparture = nil    -- { BottomElev, TargetStackIdx, PressedClock, MaxClock, ForceZeroDone }
 
 local function RefreshElevatorCache()
     LastElevatorScanClock = os.clock()
@@ -269,7 +268,9 @@ Feature.WatchWidgets = {
     end,
 }
 
-local function CloseElevatorDoorsImmediately(bottomElev, forceZero)
+-- Triggers visual actor door-close animations only; never mutates simulation state (DoorOpenProgress)
+-- directly, so multiplayer clients stay deterministically in sync with the server.
+local function CloseElevatorDoorsVisually(bottomElev)
     if not Core.IsValidObj(bottomElev) then return false end
 
     local hadOpenDoor = false
@@ -298,12 +299,6 @@ local function CloseElevatorDoorsImmediately(bottomElev, forceZero)
             local curOpen = tonumber(stopObj.DoorOpenProgress) or 0
             if curOpen > 0 then
                 hadOpenDoor = true
-                local maxOpen = tonumber(stopObj.DoorOpenMaxProgress) or 0
-                if forceZero then
-                    pcall(function() stopObj.DoorOpenProgress = 0 end)
-                else
-                    pcall(function() stopObj.DoorOpenProgress = (maxOpen > 0) and maxOpen or 1 end)
-                end
                 pcall(function()
                     local sActors = stopObj.Actors
                     if sActors then
@@ -336,46 +331,6 @@ function Feature.RegisterHooks()
         function(Context)
             local pc = Context and Context:get() or nil
             ExitBuildingModeIfInElevator(pc)
-        end
-    )
-    Core.TryRegisterHook(
-        "ElevatorHotkeys_TickDeparture",
-        "/Script/MainSequence.DMSPlayerController:ReceiveTick",
-        function()
-            local pd = PendingDeparture
-            if not pd then return end
-            local now = os.clock()
-            if not Core.IsValidObj(pd.BottomElev) or now > pd.MaxClock then
-                if Core.IsValidObj(pd.BottomElev) then
-                    local okLog, moving, curF, qLen = pcall(function()
-                        local q = pd.BottomElev.FloorQueue
-                        return pd.BottomElev.bMoving == true, pd.BottomElev.CurrentFloor, q and q:GetArrayNum() or -1
-                    end)
-                    if okLog then
-                        Core.Log(string.format("[ElevatorHotkeys] Departure window ended: bMoving=%s curFloor=%s qLen=%s elapsed=%.0fms",
-                            tostring(moving), tostring(curF), tostring(qLen), (now - pd.PressedClock) * 1000.0))
-                    end
-                end
-                PendingDeparture = nil
-                return
-            end
-
-            local isMoving = false
-            pcall(function() isMoving = (pd.BottomElev.bMoving == true) end)
-            if isMoving then
-                Core.Log(string.format("[ElevatorHotkeys] Departed in %.0fms (target=%s)",
-                    (now - pd.PressedClock) * 1000.0, tostring(pd.TargetStackIdx)))
-                PendingDeparture = nil
-                return
-            end
-
-            local dt = now - pd.PressedClock
-            if dt >= 0.05 and not pd.ForceZeroDone then
-                pd.ForceZeroDone = true
-                CloseElevatorDoorsImmediately(pd.BottomElev, true)
-            else
-                CloseElevatorDoorsImmediately(pd.BottomElev, false)
-            end
         end
     )
 end
@@ -420,14 +375,7 @@ local function GoToElevatorFloor(floorNum)
     end
 
     if curFloor ~= stackIdx then
-        local hadOpenDoor = CloseElevatorDoorsImmediately(bottomElev, false)
-        PendingDeparture = {
-            BottomElev = bottomElev,
-            TargetStackIdx = stackIdx,
-            PressedClock = os.clock(),
-            MaxClock = os.clock() + 0.65,
-            ForceZeroDone = false,
-        }
+        local hadOpenDoor = CloseElevatorDoorsVisually(bottomElev)
         Core.Log(string.format("[ElevatorHotkeys] GoToFloor=%s stackIdx=%s curFloor=%s hadOpenDoor=%s",
             tostring(floorNum), tostring(stackIdx), tostring(curFloor), tostring(hadOpenDoor)))
     end

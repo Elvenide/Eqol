@@ -37,7 +37,7 @@ It adds UI tools, overlays, hotkeys, and ergonomics (such as the Station Map, Po
 - **Prefer Native Game Commands (`UInputCommand` / `DMSPlayerController`)**:
   - When mutating simulation state (building, disassembling, setting recipes, filters, priorities, port states), always prefer the game's native `DMSPlayerController:AddBuildCommand`, `AddDisassembleCommand`, and `AddInputCommand(InReceiverID, InCommand)` pathways so changes remain deterministic, refund/consume materials properly, and work in multiplayer.
 - **Modular Features**:
-  - Place each feature in `Scripts/features/<feature_name>.lua` implementing lifecycle hooks (`Init`, `RegisterHooks`, `OnMapLoad`, `OnClientRestart`, `OnWidgetConstructed`) and register it in `Scripts/main.lua`.
+  - Place each feature in `Scripts/features/<feature_name>.lua` implementing lifecycle hooks (`Init`, `RegisterHooks`, `OnMapLoad`, `OnClientRestart`, `PruneCaches`) and declarative `WatchWidgets` tables, and register it in `Scripts/main.lua`.
 - **Keep UI & Rendering Incremental**:
   - Large stations can have 500+ machines and hundreds of wall colliders. Never synchronously construct hundreds of UMG widgets on a single frame; use cached UMG classes (`StaticConstructObject`), minimal widget counts, viewport-driven lazy loading, and time-budgeted frame streaming (`ExecuteInGameThreadAfterFrames(1, ...)`).
   - Never perform heavy work or call `ExecuteInGameThread` synchronously inside `WBP_Button_C` click hooks; defer with `ExecuteInGameThreadWithDelay(10, ...)`.

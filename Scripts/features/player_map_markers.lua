@@ -50,12 +50,39 @@ local function EnsureMapOverlay(solarMap)
         PC = pc,
         Canvas = canvas,
         Pool = {},
+        IsSectorMap = false,
     }
     MapOverlays[addr] = st
     return st
 end
 
-local function RefreshWorldMapPlayers(solarMap)
+local function GetMapSolarSystemID(solarMap)
+    if not Core.IsValidObj(solarMap) then return nil end
+    local sysId = nil
+    pcall(function()
+        local ss = solarMap.SolarSystem or solarMap.CurrentSolarSystem or solarMap.ViewedSolarSystem
+        if Core.IsValidObj(ss) then
+            sysId = StationData.GetObjectKey(ss) or tostring(ss:GetAddress())
+        else
+            local rawId = solarMap.SolarSystemID or solarMap.CurrentSolarSystemID
+            if rawId ~= nil then sysId = tostring(rawId) end
+        end
+    end)
+    return sysId
+end
+
+local function HideAllMarkers(st)
+    if not st or not st.Pool then return end
+    for i = 1, #st.Pool do
+        local entry = st.Pool[i]
+        if entry then
+            if Core.IsValidObj(entry.Dot) then pcall(function() entry.Dot:SetVisibility(1) end) end
+            if Core.IsValidObj(entry.Label) then pcall(function() entry.Label:SetVisibility(1) end) end
+        end
+    end
+end
+
+local function RefreshWorldMapPlayers(solarMap, modeOverride)
     if not Core.IsValidObj(solarMap) then return end
     local okVis, vis = pcall(function() return solarMap:IsVisible() end)
     if not okVis or not vis then return end
@@ -63,8 +90,21 @@ local function RefreshWorldMapPlayers(solarMap)
     local st = EnsureMapOverlay(solarMap)
     if not st then return end
 
+    if modeOverride == "sector" then
+        st.IsSectorMap = true
+    elseif modeOverride == "system" then
+        st.IsSectorMap = false
+    end
+
+    -- Never plot system-space player coordinates onto the galaxy/sector map
+    if st.IsSectorMap then
+        HideAllMarkers(st)
+        return
+    end
+
     local pc = Core.GetLocalPlayerController()
     local players = StationData.GetAllPlayersInfo(pc)
+    local mapSysId = GetMapSolarSystemID(solarMap)
 
     local scale = 1.0
     local panX, panY = 0.0, 0.0
@@ -80,7 +120,8 @@ local function RefreshWorldMapPlayers(solarMap)
 
     local count = 0
     for _, p in ipairs(players) do
-        if p.HasPos then
+        local sameSystem = (mapSysId == nil) or (p.SolarSystemID == nil) or (p.SolarSystemID == mapSysId)
+        if p.HasPos and sameSystem then
             count = count + 1
             local entry = st.Pool[count]
             if not entry or not Core.IsValidObj(entry.Dot) then
@@ -92,7 +133,7 @@ local function RefreshWorldMapPlayers(solarMap)
                     local lSlot = st.Canvas:AddChildToCanvas(lbl)
                     if Core.IsValidObj(dSlot) then pcall(function() dSlot:SetZOrder(90) end) end
                     if Core.IsValidObj(lSlot) then pcall(function() lSlot:SetZOrder(91) end) end
-                    entry = { Dot = dot, DotSlot = dSlot, Label = lbl, LabelSlot = lSlot }
+                    entry = { Dot = dot, DotSlot = dSlot, Label = lbl, LabelSlot = lSlot, LastName = nil }
                     st.Pool[count] = entry
                 end
             end
@@ -108,7 +149,10 @@ local function RefreshWorldMapPlayers(solarMap)
                     entry.DotSlot:SetPosition({ X = mx, Y = my })
                     entry.DotSlot:SetSize({ X = 10.0, Y = 10.0 })
                     entry.DotSlot:SetAlignment({ X = 0.5, Y = 0.5 })
-                    entry.Label:SetText(Core.MakeText(p.Name))
+                    if entry.LastName ~= p.Name then
+                        entry.Label:SetText(Core.MakeText(p.Name))
+                        entry.LastName = p.Name
+                    end
                     entry.Label:SetVisibility(0)
                     entry.LabelSlot:SetPosition({ X = mx, Y = my - 14.0 })
                     entry.LabelSlot:SetAlignment({ X = 0.5, Y = 1.0 })
@@ -130,19 +174,21 @@ Feature.WatchWidgets = {
 }
 
 function Feature.RegisterHooks()
-    for _, fnName in ipairs({
-        "GenerateSystemMap",
-        "GenerateSectorMap",
-        "SetScale",
-        "BndEvt__WBP_SolarSystemMap_WBP_PanningCanvas_K2Node_ComponentBoundEvent_0_OnOffsetChanged__DelegateSignature",
-    }) do
+    local hooks = {
+        { fn = "GenerateSystemMap", mode = "system" },
+        { fn = "GenerateSectorMap", mode = "sector" },
+        { fn = "SetScale", mode = nil },
+        { fn = "BndEvt__WBP_SolarSystemMap_WBP_PanningCanvas_K2Node_ComponentBoundEvent_0_OnOffsetChanged__DelegateSignature", mode = nil },
+    }
+    for _, h in ipairs(hooks) do
+        local modeOverride = h.mode
         Core.TryRegisterHook(
-            "SolarSystemMap_" .. fnName,
-            "/Game/Blueprints/Widgets/HUDs/Map/WBP_SolarSystemMap.WBP_SolarSystemMap_C:" .. fnName,
+            "SolarSystemMap_" .. h.fn,
+            "/Game/Blueprints/Widgets/HUDs/Map/WBP_SolarSystemMap.WBP_SolarSystemMap_C:" .. h.fn,
             function(Context)
                 local m = Context:get()
                 if Core.IsValidObj(m) then
-                    pcall(RefreshWorldMapPlayers, m)
+                    pcall(RefreshWorldMapPlayers, m, modeOverride)
                 end
             end
         )

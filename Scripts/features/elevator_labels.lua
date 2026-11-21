@@ -33,8 +33,10 @@ local PORT_DATA_PERIOD     = 1.00
 
 local CachedElevActors = {} -- actorAddr -> AElevator
 local CachedObjToActor = {} -- elevObjAddr -> AElevator
-local CachedWorldPorts = {} -- list of { ShaftHex, ColIdx, StopIdx, X, Y, Z, Nx, Ny, Nz, Ux, Uy, Uz, Item, ItemAddr }
-local IconPool         = {} -- idx -> { Actor, Comp, ItemWidget, LastItemAddr }
+local CachedShaftGeo   = {} -- bottomElevAddr -> { StackCount, StopFrames, LocalPorts = { [colIdx] = localPort } }
+local CachedWorldPorts = {} -- list of { ShaftHex, ColIdx, StopIdx, PosKey, X, Y, Z, Nx, Ny, Nz, Ux, Uy, Uz, Rot, Item, ItemAddr }
+local IconPool         = {} -- dense array: idx -> { Actor, Comp, ItemWidget, LastItemAddr, LastPosKey, LastVis }
+local CachedWidgetCompCls = nil
 local LastElevatorScan = -10.0
 local LastPortRefresh  = -10.0
 local LoggedShafts     = {}
@@ -86,12 +88,13 @@ local function ExtractArray(tarr)
 end
 
 local function DestroyIconPool()
-    for i, entry in ipairs(IconPool) do
+    for i, entry in pairs(IconPool) do
         if entry and Core.IsValidObj(entry.Actor) then
             pcall(function() entry.Actor:K2_DestroyActor() end)
         end
         IconPool[i] = nil
     end
+    IconPool = {}
 end
 
 local function GetOrCreateIconActor(pc, idx)
@@ -99,8 +102,15 @@ local function GetOrCreateIconActor(pc, idx)
     if entry and Core.IsValidObj(entry.Actor) and Core.IsValidObj(entry.Comp) and Core.IsValidObj(entry.ItemWidget) then
         return entry
     end
+    -- Destroy partially-invalid actor before replacing to prevent leaked actors
+    if entry and Core.IsValidObj(entry.Actor) then
+        pcall(function() entry.Actor:K2_DestroyActor() end)
+    end
 
-    local compCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
+    if not Core.IsValidObj(CachedWidgetCompCls) then
+        CachedWidgetCompCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
+    end
+    local compCls = CachedWidgetCompCls
     if not Core.IsValidObj(compCls) then
         LogOnce("err:compCls", "Step[IconPool#%d] FAILED FindOrLoadClass(%s)", idx, PATHS.WidgetCompClass)
         return nil
@@ -163,6 +173,8 @@ local function GetOrCreateIconActor(pc, idx)
         Comp = comp,
         ItemWidget = itemW,
         LastItemAddr = nil,
+        LastPosKey = nil,
+        LastVis = false,
     }
     IconPool[idx] = entry
     return entry
@@ -221,6 +233,7 @@ local function RefreshElevatorActorCache(force)
     end
     CachedElevActors = nextActors
     CachedObjToActor = nextObjMap
+    CachedShaftGeo = {}
     LogOnce(string.format("scan:%d:%d", actorCount, mappedCount),
         "Step[Scan] Found AElevator actors=%d mappedToSimObj=%d", actorCount, mappedCount)
 end
@@ -751,72 +764,89 @@ local function RefreshCachedWorldPorts()
                                 stackCount = 1
                             end
 
-                            local stopFrames = {}
-                            local shaftFrame = nil
-                            for sIdx = 1, stackCount do
-                                local stopObj = stack[sIdx]
-                                if Core.IsValidObj(stopObj) then
-                                    local f = GetStopFrameInfo(stopObj)
-                                    stopFrames[sIdx] = f
-                                    if f and f.HasActor and not shaftFrame then
-                                        shaftFrame = f
+                            local geo = CachedShaftGeo[bAddr]
+                            if not geo or geo.StackCount ~= stackCount then
+                                local stopFrames = {}
+                                local shaftFrame = nil
+                                for sIdx = 1, stackCount do
+                                    local stopObj = stack[sIdx]
+                                    if Core.IsValidObj(stopObj) then
+                                        local f = GetStopFrameInfo(stopObj)
+                                        stopFrames[sIdx] = f
+                                        if f and f.HasActor and not shaftFrame then
+                                            shaftFrame = f
+                                        end
                                     end
                                 end
-                            end
 
-                            -- Share the shaft's 3D basis across any stop whose actor wasn't loaded
-                            if shaftFrame then
+                                -- Share the shaft's 3D basis across any stop whose actor wasn't loaded
+                                if shaftFrame then
+                                    for sIdx = 1, stackCount do
+                                        local f = stopFrames[sIdx]
+                                        if f and not f.HasActor then
+                                            f.Fw = shaftFrame.Fw
+                                            f.Rt = shaftFrame.Rt
+                                            f.Up = shaftFrame.Up
+                                            f.Rot = shaftFrame.Rot
+                                            f.Yaw = shaftFrame.Yaw
+                                            f.InheritedBasis = true
+                                        end
+                                    end
+                                end
+
+                                local stepDotUp = nil
+                                if stopFrames[1] and stopFrames[2] then
+                                    local sx = stopFrames[2].Pos.X - stopFrames[1].Pos.X
+                                    local sy = stopFrames[2].Pos.Y - stopFrames[1].Pos.Y
+                                    local sz = stopFrames[2].Pos.Z - stopFrames[1].Pos.Z
+                                    local stepLen = math.sqrt(sx * sx + sy * sy + sz * sz)
+                                    local u = stopFrames[1].Up
+                                    stepDotUp = sx * u.X + sy * u.Y + sz * u.Z
+                                    LogOnce(string.format("%s:step", tostring(bAddr)),
+                                        "Step[ShaftStep] 0x%X stop1->stop2=(%.1f,%.1f,%.1f) len=%.1f stepDotUp=%.1f",
+                                        tonumber(bAddr) or 0, sx, sy, sz, stepLen, stepDotUp)
+                                end
+
                                 for sIdx = 1, stackCount do
                                     local f = stopFrames[sIdx]
-                                    if f and not f.HasActor then
-                                        f.Fw = shaftFrame.Fw
-                                        f.Rt = shaftFrame.Rt
-                                        f.Up = shaftFrame.Up
-                                        f.Rot = shaftFrame.Rot
-                                        f.Yaw = shaftFrame.Yaw
-                                        f.InheritedBasis = true
+                                    if f then
+                                        local d = f.Diag
+                                        local dStr = d and string.format("door=%s wig=%s call=%s mesh=[%s]",
+                                            FormatLocalPos(d.doorLocal),
+                                            FormatLocalPos(d.wigLocal),
+                                            FormatLocalPos(d.callLocal),
+                                            d.meshDiag or "nil") or "nil"
+                                        LogOnce(string.format("%s:stop:%d:%s:%s", tostring(bAddr), sIdx, tostring(f.HasActor), tostring(f.InheritedBasis)),
+                                            "Step[StopFrame] Shaft 0x%X stop#%d/%d obj=0x%X actorSrc=%s posSrc=%s inherited=%s pos=(%.1f,%.1f,%.1f) rot=(P=%.1f,Y=%.1f,R=%.1f) fw=(%.2f,%.2f,%.2f) rt=(%.2f,%.2f,%.2f) up=(%.2f,%.2f,%.2f) comps={%s}",
+                                            tonumber(bAddr) or 0, sIdx, stackCount, f.StopAddr,
+                                            f.ActorSrc, f.PosSrc, tostring(f.InheritedBasis),
+                                            f.Pos.X, f.Pos.Y, f.Pos.Z,
+                                            f.Rot.Pitch, f.Rot.Yaw, f.Rot.Roll,
+                                            f.Fw.X, f.Fw.Y, f.Fw.Z,
+                                            f.Rt.X, f.Rt.Y, f.Rt.Z,
+                                            f.Up.X, f.Up.Y, f.Up.Z, dStr)
                                     end
                                 end
+
+                                local bHexInit = string.format("0x%X", tonumber(bAddr) or 0)
+                                LogShaftFullGeometry(bAddr, bHexInit, bottomElev, stopFrames, stackCount)
+
+                                geo = {
+                                    StackCount = stackCount,
+                                    StopFrames = stopFrames,
+                                    LocalPorts = {},
+                                }
+                                CachedShaftGeo[bAddr] = geo
                             end
 
-                            local stepDotUp = nil
-                            if stopFrames[1] and stopFrames[2] then
-                                local sx = stopFrames[2].Pos.X - stopFrames[1].Pos.X
-                                local sy = stopFrames[2].Pos.Y - stopFrames[1].Pos.Y
-                                local sz = stopFrames[2].Pos.Z - stopFrames[1].Pos.Z
-                                local stepLen = math.sqrt(sx * sx + sy * sy + sz * sz)
-                                local u = stopFrames[1].Up
-                                stepDotUp = sx * u.X + sy * u.Y + sz * u.Z
-                                LogOnce(string.format("%s:step", tostring(bAddr)),
-                                    "Step[ShaftStep] 0x%X stop1->stop2=(%.1f,%.1f,%.1f) len=%.1f stepDotUp=%.1f",
-                                    tonumber(bAddr) or 0, sx, sy, sz, stepLen, stepDotUp)
-                            end
-
-                            for sIdx = 1, stackCount do
-                                local f = stopFrames[sIdx]
-                                if f then
-                                    local d = f.Diag
-                                    local dStr = d and string.format("door=%s wig=%s call=%s mesh=[%s]",
-                                        FormatLocalPos(d.doorLocal),
-                                        FormatLocalPos(d.wigLocal),
-                                        FormatLocalPos(d.callLocal),
-                                        d.meshDiag or "nil") or "nil"
-                                    LogOnce(string.format("%s:stop:%d:%s:%s", tostring(bAddr), sIdx, tostring(f.HasActor), tostring(f.InheritedBasis)),
-                                        "Step[StopFrame] Shaft 0x%X stop#%d/%d obj=0x%X actorSrc=%s posSrc=%s inherited=%s pos=(%.1f,%.1f,%.1f) rot=(P=%.1f,Y=%.1f,R=%.1f) fw=(%.2f,%.2f,%.2f) rt=(%.2f,%.2f,%.2f) up=(%.2f,%.2f,%.2f) comps={%s}",
-                                        tonumber(bAddr) or 0, sIdx, stackCount, f.StopAddr,
-                                        f.ActorSrc, f.PosSrc, tostring(f.InheritedBasis),
-                                        f.Pos.X, f.Pos.Y, f.Pos.Z,
-                                        f.Rot.Pitch, f.Rot.Yaw, f.Rot.Roll,
-                                        f.Fw.X, f.Fw.Y, f.Fw.Z,
-                                        f.Rt.X, f.Rt.Y, f.Rt.Z,
-                                        f.Up.X, f.Up.Y, f.Up.Z, dStr)
-                                end
-                            end
-
+                            local stopFrames = geo.StopFrames
                             local bHex = string.format("0x%X", tonumber(bAddr) or 0)
-                            LogShaftFullGeometry(bAddr, bHex, bottomElev, stopFrames, stackCount)
                             for _, colInfo in ipairs(activeCols) do
-                                local localPort = ResolvePortLocalFromInputs(bottomElev, colInfo.Idx1, bAddr)
+                                local localPort = geo.LocalPorts[colInfo.Idx1]
+                                if localPort == nil then
+                                    localPort = ResolvePortLocalFromInputs(bottomElev, colInfo.Idx1, bAddr) or false
+                                    geo.LocalPorts[colInfo.Idx1] = localPort
+                                end
                                 if localPort then
                                     for sIdx = 1, stackCount do
                                         local frame = stopFrames[sIdx]
@@ -835,10 +865,12 @@ local function RefreshCachedWorldPorts()
                                                 lz, math.sqrt(localPort.lx * localPort.lx + localPort.ly * localPort.ly),
                                                 wx, wy, wz, wnx, wny, wnz, frame.Pos.X, frame.Pos.Y, frame.Pos.Z)
 
+                                            local posKey = string.format("%s:%d:%d:%.0f,%.0f,%.0f", bHex, colInfo.Idx1, sIdx, wx, wy, wz)
                                             worldPorts[#worldPorts + 1] = {
                                                 ShaftHex = bHex,
                                                 ColIdx = colInfo.Idx1,
                                                 StopIdx = sIdx,
+                                                PosKey = posKey,
                                                 X = wx,
                                                 Y = wy,
                                                 Z = wz,
@@ -848,6 +880,7 @@ local function RefreshCachedWorldPorts()
                                                 Ux = frame.Up.X,
                                                 Uy = frame.Up.Y,
                                                 Uz = frame.Up.Z,
+                                                Rot = nil,
                                                 Item = colInfo.Item,
                                                 ItemAddr = colInfo.ItemAddr,
                                             }
@@ -880,30 +913,35 @@ local function UpdateElevatorPortIcons()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then
         LogOnce("err:pc", "Step[Render] LocalPlayerController invalid")
-        return
+        return false
     end
 
     RefreshElevatorActorCache(false)
     RefreshCachedWorldPorts()
 
+    if #CachedWorldPorts == 0 then
+        for _, entry in pairs(IconPool) do
+            if entry and entry.LastVis ~= false and Core.IsValidObj(entry.Comp) then
+                pcall(function() entry.Comp:SetVisibility(false, false) end)
+                entry.LastVis = false
+            end
+        end
+        return false
+    end
+
     local camMgr = pc.PlayerCameraManager
     local mathLib = Core.GetCDO(PATHS.KismetMathLib)
     if not Core.IsValidObj(mathLib) then
         LogOnce("err:mathLib", "Step[Render] KismetMathLibrary invalid")
-        return
+        return true
     end
 
     local camLoc = nil
-    local camRot = nil
     if Core.IsValidObj(camMgr) then
         pcall(function()
             local loc = camMgr:GetCameraLocation()
             if loc then
                 camLoc = { X = tonumber(loc.X) or 0.0, Y = tonumber(loc.Y) or 0.0, Z = tonumber(loc.Z) or 0.0 }
-            end
-            local cr = camMgr:GetCameraRotation()
-            if cr then
-                camRot = { Pitch = tonumber(cr.Pitch) or 0.0, Yaw = tonumber(cr.Yaw) or 0.0, Roll = tonumber(cr.Roll) or 0.0 }
             end
         end)
     end
@@ -917,11 +955,10 @@ local function UpdateElevatorPortIcons()
     end
     if not camLoc then
         LogOnce("err:camLoc", "Step[Render] Camera location unavailable")
-        return
+        return true
     end
 
     local count = 0
-    local nearest = nil
     for _, wp in ipairs(CachedWorldPorts) do
         if Core.IsValidObj(wp.Item) then
             local dx = camLoc.X - wp.X
@@ -932,48 +969,36 @@ local function UpdateElevatorPortIcons()
                 count = count + 1
                 local entry = GetOrCreateIconActor(pc, count)
                 if entry then
-                    local appliedRot = nil
                     local okSet, errSet = pcall(function()
                         if entry.LastItemAddr ~= wp.ItemAddr then
                             entry.ItemWidget:SetItem(wp.Item)
                             entry.LastItemAddr = wp.ItemAddr
                         end
-                        -- Face the bright front (+X) side toward the outward wall normal
-                        local rot = mathLib:MakeRotFromXZ(
-                            { X = wp.Nx, Y = wp.Ny, Z = wp.Nz },
-                            { X = wp.Ux, Y = wp.Uy, Z = wp.Uz }
-                        )
-                        appliedRot = rot
-                        entry.Comp:K2_SetWorldLocationAndRotation(
-                            { X = wp.X, Y = wp.Y, Z = wp.Z },
-                            rot,
-                            false,
-                            {},
-                            true
-                        )
-                        entry.Comp:SetVisibility(true, false)
+                        if entry.LastPosKey ~= wp.PosKey then
+                            if not wp.Rot then
+                                -- Face the bright front (+X) side toward the outward wall normal
+                                wp.Rot = mathLib:MakeRotFromXZ(
+                                    { X = wp.Nx, Y = wp.Ny, Z = wp.Nz },
+                                    { X = wp.Ux, Y = wp.Uy, Z = wp.Uz }
+                                )
+                            end
+                            entry.Comp:K2_SetWorldLocationAndRotation(
+                                { X = wp.X, Y = wp.Y, Z = wp.Z },
+                                wp.Rot,
+                                false,
+                                {},
+                                true
+                            )
+                            entry.LastPosKey = wp.PosKey
+                        end
+                        if entry.LastVis ~= true then
+                            entry.Comp:SetVisibility(true, false)
+                            entry.LastVis = true
+                        end
                     end)
                     if not okSet then
                         LogOnce("err:set:" .. tostring(count),
                             "Step[Render] Apply error icon#%d: %s", count, tostring(errSet))
-                    end
-                    if not nearest or distSq < nearest.distSq then
-                        local frontDot = dx * wp.Nx + dy * wp.Ny + dz * wp.Nz
-                        local upDot = dx * wp.Ux + dy * wp.Uy + dz * wp.Uz
-                        -- In Unreal left-handed coords, +Y = Z x X
-                        local rx = wp.Uy * wp.Nz - wp.Uz * wp.Ny
-                        local ry = wp.Uz * wp.Nx - wp.Ux * wp.Nz
-                        local rz = wp.Ux * wp.Ny - wp.Uy * wp.Nx
-                        local rightDot = dx * rx + dy * ry + dz * rz
-                        nearest = {
-                            distSq = distSq,
-                            wp = wp,
-                            entry = entry,
-                            rot = appliedRot,
-                            frontDot = frontDot,
-                            rightDot = rightDot,
-                            upDot = upDot,
-                        }
                     end
                 end
             end
@@ -987,30 +1012,35 @@ local function UpdateElevatorPortIcons()
 
     for i = count + 1, #IconPool do
         local entry = IconPool[i]
-        if entry and Core.IsValidObj(entry.Comp) then
+        if entry and entry.LastVis ~= false and Core.IsValidObj(entry.Comp) then
             pcall(function() entry.Comp:SetVisibility(false, false) end)
+            entry.LastVis = false
         end
     end
+    return true
 end
 
 local function StartPoll()
     if PollActive then return end
     PollActive = true
     local function Tick()
-        local okTick, errTick = pcall(UpdateElevatorPortIcons)
+        local okTick, hasPorts = pcall(UpdateElevatorPortIcons)
         if not okTick then
-            LogOnce("err:tick:" .. tostring(errTick), "Step[Tick] Unhandled error: %s", tostring(errTick))
+            LogOnce("err:tick:" .. tostring(hasPorts), "Step[Tick] Unhandled error: %s", tostring(hasPorts))
         end
-        ExecuteInGameThreadWithDelay(33, Tick)
+        local delayMs = (okTick and hasPorts) and 200 or 500
+        ExecuteInGameThreadWithDelay(delayMs, Tick)
     end
-    ExecuteInGameThreadWithDelay(33, Tick)
+    ExecuteInGameThreadWithDelay(250, Tick)
 end
 
 local function ResetWorldCaches()
     DestroyIconPool()
     CachedElevActors = {}
     CachedObjToActor = {}
+    CachedShaftGeo = {}
     CachedWorldPorts = {}
+    CachedWidgetCompCls = nil
     LoggedShafts = {}
     LastElevatorScan = -10.0
     LastPortRefresh = -10.0
@@ -1036,11 +1066,16 @@ function Feature.OnMapLoad()
 end
 
 function Feature.PruneCaches()
-    for i, entry in ipairs(IconPool) do
-        if not entry or not Core.IsValidObj(entry.Actor) then
-            IconPool[i] = nil
+    -- Compact IconPool without nil holes so DestroyIconPool and indexed loops never leak actors
+    local compacted = {}
+    for _, entry in pairs(IconPool) do
+        if entry and Core.IsValidObj(entry.Actor) and Core.IsValidObj(entry.Comp) and Core.IsValidObj(entry.ItemWidget) then
+            compacted[#compacted + 1] = entry
+        elseif entry and Core.IsValidObj(entry.Actor) then
+            pcall(function() entry.Actor:K2_DestroyActor() end)
         end
     end
+    IconPool = compacted
 end
 
 return Feature

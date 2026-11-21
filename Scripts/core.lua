@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.17"
+Core.VERSION = "0.1.18"
 
 Core.PATHS = {
     PlayerControllerClass = "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C",
@@ -181,8 +181,9 @@ function Core.ReadConfig(defaults)
 
     local dirty = false
     for k, defaultVal in pairs(Core.Config) do
+        local patKey = tostring(k):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
         if type(defaultVal) == "boolean" then
-            local bVal = raw:match('"' .. k .. '"%s*:%s*(true|false)')
+            local bVal = raw:match('"' .. patKey .. '"%s*:%s*(%a+)')
             if bVal == "true" then
                 Core.Config[k] = true
             elseif bVal == "false" then
@@ -191,14 +192,14 @@ function Core.ReadConfig(defaults)
                 dirty = true
             end
         elseif type(defaultVal) == "number" then
-            local nVal = raw:match('"' .. k .. '"%s*:%s*(-?%d+%.?%d*)')
+            local nVal = raw:match('"' .. patKey .. '"%s*:%s*(-?%d+%.?%d*)')
             if nVal and tonumber(nVal) then
                 Core.Config[k] = tonumber(nVal)
             else
                 dirty = true
             end
         else
-            local sVal = raw:match('"' .. k .. '"%s*:%s*"([^"]*)"')
+            local sVal = raw:match('"' .. patKey .. '"%s*:%s*"([^"]*)"')
             if sVal and sVal ~= "" then
                 Core.Config[k] = sVal
             else
@@ -259,7 +260,81 @@ function Core.GetWorldSubsystem(worldContext, classPath)
     return nil
 end
 
+local TrackedWidgetsByClass = {} -- shortClassName -> { [addr] = widget }
+local SeededWidgetClasses = {}   -- shortClassName -> true
+
+local CORE_WATCHED_MODAL_CLASSES = {
+    "WBP_SettingsMenu_C",
+    "WBP_PauseMenu_C",
+    "WBP_MainMenu_C",
+    "WBP_ConfirmationPopup_C",
+    "WBP_Confirmation_Popup_C",
+    "WBP_RenamePopup_C",
+    "WBP_ElevatorConfig_C",
+    "WBP_Chat_C",
+    "WBP_TextInput_C",
+}
+
+local function TrackWidgetInstance(shortClassName, widget)
+    if not shortClassName or not Core.IsValidObj(widget) then return end
+    local bucket = TrackedWidgetsByClass[shortClassName]
+    if not bucket then
+        bucket = {}
+        TrackedWidgetsByClass[shortClassName] = bucket
+    end
+    bucket[widget:GetAddress()] = widget
+end
+
+local function EnsureModalWidgetWatchers()
+    for _, clsName in ipairs(CORE_WATCHED_MODAL_CLASSES) do
+        WatchedWidgetClasses[clsName] = WatchedWidgetClasses[clsName] or {}
+        local key = "__core_track_" .. clsName
+        if not WatchedWidgetClasses[clsName][key] then
+            WatchedWidgetClasses[clsName][key] = true
+            table.insert(WatchedWidgetClasses[clsName], function(w)
+                TrackWidgetInstance(clsName, w)
+            end)
+        end
+    end
+end
+
+local function GetTrackedWidgetsOfClass(shortClassName)
+    local bucket = TrackedWidgetsByClass[shortClassName]
+    if not SeededWidgetClasses[shortClassName] then
+        SeededWidgetClasses[shortClassName] = true
+        bucket = bucket or {}
+        TrackedWidgetsByClass[shortClassName] = bucket
+        local ok, widgets = pcall(FindAllOf, shortClassName)
+        if ok and widgets then
+            for _, w in ipairs(widgets) do
+                if Core.IsValidObj(w) then
+                    bucket[w:GetAddress()] = w
+                end
+            end
+        end
+    end
+    return bucket
+end
+
 function Core.IsAnyWidgetClassVisible(shortClassName)
+    local isTrackedClass = (WatchedWidgetClasses[shortClassName] ~= nil)
+    if isTrackedClass then
+        local bucket = GetTrackedWidgetsOfClass(shortClassName)
+        if not bucket then return false end
+        for addr, w in pairs(bucket) do
+            if not Core.IsValidObj(w) then
+                bucket[addr] = nil
+            else
+                local okInVp, inVp = pcall(function() return w:IsInViewport() end)
+                local okVis, vis = pcall(function() return w:IsVisible() end)
+                if okInVp and inVp and okVis and vis then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
     local ok, widgets = pcall(FindAllOf, shortClassName)
     if not ok or not widgets then return false end
     for _, w in ipairs(widgets) do
@@ -331,6 +406,7 @@ function Core.RegisterFeature(feature)
 end
 
 function Core.InitAll()
+    EnsureModalWidgetWatchers()
     for _, feature in ipairs(Features) do
         if type(feature.Init) == "function" then
             feature.Init(Core)
@@ -587,6 +663,19 @@ function Core.RegisterTextInput(textInputWidget, ownerWindow)
 end
 
 local function IsAnyClassInstanceFocused(shortClassName, pc)
+    if WatchedWidgetClasses[shortClassName] ~= nil then
+        local bucket = GetTrackedWidgetsOfClass(shortClassName)
+        if not bucket then return false end
+        for addr, w in pairs(bucket) do
+            if not Core.IsValidObj(w) then
+                bucket[addr] = nil
+            elseif IsWidgetChainVisible(w, 8) and IsWidgetOrChildFocused(w, pc) then
+                return true
+            end
+        end
+        return false
+    end
+
     local ok, list = pcall(FindAllOf, shortClassName)
     if not ok or not list then return false end
     for _, w in ipairs(list) do
@@ -606,10 +695,12 @@ function Core.IsAnyTextInputFocused()
     then
         return true
     end
-    local okChats, chats = pcall(FindAllOf, "WBP_Chat_C")
-    if okChats and chats then
-        for _, chat in ipairs(chats) do
-            if Core.IsValidObj(chat) then
+    local chatBucket = GetTrackedWidgetsOfClass("WBP_Chat_C")
+    if chatBucket then
+        for addr, chat in pairs(chatBucket) do
+            if not Core.IsValidObj(chat) then
+                chatBucket[addr] = nil
+            else
                 local okOpen, isOpen = pcall(function() return chat.IsOpen == true end)
                 if okOpen and isOpen then
                     return true
@@ -618,19 +709,58 @@ function Core.IsAnyTextInputFocused()
         end
     end
     local pc = Core.GetLocalPlayerController()
-    for _, clsName in ipairs({ "WBP_TextInput_C", "EditableTextBox", "EditableText", "MultiLineEditableTextBox" }) do
-        if IsAnyClassInstanceFocused(clsName, pc) then
-            return true
+    if IsAnyClassInstanceFocused("WBP_TextInput_C", pc) then
+        return true
+    end
+    -- Only scan raw UMG editable text widgets when cursor is visible (UI mode); avoids 3x FindAllOf during gameplay.
+    local showCursor = false
+    if Core.IsValidObj(pc) then
+        pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
+    end
+    if showCursor then
+        for _, clsName in ipairs({ "EditableTextBox", "EditableText", "MultiLineEditableTextBox" }) do
+            if IsAnyClassInstanceFocused(clsName, pc) then
+                return true
+            end
         end
     end
     return false
 end
 
+local ButtonClickCallbacks = {} -- btnAddr -> { btn = btn, fn = fn }
+local RegisteredKeybinds = {}   -- mappingName -> bindingState
+
 function Core.PruneAllCaches()
+    CachedLocalPC = nil
     for addr, entry in pairs(TrackedTextInputs) do
         if not Core.IsValidObj(entry.Input) then
             TrackedTextInputs[addr] = nil
         end
+    end
+    for addr, entry in pairs(ButtonClickCallbacks) do
+        if not entry or not Core.IsValidObj(entry.btn) then
+            ButtonClickCallbacks[addr] = nil
+        end
+    end
+    for _, bs in pairs(RegisteredKeybinds) do
+        for mAddr, row in pairs(bs.MenuRows) do
+            if not Core.IsValidObj(row) then
+                bs.MenuRows[mAddr] = nil
+            end
+        end
+        for rAddr, row in pairs(bs.TrackedRows) do
+            if not Core.IsValidObj(row) then
+                bs.TrackedRows[rAddr] = nil
+            end
+        end
+    end
+    for clsName, bucket in pairs(TrackedWidgetsByClass) do
+        for addr, w in pairs(bucket) do
+            if not Core.IsValidObj(w) then
+                bucket[addr] = nil
+            end
+        end
+        SeededWidgetClasses[clsName] = nil
     end
     SuppressedCharacterInput = false
     SuppressedCharacterInputPC = nil
@@ -729,9 +859,9 @@ local UE_TO_UE4SS_KEY = {
     Apostrophe        = Key and Key.OEM_SEVEN,
 }
 
-local RegisteredKeybinds = {}   -- mappingName -> bindingState
 local SharedKeyHandlers = {}    -- ue4ssKey -> true
 local SharedRemapHooksDone = false
+local InitialSettingsMenuScanDone = false
 
 local function ResolveUE4SSKey(keyName)
     if not keyName or keyName == "" or keyName == "None" or not Key then return nil end
@@ -1094,10 +1224,16 @@ function Core.EnsureKeybindHooks()
         end
     )
 
-    local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
-    if okMenus and menus then
-        for _, m in ipairs(menus) do
-            if Core.IsValidObj(m) then EnsureMenuKeybindRows(m) end
+    if not InitialSettingsMenuScanDone then
+        InitialSettingsMenuScanDone = true
+        local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
+        if okMenus and menus then
+            for _, m in ipairs(menus) do
+                if Core.IsValidObj(m) then
+                    TrackWidgetInstance("WBP_SettingsMenu_C", m)
+                    EnsureMenuKeybindRows(m)
+                end
+            end
         end
     end
 end
@@ -1130,29 +1266,33 @@ end
 -- Safe WBP_Button_C Click Registry (avoids UButton.OnPressed:Add crashes)
 --------------------------------------------------------------------------------
 
-local ButtonClickCallbacks = {}
-local ButtonHookRegistered = false
+function Core.UnregisterWBPButtonClick(btn)
+    if not Core.IsValidObj(btn) then return end
+    ButtonClickCallbacks[btn:GetAddress()] = nil
+end
 
 function Core.RegisterWBPButtonClick(btn, fn)
     if not Core.IsValidObj(btn) or type(fn) ~= "function" then return end
-    ButtonClickCallbacks[btn:GetAddress()] = fn
+    ButtonClickCallbacks[btn:GetAddress()] = { btn = btn, fn = fn }
 
-    if not ButtonHookRegistered then
-        local ok = Core.TryRegisterHook(
-            "Core_WBPButton_OnPressed",
-            "/Game/Blueprints/Widgets/Basic/WBP_Button.WBP_Button_C:BndEvt__WBP_Button_Button_K2Node_ComponentBoundEvent_0_OnButtonPressedEvent__DelegateSignature",
-            function(Context)
-                local w = Context:get()
-                if Core.IsValidObj(w) then
-                    local cb = ButtonClickCallbacks[w:GetAddress()]
-                    if cb then
-                        pcall(cb, w)
+    Core.TryRegisterHook(
+        "Core_WBPButton_OnPressed",
+        "/Game/Blueprints/Widgets/Basic/WBP_Button.WBP_Button_C:BndEvt__WBP_Button_Button_K2Node_ComponentBoundEvent_0_OnButtonPressedEvent__DelegateSignature",
+        function(Context)
+            local w = Context:get()
+            if Core.IsValidObj(w) then
+                local addr = w:GetAddress()
+                local entry = ButtonClickCallbacks[addr]
+                if entry then
+                    if Core.IsValidObj(entry.btn) and entry.btn:GetAddress() == addr then
+                        pcall(entry.fn, w)
+                    else
+                        ButtonClickCallbacks[addr] = nil
                     end
                 end
             end
-        )
-        if ok then ButtonHookRegistered = true end
-    end
+        end
+    )
 end
 
 return Core

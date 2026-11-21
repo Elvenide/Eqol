@@ -18,6 +18,9 @@ local KnownOnlinePlayers = {} -- playerKey -> { Name = string, IsOnline = bool }
 local InitializedSnapshot = false
 local PollActive = false
 local CachedAlertWidget = nil
+local LastAlertScanTime = -999.0
+local ALERT_SCAN_COOLDOWN = 8.0   -- Safety-net FindAllOf interval (>= 8s per learning.md §7)
+local PRESENCE_POLL_MS    = 8000  -- Safety-net presence poll (join/leave hooks fire immediately)
 
 local function PushBuiltInAlert(messageStr)
     local pc = Core.GetLocalPlayerController()
@@ -28,13 +31,17 @@ local function PushBuiltInAlert(messageStr)
         alertWidgets = { CachedAlertWidget }
     else
         CachedAlertWidget = nil
-        local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
-        if okAlerts and found and #found > 0 then
-            alertWidgets = found
-            for _, w in ipairs(found) do
-                if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
-                    CachedAlertWidget = w
-                    break
+        local now = os.clock()
+        if (now - LastAlertScanTime) >= ALERT_SCAN_COOLDOWN then
+            LastAlertScanTime = now
+            local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
+            if okAlerts and found and #found > 0 then
+                alertWidgets = found
+                for _, w in ipairs(found) do
+                    if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
+                        CachedAlertWidget = w
+                        break
+                    end
                 end
             end
         end
@@ -72,7 +79,7 @@ end
 
 local function PollPlayerPresence()
     local pc = Core.GetLocalPlayerController()
-    if not Core.IsValidObj(pc) then return end
+    if not Core.IsValidObj(pc) or not Core.IsValidObj(pc.PlayerObject) then return end
 
     local players = StationData.GetAllPlayersInfo(pc)
     if #players == 0 then return end
@@ -132,10 +139,21 @@ local function StartPoll()
     PollActive = true
     local function Tick()
         pcall(PollPlayerPresence)
-        ExecuteInGameThreadWithDelay(2500, Tick)
+        ExecuteInGameThreadWithDelay(PRESENCE_POLL_MS, Tick)
     end
-    ExecuteInGameThreadWithDelay(2500, Tick)
+    ExecuteInGameThreadWithDelay(PRESENCE_POLL_MS, Tick)
 end
+
+Feature.WatchWidgets = {
+    WBP_PlayerAlerts_C = function(w)
+        if Core.IsValidObj(w) then
+            CachedAlertWidget = w
+            if not InitializedSnapshot then
+                ExecuteInGameThreadWithDelay(200, PollPlayerPresence)
+            end
+        end
+    end,
+}
 
 function Feature.Init()
     StartPoll()
@@ -160,6 +178,19 @@ end
 
 function Feature.OnClientRestart()
     ExecuteInGameThreadWithDelay(1200, PollPlayerPresence)
+end
+
+function Feature.OnMapLoad()
+    KnownOnlinePlayers = {}
+    InitializedSnapshot = false
+    CachedAlertWidget = nil
+    LastAlertScanTime = -999.0
+end
+
+function Feature.PruneCaches()
+    if CachedAlertWidget and not Core.IsValidObj(CachedAlertWidget) then
+        CachedAlertWidget = nil
+    end
 end
 
 return Feature

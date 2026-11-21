@@ -169,7 +169,7 @@ local function IsSelectingAnyKeybind()
 end
 
 --------------------------------------------------------------------------------
--- Power Overview Hotkey (Space Stations & Spaceships)
+-- Power Overview Hotkey (Space Stations)
 --------------------------------------------------------------------------------
 
 local function ResolvePlayerFrameAndGrid(playerObj)
@@ -179,9 +179,6 @@ local function ResolvePlayerFrameAndGrid(playerObj)
     local okFrame, walkFrame = pcall(function() return playerObj:GetFrame() end)
     if okFrame and Core.IsValidObj(walkFrame) then
         table.insert(candidates, walkFrame)
-    end
-    if Core.IsValidObj(playerObj.PilotedShip) then
-        table.insert(candidates, playerObj.PilotedShip)
     end
 
     for _, frame in ipairs(candidates) do
@@ -331,7 +328,7 @@ local function StartFallbackKeyPollIfNeeded()
     ExecuteInGameThreadWithDelay(33, PollTick)
 end
 
-local function SyncIMCSystemBinding()
+local function SyncIMCSystemBinding(forceRebuild)
     local imcSystem = Core.FindOrLoadClass(PATHS.IMCSystem)
     local iaEscape = Core.FindOrLoadClass(PATHS.IAEscape)
     if not Core.IsValidObj(imcSystem) or not Core.IsValidObj(iaEscape) then
@@ -342,13 +339,17 @@ local function SyncIMCSystemBinding()
     local changed = false
 
     if Core.Config.PowerOverviewKey == "P" then
-        local wasUnmapped = UnmappedPFromSystem
-        local okUnmap = pcall(function() imcSystem:UnmapKey(iaEscape, keyP) end)
-        if okUnmap then
-            UnmappedPFromSystem = true
-            changed = true
-            if not wasUnmapped then
-                Core.Log("Unmapped P from IMC_System IA_Escape")
+        if not UnmappedPFromSystem or forceRebuild then
+            local wasUnmapped = UnmappedPFromSystem
+            local okUnmap = pcall(function() imcSystem:UnmapKey(iaEscape, keyP) end)
+            if okUnmap then
+                UnmappedPFromSystem = true
+                if not wasUnmapped or forceRebuild then
+                    changed = true
+                end
+                if not wasUnmapped then
+                    Core.Log("Unmapped P from IMC_System IA_Escape")
+                end
             end
         end
     elseif UnmappedPFromSystem then
@@ -801,6 +802,8 @@ function Feature.Init()
     ApplyPowerOverviewKeybind(Core.Config.PowerOverviewKey, false)
 end
 
+local InitialSettingsScanDone = false
+
 function Feature.RegisterHooks()
     local r1 = Core.TryRegisterHook(
         "PowerOverview_SetupWidget",
@@ -932,8 +935,11 @@ function Feature.RegisterHooks()
         end
     )
 
-    SyncIMCSystemBinding()
-    InjectExistingSettingsMenus()
+    SyncIMCSystemBinding(false)
+    if not InitialSettingsScanDone then
+        InitialSettingsScanDone = true
+        InjectExistingSettingsMenus()
+    end
 
     if r1 and r2 and r3 and r4 and r5 and r6 and r7 and r8 and r9 and r10 and r11 and not AllHooksLogged then
         AllHooksLogged = true
@@ -942,8 +948,8 @@ function Feature.RegisterHooks()
 end
 
 function Feature.OnClientRestart()
-    SyncIMCSystemBinding()
-    ExecuteInGameThreadWithDelay(500, SyncIMCSystemBinding)
+    SyncIMCSystemBinding(true)
+    ExecuteInGameThreadWithDelay(500, function() SyncIMCSystemBinding(true) end)
 end
 
 function Feature.PruneCaches()

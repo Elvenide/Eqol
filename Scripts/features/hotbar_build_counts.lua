@@ -23,7 +23,8 @@ local COLOR_OK = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
 local COLOR_ZERO = { R = 0.96, G = 0.36, B = 0.32, A = 1.0 }
 local BG_BADGE = { R = 0.02, G = 0.03, B = 0.05, A = 0.78 }
 
-local TrackedHuds = {} -- hudAddr -> { Hud, HotbarWidget, Slots = { ... } }
+local TrackedHuds = {}    -- hudAddr -> { Hud, HotbarWidget, Slots = { ... } }
+local AttachedSlots = {}  -- slotAddr -> { SlotWidget, Badge, Label }
 local PollActive = false
 local DiagLogged = false
 
@@ -376,6 +377,13 @@ end
 local function AttachBadgeToSlot(slotWidget, pc)
     if not Core.IsValidObj(slotWidget) then return nil, nil end
 
+    -- Guard against duplicate badge attachment when OnMapLoad / OnClientRestart fires twice
+    local slotAddr = slotWidget:GetAddress()
+    local existing = AttachedSlots[slotAddr]
+    if existing and Core.IsValidObj(existing.SlotWidget) and Core.IsValidObj(existing.Badge) and Core.IsValidObj(existing.Label) then
+        return existing.Badge, existing.Label
+    end
+
     local overlayCls = Core.FindOrLoadClass(PATHS.OverlayClass)
     local canvasCls = Core.FindOrLoadClass(PATHS.CanvasPanelClass)
     local contentCls = Core.FindOrLoadClass(PATHS.ContentWidgetCls)
@@ -437,6 +445,7 @@ local function AttachBadgeToSlot(slotWidget, pc)
                 oSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 3.0, Bottom = 2.0 })
             end)
         end
+        AttachedSlots[slotAddr] = { SlotWidget = slotWidget, Badge = badge, Label = label }
         return badge, label
     end
 
@@ -450,6 +459,7 @@ local function AttachBadgeToSlot(slotWidget, pc)
                 cSlot:SetPosition({ X = -3.0, Y = -2.0 })
             end)
         end
+        AttachedSlots[slotAddr] = { SlotWidget = slotWidget, Badge = badge, Label = label }
         return badge, label
     end
 
@@ -473,6 +483,7 @@ local function AttachBadgeToSlot(slotWidget, pc)
                 end
                 imgDirectParent:SetContent(wrapOverlay)
             end)
+            AttachedSlots[slotAddr] = { SlotWidget = slotWidget, Badge = badge, Label = label }
             return badge, label
         end
     end
@@ -715,8 +726,23 @@ function Feature.OnClientRestart()
     ExecuteInGameThreadWithDelay(600, TryAttachExistingHuds)
 end
 
+function Feature.PruneCaches()
+    for addr, entry in pairs(TrackedHuds) do
+        if not entry or not Core.IsValidObj(entry.Hud) then
+            TrackedHuds[addr] = nil
+        end
+    end
+    for slotAddr, entry in pairs(AttachedSlots) do
+        if not entry or not Core.IsValidObj(entry.SlotWidget) or not Core.IsValidObj(entry.Badge) or not Core.IsValidObj(entry.Label) then
+            AttachedSlots[slotAddr] = nil
+        end
+    end
+end
+
 function Feature.OnMapLoad()
-    TrackedHuds = {}
+    -- Prune only invalid HUDs instead of wiping TrackedHuds unconditionally,
+    -- because InitGameState + LoadMap can both fire OnMapLoad for the same live HUD.
+    Feature.PruneCaches()
     DiagLogged = false
 end
 

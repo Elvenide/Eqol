@@ -72,6 +72,22 @@ local function EnsureSlotAutoSize(tb)
     end)
 end
 
+local SCAN_RETRY_SECONDS = 8.0 -- Safety-net FindAllOf("TextBlock") interval (>= 8s per learning.md §7)
+
+local function TryHookVersionTextBlock()
+    if Core.IsValidObj(TargetTextBlock) then return true end
+    LastScanTime = os.clock()
+    local tb, ver = FindVersionTextBlock()
+    if Core.IsValidObj(tb) and ver then
+        TargetTextBlock = tb
+        OriginalMSVersion = ver
+        EnsureSlotAutoSize(tb)
+        Core.Log(string.format("[HudVersionBar] Hooked version TextBlock (MS v%s)", ver))
+        return true
+    end
+    return false
+end
+
 local function StartLoop()
     if PollRunning then return end
     PollRunning = true
@@ -88,15 +104,8 @@ local function StartLoop()
             LastFpsTime = now
 
             if not Core.IsValidObj(TargetTextBlock) then
-                if (now - LastScanTime) >= 1.5 then
-                    LastScanTime = now
-                    local tb, ver = FindVersionTextBlock()
-                    if Core.IsValidObj(tb) and ver then
-                        TargetTextBlock = tb
-                        OriginalMSVersion = ver
-                        EnsureSlotAutoSize(tb)
-                        Core.Log(string.format("[HudVersionBar] Hooked version TextBlock (MS v%s)", ver))
-                    end
+                if (now - LastScanTime) >= SCAN_RETRY_SECONDS then
+                    TryHookVersionTextBlock()
                 end
             end
 
@@ -110,6 +119,20 @@ local function StartLoop()
 
     ExecuteInGameThreadAfterFrames(1, Tick)
 end
+
+-- Trigger a prompt one-shot scan when major HUD/menu widgets construct
+Feature.WatchWidgets = {
+    WBP_CharacterHUD_C = function()
+        if not Core.IsValidObj(TargetTextBlock) then
+            ExecuteInGameThreadWithDelay(200, TryHookVersionTextBlock)
+        end
+    end,
+    WBP_MainMenu_C = function()
+        if not Core.IsValidObj(TargetTextBlock) then
+            ExecuteInGameThreadWithDelay(200, TryHookVersionTextBlock)
+        end
+    end,
+}
 
 function Feature.Init()
     StartLoop()

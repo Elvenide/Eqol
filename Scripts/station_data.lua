@@ -423,55 +423,57 @@ function StationData.GetStationPlatforms(station, fallbackFrame)
         if okG and Core.IsValidObj(g) then targetGridAddr = g:GetAddress() end
     end
 
-    -- Scan live StationPlatform / StationPlatformObject instances belonging to this station
-    local okAllSt, allStations = pcall(FindAllOf, "StationObject")
-    local singleStationInWorld = (okAllSt and allStations and #allStations <= 1)
+    -- Fallback: only scan live StationPlatform / StationPlatformObject instances when container properties yielded nothing
+    if #result == 0 then
+        local okAllSt, allStations = pcall(FindAllOf, "StationObject")
+        local singleStationInWorld = (okAllSt and allStations and #allStations <= 1)
 
-    for _, searchCls in ipairs({ "StationPlatformObject", "StationPlatform" }) do
-        local okAll, allPlats = pcall(FindAllOf, searchCls)
-        if okAll and allPlats then
-            local stAddr = Core.IsValidObj(station) and station:GetAddress() or nil
-            local stId = Core.IsValidObj(station) and StationData.GetObjectKey(station) or nil
-            for _, p in ipairs(allPlats) do
-                if Core.IsValidObj(p) then
-                    local belongs = false
-                    if targetGridAddr and p.GetStationPowerGrid then
-                        local okPG, pg = pcall(function() return p:GetStationPowerGrid() end)
-                        if okPG and Core.IsValidObj(pg) and pg:GetAddress() == targetGridAddr then
-                            belongs = true
-                        end
-                    end
-                    if not belongs and stAddr then
-                        for _, propName in ipairs({ "Station", "ParentStation", "OwnerStation", "OwningStation", "Parent", "ParentFrame" }) do
-                            local okS, sVal = pcall(function() return p[propName] end)
-                            if okS and Core.IsValidObj(sVal) and sVal:GetAddress() == stAddr then
+        for _, searchCls in ipairs({ "StationPlatformObject", "StationPlatform" }) do
+            local okAll, allPlats = pcall(FindAllOf, searchCls)
+            if okAll and allPlats then
+                local stAddr = Core.IsValidObj(station) and station:GetAddress() or nil
+                local stId = Core.IsValidObj(station) and StationData.GetObjectKey(station) or nil
+                for _, p in ipairs(allPlats) do
+                    if Core.IsValidObj(p) then
+                        local belongs = false
+                        if targetGridAddr and p.GetStationPowerGrid then
+                            local okPG, pg = pcall(function() return p:GetStationPowerGrid() end)
+                            if okPG and Core.IsValidObj(pg) and pg:GetAddress() == targetGridAddr then
                                 belongs = true
-                                break
                             end
                         end
-                        if not belongs then
-                            for _, fnName in ipairs({ "GetStation", "GetFrame", "GetParentFrame" }) do
-                                if p[fnName] then
-                                    local okF, fVal = pcall(function() return p[fnName](p) end)
-                                    if okF and Core.IsValidObj(fVal) and fVal:GetAddress() == stAddr then
-                                        belongs = true
-                                        break
+                        if not belongs and stAddr then
+                            for _, propName in ipairs({ "Station", "ParentStation", "OwnerStation", "OwningStation", "Parent", "ParentFrame" }) do
+                                local okS, sVal = pcall(function() return p[propName] end)
+                                if okS and Core.IsValidObj(sVal) and sVal:GetAddress() == stAddr then
+                                    belongs = true
+                                    break
+                                end
+                            end
+                            if not belongs then
+                                for _, fnName in ipairs({ "GetStation", "GetFrame", "GetParentFrame" }) do
+                                    if p[fnName] then
+                                        local okF, fVal = pcall(function() return p[fnName](p) end)
+                                        if okF and Core.IsValidObj(fVal) and fVal:GetAddress() == stAddr then
+                                            belongs = true
+                                            break
+                                        end
                                     end
                                 end
                             end
                         end
-                    end
-                    if not belongs and stId then
-                        local okPid, pid = pcall(function() return p.ParentID or p.StationID end)
-                        if okPid and pid ~= nil and tostring(pid) == stId then
+                        if not belongs and stId then
+                            local okPid, pid = pcall(function() return p.ParentID or p.StationID end)
+                            if okPid and pid ~= nil and tostring(pid) == stId then
+                                belongs = true
+                            end
+                        end
+                        if not belongs and singleStationInWorld then
                             belongs = true
                         end
-                    end
-                    if not belongs and singleStationInWorld then
-                        belongs = true
-                    end
-                    if belongs then
-                        addPlat(p)
+                        if belongs then
+                            addPlat(p)
+                        end
                     end
                 end
             end
@@ -1112,7 +1114,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     end
 
     if #floors == 0 then
-        table.insert(floors, { index = 1, z = 0.0, platforms = entries, machines = {} })
+        table.insert(floors, { index = 1, z = 0.0, platforms = entries, machines = {}, walls = {} })
     end
 
     -- Sort floors bottom-to-top (1 = bottom, N = top)
@@ -1368,57 +1370,77 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 end
             end)
 
-            -- Merge collinear touching/overlapping wall segments on the same Z-band to reduce widget count & seams
+            -- Merge collinear touching/overlapping wall segments on the same Z-band in O(N log N)
             local function mergeWallList(list)
-                local merged = true
                 local eps = 8.0
-                while merged do
-                    merged = false
-                    local i = 1
-                    while i <= #list do
-                        local a = list[i]
-                        local j = i + 1
-                        while j <= #list do
-                            local b = list[j]
+                local function mergeAxis(items, axis)
+                    if #items <= 1 then return items end
+                    local out = {}
+                    local function bandKey(v) return math.floor(v / eps + 0.5) end
+                    if axis == "X" then
+                        table.sort(items, function(a, b)
+                            local ay1, by1 = bandKey(a.minY), bandKey(b.minY)
+                            if ay1 ~= by1 then return ay1 < by1 end
+                            local ay2, by2 = bandKey(a.maxY), bandKey(b.maxY)
+                            if ay2 ~= by2 then return ay2 < by2 end
+                            if a.minZ ~= b.minZ then return a.minZ < b.minZ end
+                            return a.minX < b.minX
+                        end)
+                    else
+                        table.sort(items, function(a, b)
+                            local ax1, bx1 = bandKey(a.minX), bandKey(b.minX)
+                            if ax1 ~= bx1 then return ax1 < bx1 end
+                            local ax2, bx2 = bandKey(a.maxX), bandKey(b.maxX)
+                            if ax2 ~= bx2 then return ax2 < bx2 end
+                            if a.minZ ~= b.minZ then return a.minZ < b.minZ end
+                            return a.minY < b.minY
+                        end)
+                    end
+                    -- Keep a small active tail of recent segments in the same band (handles multi-Z floors)
+                    for i = 1, #items do
+                        local b = items[i]
+                        local mergedInto = nil
+                        for k = #out, math.max(1, #out - 8), -1 do
+                            local a = out[k]
                             local zOverlap = (a.minZ <= b.maxZ - 40.0 and b.minZ <= a.maxZ - 40.0)
-                            local didMerge = false
                             if zOverlap then
-                                if math.abs(a.minY - b.minY) <= eps and math.abs(a.maxY - b.maxY) <= eps
-                                    and a.minX <= b.maxX + eps and b.minX <= a.maxX + eps
-                                then
-                                    a.minX = math.min(a.minX, b.minX)
-                                    a.maxX = math.max(a.maxX, b.maxX)
-                                    a.minY = math.min(a.minY, b.minY)
-                                    a.maxY = math.max(a.maxY, b.maxY)
-                                    a.minZ = math.min(a.minZ, b.minZ)
-                                    a.maxZ = math.max(a.maxZ, b.maxZ)
-                                    didMerge = true
-                                elseif math.abs(a.minX - b.minX) <= eps and math.abs(a.maxX - b.maxX) <= eps
-                                    and a.minY <= b.maxY + eps and b.minY <= a.maxY + eps
-                                then
-                                    a.minX = math.min(a.minX, b.minX)
-                                    a.maxX = math.max(a.maxX, b.maxX)
-                                    a.minY = math.min(a.minY, b.minY)
-                                    a.maxY = math.max(a.maxY, b.maxY)
-                                    a.minZ = math.min(a.minZ, b.minZ)
-                                    a.maxZ = math.max(a.maxZ, b.maxZ)
-                                    didMerge = true
+                                if axis == "X" then
+                                    if math.abs(a.minY - b.minY) <= eps and math.abs(a.maxY - b.maxY) <= eps
+                                        and a.minX <= b.maxX + eps and b.minX <= a.maxX + eps
+                                    then
+                                        mergedInto = a
+                                        break
+                                    end
+                                else
+                                    if math.abs(a.minX - b.minX) <= eps and math.abs(a.maxX - b.maxX) <= eps
+                                        and a.minY <= b.maxY + eps and b.minY <= a.maxY + eps
+                                    then
+                                        mergedInto = a
+                                        break
+                                    end
                                 end
                             end
-                            if didMerge then
-                                a.cx = (a.minX + a.maxX) * 0.5
-                                a.cy = (a.minY + a.maxY) * 0.5
-                                a.ex = (a.maxX - a.minX) * 0.5
-                                a.ey = (a.maxY - a.minY) * 0.5
-                                table.remove(list, j)
-                                merged = true
-                            else
-                                j = j + 1
-                            end
                         end
-                        i = i + 1
+                        if mergedInto then
+                            mergedInto.minX = math.min(mergedInto.minX, b.minX)
+                            mergedInto.maxX = math.max(mergedInto.maxX, b.maxX)
+                            mergedInto.minY = math.min(mergedInto.minY, b.minY)
+                            mergedInto.maxY = math.max(mergedInto.maxY, b.maxY)
+                            mergedInto.minZ = math.min(mergedInto.minZ, b.minZ)
+                            mergedInto.maxZ = math.max(mergedInto.maxZ, b.maxZ)
+                            mergedInto.cx = (mergedInto.minX + mergedInto.maxX) * 0.5
+                            mergedInto.cy = (mergedInto.minY + mergedInto.maxY) * 0.5
+                            mergedInto.ex = (mergedInto.maxX - mergedInto.minX) * 0.5
+                            mergedInto.ey = (mergedInto.maxY - mergedInto.minY) * 0.5
+                        else
+                            out[#out + 1] = b
+                        end
                     end
+                    return out
                 end
+                local res = mergeAxis(mergeAxis(list, "X"), "Y")
+                for i = 1, #list do list[i] = nil end
+                for i = 1, #res do list[i] = res[i] end
             end
             if #extractedWalls > 1 then
                 mergeWallList(extractedWalls)
@@ -2652,9 +2674,9 @@ function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY
             local ok, arr = pcall(function() return machine[pIn] end)
             if ok and arr then
                 StationData.ForEachArray(arr, function(_, elem)
-                    local st = Core.UnwrapStruct(elem) or elem
-                    if st and st.X ~= nil and st.Y ~= nil then
-                        table.insert(rawInputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
+                    local v = tryExtractVec(elem)
+                    if v then
+                        table.insert(rawInputs, v)
                     end
                 end)
             end
@@ -2664,9 +2686,9 @@ function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY
             local ok, arr = pcall(function() return machine[pOut] end)
             if ok and arr then
                 StationData.ForEachArray(arr, function(_, elem)
-                    local st = Core.UnwrapStruct(elem) or elem
-                    if st and st.X ~= nil and st.Y ~= nil then
-                        table.insert(rawOutputs, { x = tonumber(st.X) or 0, y = tonumber(st.Y) or 0, z = tonumber(st.Z) or 0 })
+                    local v = tryExtractVec(elem)
+                    if v then
+                        table.insert(rawOutputs, v)
                     end
                 end)
             end
@@ -3053,6 +3075,10 @@ function StationData.InvalidateCaches()
     CachedMachinesByFrame = {}
     CachedStationMachines = { key = nil, time = 0, list = {} }
     CachedFloorMap = nil
+    CachedPlayersSnapshot = { time = -999, list = {} }
+    CachedWallAnchors = {}
+    HiddenMachineIcons = {}
+    CachedClasses = {}
     CachedFootprintsByClass = {}
     CachedBlockBoundsByCls = {}
     CachedStationWallsByKey = {}
@@ -3226,14 +3252,35 @@ function StationData.GetAllPlayersInfo(localPC)
             end
             if not hasPos then
                 local okL, loc = pcall(function() return po.Location end)
-                if okL and loc and loc.X ~= nil then
-                    px, py, pz = loc.X or 0, loc.Y or 0, loc.Z or 0
-                    hasPos = true
+                if okL and loc ~= nil then
+                    -- po.Location is a simulation FFPVector (fixed-point Int64), not float FVector
+                    local fx, fy, fz = Core.GetFPVector(loc)
+                    if type(fx) == "number" and type(fy) == "number" and type(fz) == "number" then
+                        px, py, pz = fx, fy, fz
+                        hasPos = true
+                    end
                 end
             end
 
             local frame = nil
             pcall(function() frame = po:GetFrame() end)
+
+            local solarSystemID = nil
+            pcall(function()
+                local ss = nil
+                if po.GetSolarSystem then ss = po:GetSolarSystem() end
+                if not Core.IsValidObj(ss) then ss = po.SolarSystem end
+                if not Core.IsValidObj(ss) and Core.IsValidObj(frame) then
+                    if frame.GetSolarSystem then ss = frame:GetSolarSystem() end
+                    if not Core.IsValidObj(ss) then ss = frame.SolarSystem end
+                end
+                if Core.IsValidObj(ss) then
+                    solarSystemID = StationData.GetObjectKey(ss) or tostring(ss:GetAddress())
+                else
+                    local rawId = po.SolarSystemID or (Core.IsValidObj(frame) and frame.SolarSystemID) or nil
+                    if rawId ~= nil then solarSystemID = tostring(rawId) end
+                end
+            end)
 
             table.insert(players, {
                 Key = StationData.GetObjectKey(po) or tostring(addr),
@@ -3247,6 +3294,7 @@ function StationData.GetAllPlayersInfo(localPC)
                 Z = pz,
                 HasPos = hasPos,
                 Frame = frame,
+                SolarSystemID = solarSystemID,
                 PilotedShip = po.PilotedShip,
             })
         end

@@ -15,6 +15,92 @@ local ZOOM_STEP = 350.0
 local IsThirdPerson = false
 local ThirdPersonDist = 2200.0
 local ScrollPollActive = false
+local SavedOriginalCamera = {} -- shipActorAddr -> { ShipActor, ShipObj, SpringArm, TargetArmLength, Cam, RelativeLocation }
+local ActiveShipAddr = nil
+
+-- Hoisted FName key tables (avoids per-frame FName allocation; see learning.md §8)
+local KEY_MOUSE_WHEEL_AXIS = nil
+local KEY_SCROLL_UP = nil
+local KEY_SCROLL_DOWN = nil
+
+local function EnsureScrollKeyTables()
+    if KEY_MOUSE_WHEEL_AXIS == nil then
+        pcall(function() KEY_MOUSE_WHEEL_AXIS = { KeyName = FName("MouseWheelAxis") } end)
+        pcall(function() KEY_SCROLL_UP = { KeyName = FName("MouseScrollUp") } end)
+        pcall(function() KEY_SCROLL_DOWN = { KeyName = FName("MouseScrollDown") } end)
+    end
+end
+
+local function FindShipCameraComponents(shipActor)
+    local springArm = nil
+    for _, prop in ipairs({ "SpringArm", "CameraBoom", "ThirdPersonSpringArm", "ExternalSpringArm" }) do
+        local ok, comp = pcall(function() return shipActor[prop] end)
+        if ok and Core.IsValidObj(comp) then
+            springArm = comp
+            break
+        end
+    end
+
+    local cam = nil
+    for _, prop in ipairs({ "ThirdPersonCamera", "ExternalCamera", "Camera", "ShipCamera" }) do
+        local ok, comp = pcall(function() return shipActor[prop] end)
+        if ok and Core.IsValidObj(comp) then
+            cam = comp
+            break
+        end
+    end
+
+    return springArm, cam
+end
+
+local function SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
+    if not Core.IsValidObj(shipActor) then return nil end
+    local addr = shipActor:GetAddress()
+    local saved = SavedOriginalCamera[addr]
+    if saved then return saved end
+
+    saved = {
+        ShipActor = shipActor,
+        ShipObj = shipObj,
+        SpringArm = springArm,
+        TargetArmLength = 0.0,
+        Cam = cam,
+        RelativeLocation = { X = 0.0, Y = 0.0, Z = 0.0 },
+    }
+    if Core.IsValidObj(springArm) then
+        pcall(function()
+            if type(springArm.TargetArmLength) == "number" then
+                saved.TargetArmLength = springArm.TargetArmLength
+            end
+        end)
+    end
+    if Core.IsValidObj(cam) then
+        pcall(function()
+            local rel = cam.RelativeLocation
+            if rel and type(rel.X) == "number" then
+                saved.RelativeLocation = { X = rel.X, Y = rel.Y or 0.0, Z = rel.Z or 0.0 }
+            end
+        end)
+    end
+    SavedOriginalCamera[addr] = saved
+    return saved
+end
+
+local function RestoreShipCameraSnapshot(saved)
+    if not saved then return end
+    if Core.IsValidObj(saved.SpringArm) then
+        pcall(function() saved.SpringArm.TargetArmLength = saved.TargetArmLength end)
+    elseif Core.IsValidObj(saved.Cam) then
+        pcall(function() saved.Cam:K2_SetRelativeLocation(saved.RelativeLocation, false, nil, false) end)
+    end
+    if Core.IsValidObj(saved.ShipObj) then
+        pcall(function()
+            if saved.ShipObj.SetViewedExternally then
+                saved.ShipObj:SetViewedExternally(false)
+            end
+        end)
+    end
+end
 
 local function GetPilotedShipActor(pc)
     if not Core.IsValidObj(pc) then return nil, nil end
@@ -42,33 +128,18 @@ local function ApplyShipCameraState(pc)
     local shipActor, shipObj = GetPilotedShipActor(pc)
     if not Core.IsValidObj(shipActor) then return end
 
-    -- Try native SpringArm / Camera properties if exposed on BP_PlayerShip
-    local springArm = nil
-    for _, prop in ipairs({ "SpringArm", "CameraBoom", "ThirdPersonSpringArm", "ExternalSpringArm" }) do
-        local ok, comp = pcall(function() return shipActor[prop] end)
-        if ok and Core.IsValidObj(comp) then
-            springArm = comp
-            break
-        end
-    end
+    local springArm, cam = FindShipCameraComponents(shipActor)
+    local saved = SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
+    ActiveShipAddr = shipActor:GetAddress()
 
     if Core.IsValidObj(springArm) then
         pcall(function()
             if IsThirdPerson then
                 springArm.TargetArmLength = ThirdPersonDist
             else
-                springArm.TargetArmLength = 0.0
+                springArm.TargetArmLength = saved and saved.TargetArmLength or 0.0
             end
         end)
-    end
-
-    local cam = nil
-    for _, prop in ipairs({ "ThirdPersonCamera", "ExternalCamera", "Camera", "ShipCamera" }) do
-        local ok, comp = pcall(function() return shipActor[prop] end)
-        if ok and Core.IsValidObj(comp) then
-            cam = comp
-            break
-        end
     end
 
     if Core.IsValidObj(cam) and not Core.IsValidObj(springArm) then
@@ -76,7 +147,8 @@ local function ApplyShipCameraState(pc)
             if IsThirdPerson then
                 cam:K2_SetRelativeLocation({ X = -ThirdPersonDist, Y = 0.0, Z = ThirdPersonDist * 0.28 }, false, nil, false)
             else
-                cam:K2_SetRelativeLocation({ X = 0.0, Y = 0.0, Z = 0.0 }, false, nil, false)
+                local orig = saved and saved.RelativeLocation or { X = 0.0, Y = 0.0, Z = 0.0 }
+                cam:K2_SetRelativeLocation(orig, false, nil, false)
             end
         end)
     end
@@ -90,6 +162,66 @@ local function ApplyShipCameraState(pc)
     end
 end
 
+-- On-demand frame-synchronized scroll loop: runs ONLY while IsThirdPerson is active (learning.md §8)
+local function StartScrollPoll()
+    if ScrollPollActive then return end
+    ScrollPollActive = true
+    EnsureScrollKeyTables()
+
+    local function Tick()
+        if not IsThirdPerson then
+            ScrollPollActive = false
+            return
+        end
+
+        local pc = Core.GetLocalPlayerController()
+        if not Core.IsValidObj(pc) then
+            IsThirdPerson = false
+            ScrollPollActive = false
+            return
+        end
+
+        local shipActor = GetPilotedShipActor(pc)
+        if not Core.IsValidObj(shipActor) then
+            -- Player exited the pilot seat: restore original 1st-person camera and stop polling
+            if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
+                RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
+            end
+            ActiveShipAddr = nil
+            IsThirdPerson = false
+            ScrollPollActive = false
+            return
+        end
+
+        if not pc.bShowMouseCursor then
+            local delta = 0.0
+            pcall(function()
+                if KEY_MOUSE_WHEEL_AXIS and pc.GetInputAnalogKeyState then
+                    delta = tonumber(pc:GetInputAnalogKeyState(KEY_MOUSE_WHEEL_AXIS)) or 0.0
+                end
+                if delta == 0.0 and KEY_SCROLL_UP and KEY_SCROLL_DOWN then
+                    if pc:WasInputKeyJustPressed(KEY_SCROLL_UP) then
+                        delta = 1.0
+                    elseif pc:WasInputKeyJustPressed(KEY_SCROLL_DOWN) then
+                        delta = -1.0
+                    end
+                end
+            end)
+            if delta > 0.01 then
+                ThirdPersonDist = Core.Clamp(ThirdPersonDist - ZOOM_STEP, MIN_ARM_DIST, MAX_ARM_DIST)
+                ApplyShipCameraState(pc)
+            elseif delta < -0.01 then
+                ThirdPersonDist = Core.Clamp(ThirdPersonDist + ZOOM_STEP, MIN_ARM_DIST, MAX_ARM_DIST)
+                ApplyShipCameraState(pc)
+            end
+        end
+
+        ExecuteInGameThreadAfterFrames(1, Tick)
+    end
+
+    ExecuteInGameThreadAfterFrames(1, Tick)
+end
+
 local function ToggleShipPerspective()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
@@ -98,35 +230,19 @@ local function ToggleShipPerspective()
 
     IsThirdPerson = not IsThirdPerson
     ApplyShipCameraState(pc)
+    if IsThirdPerson then
+        StartScrollPoll()
+    end
 end
 
-local function StartScrollPoll()
-    if ScrollPollActive then return end
-    ScrollPollActive = true
-
-    local function Tick()
-        local pc = Core.GetLocalPlayerController()
-        if Core.IsValidObj(pc) and IsThirdPerson and not pc.bShowMouseCursor then
-            local shipActor = GetPilotedShipActor(pc)
-            if Core.IsValidObj(shipActor) then
-                local up, down = false, false
-                pcall(function()
-                    up = pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") })
-                    down = pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollDown") })
-                end)
-                if up then
-                    ThirdPersonDist = Core.Clamp(ThirdPersonDist - ZOOM_STEP, MIN_ARM_DIST, MAX_ARM_DIST)
-                    ApplyShipCameraState(pc)
-                elseif down then
-                    ThirdPersonDist = Core.Clamp(ThirdPersonDist + ZOOM_STEP, MIN_ARM_DIST, MAX_ARM_DIST)
-                    ApplyShipCameraState(pc)
-                end
-            end
-        end
-        ExecuteInGameThreadWithDelay(16, Tick)
+local function ResetCameraState()
+    if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
+        RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
     end
-
-    ExecuteInGameThreadWithDelay(16, Tick)
+    IsThirdPerson = false
+    ScrollPollActive = false
+    ActiveShipAddr = nil
+    SavedOriginalCamera = {}
 end
 
 function Feature.Init()
@@ -137,11 +253,22 @@ function Feature.Init()
         Label       = "Ship Camera Perspective",
         OnPress     = ToggleShipPerspective,
     })
-    StartScrollPoll()
 end
 
 function Feature.OnClientRestart()
-    IsThirdPerson = false
+    ResetCameraState()
+end
+
+function Feature.OnMapLoad()
+    ResetCameraState()
+end
+
+function Feature.PruneCaches()
+    for addr, saved in pairs(SavedOriginalCamera) do
+        if not saved or not Core.IsValidObj(saved.ShipActor) then
+            SavedOriginalCamera[addr] = nil
+        end
+    end
 end
 
 return Feature

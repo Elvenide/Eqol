@@ -728,7 +728,7 @@ local function ClampValidDropTarget(oldTechs, fromIdx, desiredIdx)
     return fromIdx, false
 end
 
-local function ReorderResearchQueue(tree, fromIdx, toIdx)
+local function ReorderResearchQueue(tree, fromIdx, toIdx, expectedTech)
     if not Core.IsValidObj(tree) or fromIdx == toIdx then return end
     local queueBox = nil
     pcall(function() queueBox = tree.ResearchQueueContainer end)
@@ -750,6 +750,10 @@ local function ReorderResearchQueue(tree, fromIdx, toIdx)
         if not Core.IsValidObj(oldTechs[i]) then
             return
         end
+    end
+    if Core.IsValidObj(expectedTech) and oldTechs[fromIdx]:GetAddress() ~= expectedTech:GetAddress() then
+        Core.Log("[ResearchEnhancements] Aborted queue reorder: queue changed mid-drag")
+        return
     end
 
     local newTechs = BuildReorderedTechs(oldTechs, fromIdx, toIdx)
@@ -972,7 +976,8 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
             local toIdx = dragState.TargetIdx
             ResetQueueChildVisuals(dragState.QueueBox)
             if treeOk and wasDragging and toIdx ~= fromIdx then
-                ReorderResearchQueue(dragState.Tree, fromIdx, toIdx)
+                local expectedTech = dragState.SnapshotTechs and dragState.SnapshotTechs[fromIdx] or nil
+                ReorderResearchQueue(dragState.Tree, fromIdx, toIdx, expectedTech)
             end
             return
         end
@@ -1081,12 +1086,14 @@ Feature.WatchWidgets = {
 
 function Feature.RegisterHooks()
     local treeHookFns = {
-        "SetupWidget",
-        "Refresh",
-        "OnResearchCompleted",
-        "SetFilter",
+        { name = "SetupWidget",         captureBase = true },
+        { name = "SetFilter",           captureBase = true },
+        { name = "Refresh",             captureBase = false },
+        { name = "OnResearchCompleted", captureBase = false },
     }
-    for _, fnName in ipairs(treeHookFns) do
+    for _, hookSpec in ipairs(treeHookFns) do
+        local fnName = hookSpec.name
+        local recapture = hookSpec.captureBase
         Core.TryRegisterHook(
             "ResearchEnhancements_" .. fnName,
             PATHS.ResearchTreeClass .. ":" .. fnName,
@@ -1094,7 +1101,7 @@ function Feature.RegisterHooks()
                 local tree = Context:get()
                 if Core.IsValidObj(tree) then
                     ExecuteInGameThreadWithDelay(30, function()
-                        EnsureAndFilterTree(tree, true)
+                        EnsureAndFilterTree(tree, recapture)
                     end)
                 end
             end

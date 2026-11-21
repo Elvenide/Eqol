@@ -26,16 +26,18 @@ local MAX_VIEW_DIST = 2500.0 -- 25 meters max viewing distance from camera
 local MIN_CAM_DIST  = 120.0  -- hide when camera is inside player's head (1st-person)
 local TAG_SCALE     = 0.30   -- 3D world scale for crisp Minecraft-style proportions
 
-local TagPool = {} -- idx -> { Actor, Comp, TextWidget }
+local TagPool = {} -- dense array: idx -> { Actor, Comp, TextWidget, LastLabel, LastIsOnline, LastVis }
+local CachedWidgetCompCls = nil
 local PollActive = false
 
 local function DestroyTagPool()
-    for i, entry in ipairs(TagPool) do
+    for i, entry in pairs(TagPool) do
         if entry and Core.IsValidObj(entry.Actor) then
             pcall(function() entry.Actor:K2_DestroyActor() end)
         end
         TagPool[i] = nil
     end
+    TagPool = {}
 end
 
 local function GetOrCreateTagActor(pc, idx)
@@ -43,8 +45,15 @@ local function GetOrCreateTagActor(pc, idx)
     if entry and Core.IsValidObj(entry.Actor) and Core.IsValidObj(entry.Comp) and Core.IsValidObj(entry.TextWidget) then
         return entry
     end
+    -- Destroy partially-invalid actor before replacing to prevent leaked actors
+    if entry and Core.IsValidObj(entry.Actor) then
+        pcall(function() entry.Actor:K2_DestroyActor() end)
+    end
 
-    local compCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
+    if not Core.IsValidObj(CachedWidgetCompCls) then
+        CachedWidgetCompCls = Core.FindOrLoadClass(PATHS.WidgetCompClass)
+    end
+    local compCls = CachedWidgetCompCls
     if not Core.IsValidObj(compCls) then return nil end
 
     local actor = Core.SpawnActor(pc, PATHS.ActorClass, { X = 0.0, Y = 0.0, Z = 0.0 }, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
@@ -89,6 +98,9 @@ local function GetOrCreateTagActor(pc, idx)
         Actor = actor,
         Comp = comp,
         TextWidget = nameTxt,
+        LastLabel = nil,
+        LastIsOnline = nil,
+        LastVis = false,
     }
     TagPool[idx] = entry
     return entry
@@ -96,14 +108,14 @@ end
 
 local function UpdateNametags()
     local pc = Core.GetLocalPlayerController()
-    if not Core.IsValidObj(pc) then return end
+    if not Core.IsValidObj(pc) or not Core.IsValidObj(pc.PlayerObject) then return 0, 0 end
 
     local camMgr = pc.PlayerCameraManager
     local mathLib = Core.GetCDO("/Script/Engine.Default__KismetMathLibrary")
-    if not (Core.IsValidObj(camMgr) and Core.IsValidObj(mathLib)) then return end
+    if not (Core.IsValidObj(camMgr) and Core.IsValidObj(mathLib)) then return 0, 0 end
 
     local okCam, camLoc = pcall(function() return camMgr:GetCameraLocation() end)
-    if not okCam or not camLoc then return end
+    if not okCam or not camLoc then return 0, 0 end
 
     local players = StationData.GetAllPlayersInfo(pc)
     local count = 0
@@ -133,18 +145,28 @@ local function UpdateNametags()
                 local tag = GetOrCreateTagActor(pc, count)
                 if tag then
                     local statusStr = p.IsOnline and "Online" or "Offline"
+                    local label = string.format(" %s (%s) ", p.Name, statusStr)
                     local txtCol = p.IsOnline and COLORS.Online or COLORS.Offline
                     pcall(function()
-                        tag.TextWidget:SetText(Core.MakeText(string.format(" %s (%s) ", p.Name, statusStr)))
-                        if Core.IsValidObj(tag.TextWidget.TextBlock) then
-                            tag.TextWidget.TextBlock:SetColorAndOpacity({ SpecifiedColor = txtCol, ColorUseRule = 0 })
+                        if tag.LastLabel ~= label then
+                            tag.TextWidget:SetText(Core.MakeText(label))
+                            tag.LastLabel = label
+                        end
+                        if tag.LastIsOnline ~= p.IsOnline then
+                            if Core.IsValidObj(tag.TextWidget.TextBlock) then
+                                tag.TextWidget.TextBlock:SetColorAndOpacity({ SpecifiedColor = txtCol, ColorUseRule = 0 })
+                            end
+                            tag.LastIsOnline = p.IsOnline
                         end
 
                         -- Face the viewing camera cleanly while staying upright relative to the player's local Up
                         local toCam = { X = dx, Y = dy, Z = dz }
                         local faceRot = mathLib:MakeRotFromXZ(toCam, up)
                         tag.Comp:K2_SetWorldLocationAndRotation(tagPos, faceRot, false, {}, true)
-                        tag.Comp:SetVisibility(true, false)
+                        if tag.LastVis ~= true then
+                            tag.Comp:SetVisibility(true, false)
+                            tag.LastVis = true
+                        end
                     end)
                 end
             end
@@ -153,10 +175,13 @@ local function UpdateNametags()
 
     for i = count + 1, #TagPool do
         local entry = TagPool[i]
-        if entry and Core.IsValidObj(entry.Comp) then
+        if entry and entry.LastVis ~= false and Core.IsValidObj(entry.Comp) then
             pcall(function() entry.Comp:SetVisibility(false, false) end)
+            entry.LastVis = false
         end
     end
+
+    return count, #players
 end
 
 local function StartPoll()
@@ -164,10 +189,20 @@ local function StartPoll()
     PollActive = true
 
     local function Tick()
-        pcall(UpdateNametags)
-        ExecuteInGameThreadWithDelay(16, Tick)
+        local ok, visCount, totalPlayers = pcall(UpdateNametags)
+        local delayMs = 1500
+        if ok then
+            if (visCount or 0) > 0 then
+                delayMs = 16    -- 60Hz smooth billboard tracking while nametags are visible
+            elseif (totalPlayers or 0) > 1 then
+                delayMs = 300   -- Multiplayer, no players currently within 25m
+            else
+                delayMs = 1500  -- Solo / menu idle backoff
+            end
+        end
+        ExecuteInGameThreadWithDelay(delayMs, Tick)
     end
-    ExecuteInGameThreadWithDelay(16, Tick)
+    ExecuteInGameThreadWithDelay(500, Tick)
 end
 
 function Feature.Init()
@@ -176,6 +211,24 @@ end
 
 function Feature.OnClientRestart()
     DestroyTagPool()
+    CachedWidgetCompCls = nil
+end
+
+function Feature.OnMapLoad()
+    DestroyTagPool()
+    CachedWidgetCompCls = nil
+end
+
+function Feature.PruneCaches()
+    local compacted = {}
+    for _, entry in pairs(TagPool) do
+        if entry and Core.IsValidObj(entry.Actor) and Core.IsValidObj(entry.Comp) and Core.IsValidObj(entry.TextWidget) then
+            compacted[#compacted + 1] = entry
+        elseif entry and Core.IsValidObj(entry.Actor) then
+            pcall(function() entry.Actor:K2_DestroyActor() end)
+        end
+    end
+    TagPool = compacted
 end
 
 return Feature

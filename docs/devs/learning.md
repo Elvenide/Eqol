@@ -128,6 +128,8 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
   - `comp:K2_GetComponentLocation()` inside `GetPlatformWorldBounds`
   - Reading `machine.InputMachines` or `machine.OutputMachines` directly in hot loops
 - **Other Fatal / Freeze Pitfalls**:
+  - **Calling `UMachineObject:GetDisplayMaxPower()` or `GetDisplayPower()` on CDOs**: Ship machine CDOs lack a runtime `BuildingFrame` and crash reading `[Frame + 0x48]`. Always read safe reflected numeric properties on CDOs instead.
+  - **Calling `UBuildingBlockObject:GetDefaultMachine()` outside its expected frame type**: Dereferences a null `Cast<Frame>` pointer at `+0x188` and crashes. Read reflected properties (`DefaultMachine`, `DefaultMachines`, `AttachedMachines`) instead.
   - **Reading `.Z` on `FIntPoint`**: Throws in UE4SS (`FIntPoint` only has `X` and `Y`).
   - **Calling `ExecuteInGameThread` / `ExecuteInGameThreadAfterFrames` synchronously inside a `WBP_Button_C` click hook**: Causes hangs/freezes. Always defer heavy button actions with `ExecuteInGameThreadWithDelay(10, fn)`.
   - **Setting `CurrentFloors[idx].machines = nil`**: Previously triggered a legacy world-coordinate fallback that generated 100k grid lines and froze the game.
@@ -156,7 +158,7 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
 - **Viewport-Driven Lazy Streaming (Never Unload)**:
   - Start zoomed in around the player's position and only construct widgets for walls/machines that intersect the padded visible viewport (`~35%` / 6-cell margin), streaming within an `8–10ms/frame` budget. Once created, keep them permanently on the canvas so panning has zero pop-out or visual flicker.
 - **Never Call `GetFrameMachines()` in a Loop Over `GetStationPlatforms()`**:
-  - `StationData.GetStationPlatforms(station)` includes non-machine hull/room/module subobjects. Calling `GetFrameMachines(plat)` on each one triggers `FindAllOf("MachineObject")` for every subobject with 0 machines, causing a permanent freeze on large stations. Use `StationData.GetStationMachines(station, walkFrame)` instead (reads `station.Subobjects` directly in one O(N) pass, with at most a single `FindAllOf` fallback).
+  - `StationData.GetStationPlatforms(station)` includes non-machine hull/room/module subobjects. Calling `GetFrameMachines(plat)` on each one triggers `FindAllOf("MachineObject")` for every subobject with 0 machines, causing a permanent freeze on large stations. Use `StationData.GetStationMachines(station, walkFrame)` instead (runs at most one `FindAllOf("MachineObject")` pass and matches each machine's `ParentFrame` against the station's frame set).
 - **Avoid Frequent Background `FindAllOf` Polls**:
   - Running `FindAllOf` across many classes every `0.85s–1.5s` causes visible periodic frame drops. Prefer `NotifyOnNewObject` + O(1) property reads (`pc.Builder`, cached widget refs) and keep safety-net scans infrequent (`>= 8.0s`).
 

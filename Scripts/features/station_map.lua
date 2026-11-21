@@ -920,6 +920,55 @@ local function InspectBuildMachineCommandLayout()
     return layout
 end
 
+local function CollectBuildableCosts(buildable, mult, outCosts)
+    if not Core.IsValidObj(buildable) then return end
+    local m = mult or 1
+    local function addCostArray(arr)
+        if not arr then return false end
+        local added = false
+        StationData.ForEachArray(arr, function(_, elem)
+            local st = Core.UnwrapStruct(elem)
+            if st and Core.IsValidObj(st.Item) then
+                local amt = (tonumber(st.Amount) or tonumber(st.Count) or 0) * m
+                if amt > 0 then
+                    local iAddr = st.Item:GetAddress()
+                    local cur = outCosts[iAddr]
+                    if cur then
+                        cur.amount = cur.amount + amt
+                    else
+                        outCosts[iAddr] = { item = st.Item, amount = amt }
+                    end
+                    added = true
+                end
+            end
+        end)
+        return added
+    end
+
+    local useItemCost = false
+    local itemCostAsBldCost = false
+    pcall(function() useItemCost = (buildable.bUseItemCost == true) end)
+    pcall(function() itemCostAsBldCost = (buildable.bItemCostAsBuildingCost == true) end)
+
+    local found = false
+    if useItemCost then
+        local okC, costArr = pcall(function() return buildable.ItemCost end)
+        if okC and costArr then found = addCostArray(costArr) end
+    end
+    if not found and itemCostAsBldCost then
+        local okR, inputs = pcall(function() return buildable.ItemDetails.Recipe.Inputs end)
+        if okR and inputs then found = addCostArray(inputs) end
+    end
+    if not found then
+        local okC, costArr = pcall(function() return buildable.ItemCost end)
+        if okC and costArr then found = addCostArray(costArr) end
+    end
+    if not found then
+        local okR, inputs = pcall(function() return buildable.ItemDetails.Recipe.Inputs end)
+        if okR and inputs then addCostArray(inputs) end
+    end
+end
+
 local function PlayerHasBuildableMaterials(pc, buildable, count)
     if not Core.IsValidObj(pc) or not Core.IsValidObj(buildable) then return false end
     local playerObj = pc.PlayerObject
@@ -937,40 +986,74 @@ local function PlayerHasBuildableMaterials(pc, buildable, count)
     end
     if not Core.IsValidObj(inv) then return true end
 
-    local okCost, costArr = pcall(function() return buildable.ItemCost end)
-    if not okCost or not costArr then return true end
+    local neededCosts = {}
+    CollectBuildableCosts(buildable, count or 1, neededCosts)
+    for _, entry in pairs(neededCosts) do
+        local okAmt, have = pcall(function() return inv:GetItemAmount(entry.item) end)
+        if okAmt and (tonumber(have) or 0) < entry.amount then
+            return false
+        end
+    end
+    return true
+end
 
-    local mult = count or 1
-    local hasAll = true
-    StationData.ForEachArray(costArr, function(_, elem)
-        if not hasAll then return end
-        local st = Core.UnwrapStruct(elem)
-        if st and Core.IsValidObj(st.Item) then
-            local needed = (tonumber(st.Amount) or 0) * mult
-            if needed > 0 then
-                local okAmt, have = pcall(function() return inv:GetItemAmount(st.Item) end)
-                if okAmt and (tonumber(have) or 0) < needed then
-                    hasAll = false
+local function CheckMaterialsForPendingList(pc, list, delList)
+    if not Core.IsValidObj(pc) then return false, nil end
+    local playerObj = pc.PlayerObject
+    if not Core.IsValidObj(playerObj) then return false, nil end
+    local okCreative, isCreative = pcall(function() return playerObj.bCreativeMode or pc.bCreativeMode end)
+    if okCreative and isCreative then return true, nil end
+
+    local inv = nil
+    local okBInv, bInv = pcall(function() return playerObj:GetBuildingInventory() end)
+    if okBInv and Core.IsValidObj(bInv) then
+        inv = bInv
+    elseif Core.IsValidObj(playerObj.Inventory) then
+        inv = playerObj.Inventory
+    end
+    if not Core.IsValidObj(inv) then return true, nil end
+
+    -- Sum all required materials across pending builds, then credit refunds from pending deletes/replacements
+    local totalNeeded = {}
+    local firstBldByItem = {}
+    for _, g in ipairs(list) do
+        if Core.IsValidObj(g.buildable) then
+            local bCosts = {}
+            CollectBuildableCosts(g.buildable, 1, bCosts)
+            for iAddr, entry in pairs(bCosts) do
+                if totalNeeded[iAddr] then
+                    totalNeeded[iAddr].amount = totalNeeded[iAddr].amount + entry.amount
+                else
+                    totalNeeded[iAddr] = { item = entry.item, amount = entry.amount }
+                    firstBldByItem[iAddr] = g.buildable
                 end
             end
         end
-    end)
-    return hasAll
-end
+    end
 
-local function CheckMaterialsForPendingList(pc, list)
-    local counts = {}
-    local buildables = {}
-    for _, g in ipairs(list) do
-        if Core.IsValidObj(g.buildable) then
-            local addr = g.buildable:GetAddress()
-            counts[addr] = (counts[addr] or 0) + 1
-            buildables[addr] = g.buildable
+    if delList then
+        local refunds = {}
+        for _, dm in ipairs(delList) do
+            if dm and Core.IsValidObj(dm.machine) then
+                local bld = StationData.FindBuildableForMachineClass(dm.machine)
+                if Core.IsValidObj(bld) then
+                    CollectBuildableCosts(bld, 1, refunds)
+                end
+            end
+        end
+        for iAddr, ref in pairs(refunds) do
+            if totalNeeded[iAddr] then
+                totalNeeded[iAddr].amount = math.max(0, totalNeeded[iAddr].amount - ref.amount)
+            end
         end
     end
-    for addr, cnt in pairs(counts) do
-        if not PlayerHasBuildableMaterials(pc, buildables[addr], cnt) then
-            return false, buildables[addr]
+
+    for iAddr, entry in pairs(totalNeeded) do
+        if entry.amount > 0 then
+            local okAmt, have = pcall(function() return inv:GetItemAmount(entry.item) end)
+            if okAmt and (tonumber(have) or 0) < entry.amount then
+                return false, firstBldByItem[iAddr]
+            end
         end
     end
     return true, nil
@@ -1286,7 +1369,7 @@ local function InvokeCreateInputCommand(pc, className, funcName, valMap)
     if not Core.IsValidObj(pc) or not pc.AddInputCommand then return false end
     local key = className .. ":" .. funcName
     local sig = InputCmdSigCache[key]
-    if sig == nil then
+    if sig == nil or (sig and not Core.IsValidObj(sig.cdo)) then
         local ufunc = StaticFindObject("/Script/MainSequence." .. className .. ":" .. funcName)
         local cdo = StaticFindObject("/Script/MainSequence.Default__" .. className)
         if not Core.IsValidObj(ufunc) or not Core.IsValidObj(cdo) then
@@ -1417,22 +1500,6 @@ local function ApplyMachineConfig(pc, targetMachine, cfg)
                 applied = true
             end
         end
-        -- Direct simulation fallback after 120ms if SetConfigInput did not update PriorityInputIndex/PriorityOutputIndex
-        local capM = targetMachine
-        local capIn = cfg.priorityInput
-        local capOut = cfg.priorityOutput
-        ExecuteInGameThreadWithDelay(120, function()
-            if not Core.IsValidObj(capM) then return end
-            pcall(function()
-                if capIn ~= nil and capIn >= 0 and capM.PriorityInputIndex ~= capIn then
-                    capM.PriorityInputIndex = capIn
-                end
-                if capOut ~= nil and capOut >= 0 and capM.PriorityOutputIndex ~= capOut then
-                    capM.PriorityOutputIndex = capOut
-                end
-            end)
-        end)
-        applied = true
     end
     if cfg.priorityInput == nil and cfg.priorityOutput == nil and cfg.config ~= nil and cfg.config ~= 0 then
         if cfg.config2 ~= nil and cfg.config2 ~= 0 then
@@ -1564,11 +1631,6 @@ local function IssueRemoteBuildMachine(pc, station, platform, platBounds, builda
     local targetFrame = Core.IsValidObj(station) and station or platform
     if not Core.IsValidObj(targetFrame) then
         return false, "No target station"
-    end
-
-    local layout = InspectBuildMachineCommandLayout()
-    if not layout or #layout.params == 0 then
-        return false, "Build command unavailable (see UE4SS.log)"
     end
 
     local quat = {
@@ -1942,7 +2004,7 @@ local function AddSharpChevronToCanvas(outer, canvas, tipX, cy, armLen, armThick
     local halfSin = (armLen * 0.5) * math.sin(rad)
     local cx = tipX - halfCos
     for _, sp in ipairs({ { dy = -halfSin, ang = 42.0 }, { dy = halfSin, ang = -42.0 } }) do
-        local bar = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        local bar = CreateRawFast(PATHS.BorderClass, outer)
         if Core.IsValidObj(bar) then
             pcall(function()
                 bar:SetVisibility(3)
@@ -1958,7 +2020,7 @@ end
 
 local function RenderDirectionChevron(outer, canvas, cx, cy, sizePx, yawDeg, col, zOrder)
     local s = math.max(10.0, sizePx or 18.0)
-    local tile = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local tile = CreateRawFast(PATHS.CanvasPanelClass, outer)
     if not Core.IsValidObj(tile) then return nil end
     pcall(function()
         tile:SetVisibility(3)
@@ -2364,10 +2426,25 @@ local function FitViewTransformToFloor()
     ViewTransform.hasFitted = true
 end
 
+local CachedSlateLibCDO = nil
+local CachedWidgetLayoutLibCDO = nil
+local function GetSlateLibCDO()
+    if not Core.IsValidObj(CachedSlateLibCDO) then
+        CachedSlateLibCDO = Core.GetCDO(PATHS.SlateLibCDO)
+    end
+    return CachedSlateLibCDO
+end
+local function GetWidgetLayoutLibCDO()
+    if not Core.IsValidObj(CachedWidgetLayoutLibCDO) then
+        CachedWidgetLayoutLibCDO = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
+    end
+    return CachedWidgetLayoutLibCDO
+end
+
 local function MeasureMapCanvasSize()
     if not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then return false end
-    local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
-    local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
+    local slateLib = GetSlateLibCDO()
+    local layoutLib = GetWidgetLayoutLibCDO()
     local pc = Core.GetLocalPlayerController()
 
     if Core.IsValidObj(slateLib) and slateLib.GetLocalSize then
@@ -2433,7 +2510,7 @@ RefreshDynamicOverlay = function()
         local bx = (x1 + x2) * 0.5
         local by = (y1 + y2) * 0.5
 
-        local fill = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        local fill = CreateRawFast(PATHS.BorderClass, outer)
         if Core.IsValidObj(fill) then
             pcall(function() fill:SetBrushColor(COLORS.BoxSelectFill) end)
             local fs = MapUI.OverlayCanvas:AddChildToCanvas(fill)
@@ -3378,31 +3455,8 @@ RefreshStationMapCanvas = function(machinesOnly)
                             pm.isCulled = false
                             table.insert(visibleMachineQueue, me)
                         end
-                    else
-                        local wantCulled = not inView
-                        if pm.isCulled ~= wantCulled then
-                            pm.isCulled = wantCulled
-                            local mAddr = pm.addr
-                            if not mAddr and Core.IsValidObj(me.machine) then
-                                mAddr = me.machine:GetAddress()
-                                pm.addr = mAddr
-                            end
-                            local wList = mAddr and RenderedMachineWidgets[mAddr] or nil
-                            if wList then
-                                local vis = wantCulled and 1 or 4 -- Collapsed vs SelfHitTestInvisible
-                                for _, w in ipairs(wList) do
-                                    if Core.IsValidObj(w) then
-                                        pcall(function() w:SetVisibility(vis) end)
-                                    end
-                                end
-                                changedVis = true
-                            end
-                        end
                     end
                 end
-            end
-            if changedVis and MapUI and Core.IsValidObj(MapUI.MachineInvBox) then
-                pcall(function() MapUI.MachineInvBox:InvalidateCache() end)
             end
             if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts) then
                 machinePumpRunning = true
@@ -3536,8 +3590,16 @@ local function EnsureSelectedFloorVisibleInPage()
     FloorPageTopIdx = Core.Clamp(FloorPageTopIdx, minTop, total)
 end
 
+local function UnregisterButtonList(list)
+    if not list then return end
+    for i = 1, #list do
+        Core.UnregisterWBPButtonClick(list[i])
+    end
+end
+
 RebuildFloorButtons = function()
     if not MapUI or not Core.IsValidObj(MapUI.FloorSlotsBox) then return end
+    UnregisterButtonList(FloorRailButtons)
     FloorRailButtons = {}
     ClearCanvasChildren(MapUI.FloorSlotsBox)
     pcall(function() MapUI.FloorSlotsBox:ClearChildren() end)
@@ -3558,10 +3620,12 @@ RebuildFloorButtons = function()
         local btnWrap, btn = CreateLabeledButton(
             MapUI.Window, MapUI.PC, outer, tostring(thisIdx), 17, 96.0, 58.0, bgCol, txtCol,
             function()
-                SelectedFloorIdx = thisIdx
-                ViewTransform.hasFitted = false
-                RebuildFloorButtons()
-                RefreshStationMapCanvas()
+                ExecuteInGameThreadWithDelay(10, function()
+                    SelectedFloorIdx = thisIdx
+                    ViewTransform.hasFitted = false
+                    RebuildFloorButtons()
+                    RefreshStationMapCanvas()
+                end)
             end,
             FloorRailButtons
         )
@@ -3768,7 +3832,7 @@ local function CommitPendingGhosts()
     if not Core.IsValidObj(pc) then return end
 
     if #PendingGhosts > 0 then
-        local okMat, missingBld = CheckMaterialsForPendingList(pc, PendingGhosts)
+        local okMat, missingBld = CheckMaterialsForPendingList(pc, PendingGhosts, delList)
         if not okMat then
             local mName = "machine"
             pcall(function() mName = missingBld.DisplayName:ToString() end)
@@ -4197,8 +4261,8 @@ end
 
 local function GetMapCanvasCursorPos(pc)
     if not MapUI or not Core.IsValidObj(MapUI.MapCanvas) then return nil, nil end
-    local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
-    local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+    local layoutLib = GetWidgetLayoutLibCDO()
+    local slateLib = GetSlateLibCDO()
     if not (Core.IsValidObj(layoutLib) and Core.IsValidObj(slateLib) and MapUI.MapCanvas.GetCachedGeometry) then
         return nil, nil
     end
@@ -4308,6 +4372,8 @@ local function IsAnyButtonHovered()
     return false
 end
 
+local LastBuildMenuPollClock = 0
+
 local function EnsureInputPoll()
     if InputPollActive then return end
     InputPollActive = true
@@ -4358,14 +4424,19 @@ local function EnsureInputPoll()
                     end)
                 end
                 UpdateStatusBanner()
-            elseif (os.clock() - (WaitingBuildMenuSince or 0)) > 0.35 and not Core.IsAnyWidgetClassVisible("WBP_Building_C") then
-                WaitingForBuildMenuSelection = false
-                if Core.IsValidObj(ActiveMapWin) then
-                    pcall(function()
-                        pc.bShowMouseCursor = true
-                        local wbl = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
-                        if Core.IsValidObj(wbl) then wbl:SetInputMode_GameAndUIEx(pc, ActiveMapWin, 0, false, false) end
-                    end)
+            elseif (os.clock() - (WaitingBuildMenuSince or 0)) > 0.35
+                and (os.clock() - (LastBuildMenuPollClock or 0)) >= 0.20
+            then
+                LastBuildMenuPollClock = os.clock()
+                if not Core.IsAnyWidgetClassVisible("WBP_Building_C") then
+                    WaitingForBuildMenuSelection = false
+                    if Core.IsValidObj(ActiveMapWin) then
+                        pcall(function()
+                            pc.bShowMouseCursor = true
+                            local wbl = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
+                            if Core.IsValidObj(wbl) then wbl:SetInputMode_GameAndUIEx(pc, ActiveMapWin, 0, false, false) end
+                        end)
+                    end
                 end
             end
         end
@@ -4629,8 +4700,14 @@ local function DestroyStationMap()
     RefreshPlayerMarkers = nil
     RenderedMachineWidgets = {}
     PlayerMarkerWidgets = {}
+    SelectedMachines = {}
+    PendingGhosts = {}
     PendingDeletes = {}
     SelectedGhosts = {}
+    ApplyInProgress = false
+    CurrentStation = nil
+    CurrentWalkFrame = nil
+    CurrentFloors = {}
     GhostPreviewSig = nil
     MapWinVisible = false
     MapWinInViewport = false
@@ -4644,6 +4721,9 @@ local function DestroyStationMap()
     LastGridTier = nil
     LastGridZoomRatio = nil
     LastHoveredPortIdx = nil
+    UnregisterButtonList(FloorIconButtons)
+    UnregisterButtonList(FloorRailButtons)
+    UnregisterButtonList(TrackedButtons)
     FloorIconButtons = {}
     FloorRailButtons = {}
     TrackedButtons = {}
@@ -4789,7 +4869,7 @@ local function OpenStationMap()
         and Core.IsValidObj(mapBg) and Core.IsValidObj(mapOverlay) and Core.IsValidObj(bgPanZoom)
         and Core.IsValidObj(mapCanvas) and Core.IsValidObj(selectionCanvas)
         and Core.IsValidObj(overlayCanvas) and Core.IsValidObj(rightVBox)) then
-        CloseStationMap()
+        DestroyStationMap()
         return
     end
 
@@ -4982,14 +5062,20 @@ local function OpenStationMap()
         end
     end
 
-    -- Right-end action buttons with generous horizontal padding
-    local copyWrap, copyBtn = CreateLabeledButton(win, pc, outer, "Copy (Ctrl+C)", 11, 122.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, CopySelectedMachines)
-    local rotWrap, rotBtn = CreateLabeledButton(win, pc, outer, "Rotate (R)", 11, 102.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        PendingRotationDeg = (PendingRotationDeg + 90) % 360
-        UpdateStatusBanner()
-        RefreshDynamicOverlay()
+    -- Right-end action buttons with generous horizontal padding (deferred via ExecuteInGameThreadWithDelay per learning.md §6)
+    local copyWrap, copyBtn = CreateLabeledButton(win, pc, outer, "Copy (Ctrl+C)", 11, 122.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+        ExecuteInGameThreadWithDelay(10, CopySelectedMachines)
     end)
-    local delWrap, delBtn = CreateLabeledButton(win, pc, outer, "Delete (X)", 11, 102.0, 28.0, pillBgDel, COLORS.PlayerLocal, ProposeDeleteSelected)
+    local rotWrap, rotBtn = CreateLabeledButton(win, pc, outer, "Rotate (R)", 11, 102.0, 28.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
+        ExecuteInGameThreadWithDelay(10, function()
+            PendingRotationDeg = (PendingRotationDeg + 90) % 360
+            UpdateStatusBanner()
+            RefreshDynamicOverlay()
+        end)
+    end)
+    local delWrap, delBtn = CreateLabeledButton(win, pc, outer, "Delete (X)", 11, 102.0, 28.0, pillBgDel, COLORS.PlayerLocal, function()
+        ExecuteInGameThreadWithDelay(10, ProposeDeleteSelected)
+    end)
     for _, ab in ipairs({ copyWrap, rotWrap, delWrap }) do
         if Core.IsValidObj(ab) then
             local sl = topHBox:AddChildToHorizontalBox(ab)
@@ -5052,18 +5138,22 @@ local function OpenStationMap()
     local floorInnerVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorSlotsBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
     local floorUpWrap, floorUpBtn = CreateLabeledButton(win, pc, outer, "↑", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        local total = #CurrentFloors
-        if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
-            FloorPageTopIdx = math.min(total, FloorPageTopIdx + 1)
-            RebuildFloorButtons()
-        end
+        ExecuteInGameThreadWithDelay(10, function()
+            local total = #CurrentFloors
+            if total > FLOOR_PAGE_SIZE and FloorPageTopIdx and FloorPageTopIdx < total then
+                FloorPageTopIdx = math.min(total, FloorPageTopIdx + 1)
+                RebuildFloorButtons()
+            end
+        end)
     end)
     local floorDownWrap, floorDownBtn = CreateLabeledButton(win, pc, outer, "↓", 16, 96.0, 40.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
-        if FloorPageTopIdx and FloorPageTopIdx > minTop then
-            FloorPageTopIdx = math.max(minTop, FloorPageTopIdx - 1)
-            RebuildFloorButtons()
-        end
+        ExecuteInGameThreadWithDelay(10, function()
+            local minTop = math.min(#CurrentFloors, FLOOR_PAGE_SIZE)
+            if FloorPageTopIdx and FloorPageTopIdx > minTop then
+                FloorPageTopIdx = math.max(minTop, FloorPageTopIdx - 1)
+                RebuildFloorButtons()
+            end
+        end)
     end)
 
     if Core.IsValidObj(floorFrame) and Core.IsValidObj(floorInnerVBox) and Core.IsValidObj(floorSlotsBox) then
@@ -5113,11 +5203,13 @@ local function OpenStationMap()
         ExecuteInGameThreadWithDelay(10, CommitPendingGhosts)
     end)
     local discardWrap, discardBtn = CreateLabeledButton(win, pc, outer, "Discard", 11, 148.0, 30.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        PendingGhosts = {}
-        PendingDeletes = {}
-        SelectedGhosts = {}
-        UpdateActionBar()
-        RefreshSelectionLayer()
+        ExecuteInGameThreadWithDelay(10, function()
+            PendingGhosts = {}
+            PendingDeletes = {}
+            SelectedGhosts = {}
+            UpdateActionBar()
+            RefreshSelectionLayer()
+        end)
     end)
 
     if Core.IsValidObj(discardWrap) then
@@ -5277,7 +5369,7 @@ local function EnsureMapKeybinds()
 
     if Key.R then
         RegisterKeyBind(Key.R, function()
-            if IsMapOpen() and InteractionMode == "Paste" and not Core.IsAnyTextInputFocused() then
+            if IsMapOpen() and (InteractionMode == "Paste" or InteractionMode == "Place") and not Core.IsAnyTextInputFocused() then
                 ExecuteInGameThread(function()
                     PendingRotationDeg = (PendingRotationDeg + 90) % 360
                     UpdateStatusBanner()
