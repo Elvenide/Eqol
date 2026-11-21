@@ -962,7 +962,7 @@ local function EnsureShipLegend(pc)
                 pcall(function()
                     hpSlot:SetVerticalAlignment(2)
                     hpSlot:SetSize({ Value = 1.0, SizeRule = 1 })
-                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 12.0, Bottom = 0.0 })
+                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 22.0, Bottom = 0.0 })
                 end)
             end
         end
@@ -1002,7 +1002,7 @@ local function EnsureShipLegend(pc)
             pcall(function()
                 rBodySlot:SetHorizontalAlignment(0)
                 rBodySlot:SetVerticalAlignment(0)
-                rBodySlot:SetPadding({ Left = 14.0, Top = 10.0, Right = 10.0, Bottom = 10.0 })
+                rBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 22.0, Bottom = 10.0 })
             end)
         end
 
@@ -1089,6 +1089,95 @@ local function UpdateShipLegend()
         if Core.IsValidObj(ui.RightWing) then ui.RightWing:SetVisibility(showZoom and 3 or 1) end
         ui.Root:SetVisibility(4) -- SelfHitTestInvisible
     end)
+end
+
+local CachedWidgetCompCls = nil
+local CockpitTextCache = {
+    ShipActorAddr = nil,
+    UsingTB = nil,
+    FuelTB = nil,
+    Scanned = false,
+}
+
+local function ReadCockpitFuelStrings(shipActor)
+    if not Core.IsValidObj(shipActor) then return nil, nil end
+    local addr = shipActor:GetAddress()
+    if CockpitTextCache.ShipActorAddr ~= addr then
+        CockpitTextCache.ShipActorAddr = addr
+        CockpitTextCache.UsingTB = nil
+        CockpitTextCache.FuelTB = nil
+        CockpitTextCache.Scanned = false
+    end
+
+    if not CockpitTextCache.Scanned then
+        CockpitTextCache.Scanned = true
+        if not Core.IsValidObj(CachedWidgetCompCls) then
+            CachedWidgetCompCls = Core.FindOrLoadClass("/Script/UMG.WidgetComponent")
+        end
+        if Core.IsValidObj(CachedWidgetCompCls) and shipActor.K2_GetComponentsByClass then
+            pcall(function()
+                local comps = shipActor:K2_GetComponentsByClass(CachedWidgetCompCls)
+                if not comps then return end
+                local len = comps.GetArrayNum and comps:GetArrayNum() or #comps
+                for i = 1, len do
+                    local wc = Core.UnwrapArrayElem(comps[i])
+                    if Core.IsValidObj(wc) and wc.GetUserWidgetObject then
+                        local uw = wc:GetUserWidgetObject()
+                        if Core.IsValidObj(uw) then
+                            local cls = uw:GetClass()
+                            if Core.IsValidObj(cls) and cls.ForEachProperty then
+                                cls:ForEachProperty(function(prop)
+                                    local okN, pName = pcall(function() return prop:GetFName():ToString() end)
+                                    if not okN or type(pName) ~= "string" then return end
+                                    local okV, val = pcall(function() return uw[pName] end)
+                                    if not okV or not Core.IsValidObj(val) then return end
+                                    local tb = nil
+                                    if val.GetText then
+                                        tb = val
+                                    elseif Core.IsValidObj(val.TextBlock) and val.TextBlock.GetText then
+                                        tb = val.TextBlock
+                                    end
+                                    if Core.IsValidObj(tb) then
+                                        local okT, tObj = pcall(function() return tb:GetText() end)
+                                        local s = (okT and tObj and tObj.ToString) and tObj:ToString() or (type(tObj) == "string" and tObj or "")
+                                        if s:find("Using:", 1, true) then
+                                            CockpitTextCache.UsingTB = tb
+                                        elseif s:find("Fuel", 1, true) then
+                                            CockpitTextCache.FuelTB = tb
+                                        end
+                                    end
+                                end)
+                            end
+                        end
+                    end
+                end
+            end)
+            if Core.IsValidObj(CockpitTextCache.UsingTB) or Core.IsValidObj(CockpitTextCache.FuelTB) then
+                Core.Log("[ShipCamera] Bound live cockpit fuel TextBlocks (exact vanilla values)")
+            end
+        end
+    end
+
+    local usingStr, fuelStr = nil, nil
+    if Core.IsValidObj(CockpitTextCache.UsingTB) then
+        pcall(function()
+            local t = CockpitTextCache.UsingTB:GetText()
+            local s = (t and t.ToString) and t:ToString() or (type(t) == "string" and t or nil)
+            if s and s ~= "" then
+                usingStr = s:gsub(" / sec", "/s"):gsub("::", ":")
+            end
+        end)
+    end
+    if Core.IsValidObj(CockpitTextCache.FuelTB) then
+        pcall(function()
+            local t = CockpitTextCache.FuelTB:GetText()
+            local s = (t and t.ToString) and t:ToString() or (type(t) == "string" and t or nil)
+            if s and s ~= "" then
+                fuelStr = s:gsub("::", ":")
+            end
+        end)
+    end
+    return usingStr, fuelStr
 end
 
 local TelemetryTrack = {
@@ -1216,55 +1305,40 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
     end
 
-    -- 3. Fuel availability (GetRemainingFuel / RemainingFuelDouble / RemainingFuel) & usage (PowerGrid / FuelConsumptionRate / live delta)
+    -- 3. Fuel usage & fuel availability (prefer exact live cockpit TextBlocks; fallback to calibrated shipObj scaling)
+    local cockpitUsingStr, cockpitFuelStr = ReadCockpitFuelStrings(shipActor)
     local fuelAvail = nil
     local fuelUse = nil
-    pcall(function()
-        if shipObj.GetRemainingFuel then fuelAvail = ReadNumericOrFixed(shipObj:GetRemainingFuel()) end
-        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuelDouble) end
-        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuel) end
-        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.Fuel) end
+    if not cockpitUsingStr or not cockpitFuelStr then
+        pcall(function()
+            if shipObj.GetRemainingFuel then fuelAvail = ReadNumericOrFixed(shipObj:GetRemainingFuel()) end
+            if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuelDouble) end
+            if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.RemainingFuel) end
+            if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.Fuel) end
 
-        fuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
-        if fuelUse == nil then fuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
-        if fuelUse == nil and shipObj.GetPowerGrid then
-            local pg = shipObj:GetPowerGrid()
-            if Core.IsValidObj(pg) then
-                fuelUse = ReadNumericOrFixed(pg.PowerConsumptionRate)
-                    or ReadNumericOrFixed(pg.PowerDraw)
-                    or ReadNumericOrFixed(pg.TotalConsumption)
-            end
-        end
-    end)
-    if fuelAvail ~= nil then
-        if fuelUse == nil and TelemetryTrack.LastFuel ~= nil and TelemetryTrack.LastFuelClock ~= nil then
-            local dtF = now - TelemetryTrack.LastFuelClock
-            if dtF >= 0.25 then
-                local rate = math.max(0.0, (TelemetryTrack.LastFuel - fuelAvail) / dtF)
-                if TelemetryTrack.SmoothedFuelRate == nil then
-                    TelemetryTrack.SmoothedFuelRate = rate
-                else
-                    TelemetryTrack.SmoothedFuelRate = TelemetryTrack.SmoothedFuelRate * 0.6 + rate * 0.4
+            fuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
+            if fuelUse == nil then fuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
+            if fuelUse == nil and shipObj.GetPowerGrid then
+                local pg = shipObj:GetPowerGrid()
+                if Core.IsValidObj(pg) then
+                    fuelUse = ReadNumericOrFixed(pg.PowerConsumptionRate)
+                        or ReadNumericOrFixed(pg.PowerDraw)
+                        or ReadNumericOrFixed(pg.TotalConsumption)
                 end
-                TelemetryTrack.LastFuel = fuelAvail
-                TelemetryTrack.LastFuelClock = now
             end
-        elseif TelemetryTrack.LastFuel == nil then
-            TelemetryTrack.LastFuel = fuelAvail
-            TelemetryTrack.LastFuelClock = now
-        end
-        if fuelUse == nil and TelemetryTrack.SmoothedFuelRate ~= nil then
-            fuelUse = TelemetryTrack.SmoothedFuelRate
-        end
+        end)
     end
     if Core.IsValidObj(ui.FuelUseTxt) then
-        local uStr = fuelUse and ("Using: " .. FormatEnergyValue(fuelUse, true)) or "Using: 0.0 MJ/s"
+        local uStr = cockpitUsingStr
+            or (fuelUse and ("Using: " .. FormatEnergyValue(fuelUse * 0.3, true)) or "Using: 0.0 MJ/s")
         pcall(function() ui.FuelUseTxt:SetText(Core.MakeText(uStr)) end)
     end
     if Core.IsValidObj(ui.FuelAvailTxt) then
-        local aStr = fuelAvail and ("Fuel: " .. FormatEnergyValue(fuelAvail, false)) or "Fuel: --"
+        local aStr = cockpitFuelStr
+            or (fuelAvail and ("Fuel: " .. FormatEnergyValue(fuelAvail * 6.0, false)) or "Fuel: --")
         pcall(function() ui.FuelAvailTxt:SetText(Core.MakeText(aStr)) end)
         local lowFuel = (fuelAvail ~= nil and fuelAvail <= 0.1)
+            or (cockpitFuelStr ~= nil and cockpitFuelStr:find("0.0 ", 1, true) ~= nil)
         SetWBPTextCol(ui.FuelAvailTxt, lowFuel and TELEM_RED or TELEM_GOLD)
     end
 
