@@ -519,10 +519,9 @@ function Feature.RegisterHooks()
         end
     )
 
-    SyncIMCSystemBinding(false)
-
     if r1 and r2 and r3 and not AllHooksLogged then
         AllHooksLogged = true
+        SyncIMCSystemBinding(false)
         Core.Log("All PowerOverview Blueprint hooks registered")
     end
 end

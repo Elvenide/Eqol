@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.26"
+Core.VERSION = "0.1.27"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -401,14 +401,13 @@ function Core.GetWidgetOuter(parentWidget)
 end
 
 function Core.TryRegisterHook(hookKey, ufuncPath, callbackFn)
+    if RegisteredHookAddresses[hookKey] then
+        return true
+    end
     local ufunc = StaticFindObject(ufuncPath)
     if not Core.IsValidObj(ufunc) then return false end
 
     local addr = ufunc:GetAddress()
-    if RegisteredHookAddresses[hookKey] == addr then
-        return true
-    end
-
     local ok = pcall(RegisterHook, ufuncPath, callbackFn)
     if ok then
         RegisteredHookAddresses[hookKey] = addr

@@ -142,35 +142,79 @@ local function FindSettingsSwitcherAndTabBar(menu)
     return switcher, tabBar, refTabBtn, siblingTabs or {}
 end
 
+local CleanTabMetaLogged = false
+
+local function ApplyCleanTabState(tabWidget, isSelected)
+    if not Core.IsValidObj(tabWidget) then return end
+    pcall(function()
+        if tabWidget.SetSelected then
+            tabWidget:SetSelected(isSelected)
+        elseif tabWidget.SetActive then
+            tabWidget:SetActive(isSelected)
+        elseif tabWidget.SetIsSelected then
+            tabWidget:SetIsSelected(isSelected)
+        elseif tabWidget.SelectTab then
+            tabWidget:SelectTab(isSelected)
+        end
+    end)
+end
+
+local function SetCleanTabLabel(tabWidget, labelStr)
+    if not Core.IsValidObj(tabWidget) then return end
+    local txt = Core.MakeText(labelStr)
+    pcall(function()
+        if tabWidget.SetTitle then
+            tabWidget:SetTitle(txt)
+        elseif tabWidget.SetText then
+            tabWidget:SetText(txt)
+        elseif tabWidget.SetTabName then
+            tabWidget:SetTabName(txt)
+        end
+        for _, prop in ipairs({ "WBP_Text", "Text", "Title", "Label", "TabText", "NameText" }) do
+            local ok, v = pcall(function() return tabWidget[prop] end)
+            if ok and Core.IsValidObj(v) and v.SetText then
+                v:SetText(txt)
+                break
+            end
+        end
+    end)
+end
+
+local function FindCleanTabClickButton(tabWidget)
+    if not Core.IsValidObj(tabWidget) then return nil end
+    local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
+    if SafeIsA(tabWidget, btnCls) then return tabWidget end
+    for _, prop in ipairs({ "WBP_Button", "Button", "TabButton", "Button_0", "CleanButton" }) do
+        local ok, b = pcall(function() return tabWidget[prop] end)
+        if ok and Core.IsValidObj(b) then
+            return b
+        end
+    end
+    return nil
+end
+
 local function SetEqolTabVisualActive(menuState, isActive)
     if not menuState then return end
-    if Core.IsValidObj(menuState.TabLine) then
-        pcall(function()
-            menuState.TabLine:SetBrushColor(isActive and COLORS.TabLineActive or COLORS.TabLineInactive)
-        end)
+    if menuState.IsNativeCleanTab and Core.IsValidObj(menuState.TabWidget) then
+        ApplyCleanTabState(menuState.TabWidget, isActive)
+    else
+        if Core.IsValidObj(menuState.TabLine) then
+            pcall(function()
+                menuState.TabLine:SetBrushColor(isActive and COLORS.TabLineActive or COLORS.TabLineInactive)
+            end)
+        end
+        if Core.IsValidObj(menuState.TabTxt) and Core.IsValidObj(menuState.TabTxt.TextBlock) then
+            pcall(function()
+                menuState.TabTxt.TextBlock:SetColorAndOpacity({
+                    SpecifiedColor = isActive and COLORS.TabTextActive or COLORS.TabTextInactive,
+                    ColorUseRule = 0,
+                })
+            end)
+        end
     end
-    if Core.IsValidObj(menuState.TabTxt) and Core.IsValidObj(menuState.TabTxt.TextBlock) then
-        pcall(function()
-            menuState.TabTxt.TextBlock:SetColorAndOpacity({
-                SpecifiedColor = isActive and COLORS.TabTextActive or COLORS.TabTextInactive,
-                ColorUseRule = 0,
-            })
-        end)
-    end
-    -- Deselect vanilla WBP_CleanTab siblings when Eqol Settings tab becomes active
     if isActive and menuState.SiblingTabs then
         for _, sib in ipairs(menuState.SiblingTabs) do
-            if Core.IsValidObj(sib) then
-                pcall(function()
-                    if sib.SetSelected then
-                        sib:SetSelected(false)
-                    elseif sib.SetActive then
-                        sib:SetActive(false)
-                    elseif sib.Deselect then
-                        sib:Deselect()
-                    end
-                end)
-            end
+            ApplyCleanTabState(sib, false)
         end
     end
 end
@@ -391,29 +435,75 @@ local function PopulateEqolPageLazy(menuState)
     end
 end
 
+local function LogCleanTabMetaOnce(refTabBtn)
+    if CleanTabMetaLogged or not Core.IsValidObj(refTabBtn) then return end
+    CleanTabMetaLogged = true
+    local props, funcs = {}, {}
+    pcall(function()
+        local cls = refTabBtn:GetClass()
+        while Core.IsValidObj(cls) do
+            local cn = cls:GetFName():ToString()
+            if cn == "UserWidget" or cn == "Widget" or cn == "Object" then break end
+            cls:ForEachProperty(function(p)
+                if #props < 16 then props[#props + 1] = p:GetFName():ToString() end
+            end)
+            cls:ForEachFunction(function(fn)
+                if #funcs < 16 then funcs[#funcs + 1] = fn:GetFName():ToString() end
+            end)
+            cls = cls:GetSuperStruct()
+        end
+    end)
+    Core.Log(string.format("[EqolSettings] CleanTab cls=%s props=[%s] funcs=[%s]",
+        refTabBtn:GetClass():GetFName():ToString(), table.concat(props, ","), table.concat(funcs, ",")))
+end
+
 local function HookSiblingTabButtons(menuState)
     if not menuState or not menuState.SiblingTabs then return end
     local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
     for _, sib in ipairs(menuState.SiblingTabs) do
         if Core.IsValidObj(sib) then
-            local sibBtn = nil
-            if SafeIsA(sib, btnCls) then
-                sibBtn = sib
-            else
-                for _, prop in ipairs({ "WBP_Button", "Button", "TabButton", "Button_0" }) do
-                    local okB, b = pcall(function() return sib[prop] end)
-                    if okB and SafeIsA(b, btnCls) then
-                        sibBtn = b
-                        break
-                    end
-                end
-            end
-            if Core.IsValidObj(sibBtn) then
+            local sibBtn = FindCleanTabClickButton(sib)
+            if Core.IsValidObj(sibBtn) and SafeIsA(sibBtn, btnCls) then
                 Core.RegisterWBPButtonClick(sibBtn, function()
                     ExecuteInGameThreadWithDelay(10, function()
                         SetEqolTabVisualActive(menuState, false)
                     end)
                 end)
+            end
+        end
+    end
+    -- Also hook WBP_SettingsMenu_C's native tab-select or WBP_CleanTab_C's OnClicked if present
+    if menuState.SiblingTabs[1] and Core.IsValidObj(menuState.SiblingTabs[1]) then
+        local clsPath = nil
+        pcall(function()
+            local full = menuState.SiblingTabs[1]:GetClass():GetFullName()
+            clsPath = full:match("^%S+ (.+)$")
+        end)
+        if clsPath then
+            for _, fnName in ipairs({ "SetSelected", "Select", "OnClicked", "BndEvt__WBP_CleanTab_Button_K2Node_ComponentBoundEvent_0_OnButtonClickedEvent__DelegateSignature" }) do
+                Core.TryRegisterHook(
+                    "EqolSettings_CleanTab_" .. fnName,
+                    clsPath .. ":" .. fnName,
+                    function(Context)
+                        local selfTab = Context:get()
+                        if not Core.IsValidObj(selfTab) then return end
+                        local selfAddr = selfTab:GetAddress()
+                        for _, st in pairs(InjectedMenus) do
+                            if st and Core.IsValidObj(st.TabWidget) and st.TabWidget:GetAddress() ~= selfAddr then
+                                if Core.IsValidObj(st.Switcher) and st.Switcher.GetActiveWidgetIndex then
+                                    ExecuteInGameThreadWithDelay(15, function()
+                                        if Core.IsValidObj(st.Switcher) then
+                                            local curIdx = tonumber(st.Switcher:GetActiveWidgetIndex())
+                                            if curIdx ~= st.EqolIndex then
+                                                SetEqolTabVisualActive(st, false)
+                                            end
+                                        end
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                )
             end
         end
     end
@@ -445,6 +535,7 @@ local function EnsureEqolSettingsTab(menu)
 
     local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
     local outer = Core.GetWidgetOuter(menu)
+    LogCleanTabMetaOnce(refTabBtn)
 
     -- Create only the lightweight empty ScrollBox shell now (lazy-populate rows on tab click so Esc has 0ms hitch!)
     local pageScroll = Core.CreateRawWidget(PATHS.ScrollBoxClass, outer)
@@ -464,69 +555,129 @@ local function EnsureEqolSettingsTab(menu)
         end
     end)
 
-    -- Build a clean tab button matching WBP_CleanTab_C (transparent bg + bottom underline bar + equal column fill)
-    local tabOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
-    local tabBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
-    local tabVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local tabTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
-    local tabLineSize = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-    local tabLine = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    if not (Core.IsValidObj(tabOverlay) and Core.IsValidObj(tabBtn) and Core.IsValidObj(tabVBox)
-        and Core.IsValidObj(tabTxt) and Core.IsValidObj(tabLineSize) and Core.IsValidObj(tabLine)) then
-        return
+    -- Prefer instantiating a real native WBP_CleanTab_C matching refTabBtn so visual styling is 100% identical
+    local tabRoot = nil
+    local tabWidget = nil
+    local tabBtn = nil
+    local tabTxt = nil
+    local tabLine = nil
+    local isNativeCleanTab = false
+
+    if Core.IsValidObj(refTabBtn) then
+        local wbl = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
+        local okCls, tabCls = pcall(function() return refTabBtn:GetClass() end)
+        if Core.IsValidObj(wbl) and okCls and Core.IsValidObj(tabCls) then
+            local okCreate, nativeTab = pcall(function() return wbl:Create(menu, tabCls, pc) end)
+            if okCreate and Core.IsValidObj(nativeTab) then
+                isNativeCleanTab = true
+                tabWidget = nativeTab
+                SetCleanTabLabel(nativeTab, "Eqol")
+                ApplyCleanTabState(nativeTab, false)
+                ExecuteInGameThreadAfterFrames(1, function()
+                    if Core.IsValidObj(nativeTab) then
+                        SetCleanTabLabel(nativeTab, "Eqol")
+                        ApplyCleanTabState(nativeTab, false)
+                    end
+                end)
+
+                local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
+                local innerBtn = FindCleanTabClickButton(nativeTab)
+                if Core.IsValidObj(innerBtn) and SafeIsA(innerBtn, btnCls) then
+                    tabBtn = innerBtn
+                    tabRoot = nativeTab
+                else
+                    -- Overlay a transparent WBP_Button_C over the native WBP_CleanTab_C so clicks are guaranteed hookable
+                    local ov = Core.CreateRawWidget(PATHS.OverlayClass, outer)
+                    local clickBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
+                    if Core.IsValidObj(ov) and Core.IsValidObj(clickBtn) then
+                        pcall(function()
+                            if clickBtn.SetBackgroundColour then clickBtn:SetBackgroundColour(COLORS.Transparent) end
+                            clickBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                            local nSlot = ov:AddChildToOverlay(nativeTab)
+                            if Core.IsValidObj(nSlot) then
+                                nSlot:SetHorizontalAlignment(0)
+                                nSlot:SetVerticalAlignment(0)
+                            end
+                            local cSlot = ov:AddChildToOverlay(clickBtn)
+                            if Core.IsValidObj(cSlot) then
+                                cSlot:SetHorizontalAlignment(0)
+                                cSlot:SetVerticalAlignment(0)
+                            end
+                        end)
+                        tabBtn = clickBtn
+                        tabRoot = ov
+                    end
+                end
+            end
+        end
     end
 
-    pcall(function()
-        if tabBtn.SetBackgroundColour then
-            tabBtn:SetBackgroundColour(COLORS.Transparent)
+    -- Fallback: custom WBP_CleanTab-styled button if native class creation failed
+    if not (Core.IsValidObj(tabRoot) and Core.IsValidObj(tabBtn)) then
+        isNativeCleanTab = false
+        local tabOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
+        tabBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
+        local tabVBox = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
+        tabTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
+        local tabLineSize = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
+        tabLine = Core.CreateRawWidget(PATHS.BorderClass, outer)
+        if not (Core.IsValidObj(tabOverlay) and Core.IsValidObj(tabBtn) and Core.IsValidObj(tabVBox)
+            and Core.IsValidObj(tabTxt) and Core.IsValidObj(tabLineSize) and Core.IsValidObj(tabLine)) then
+            return
         end
-        tabBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+        tabRoot = tabOverlay
+        tabWidget = tabOverlay
 
-        tabVBox:SetVisibility(3) -- HitTestInvisible
-        local tSlot = tabVBox:AddChildToVerticalBox(tabTxt)
-        if Core.IsValidObj(tSlot) then
-            tSlot:SetHorizontalAlignment(2) -- Center
-            tSlot:SetVerticalAlignment(2)   -- Center
-            tSlot:SetSize({ Value = 1.0, SizeRule = 1 })
-            tSlot:SetPadding({ Left = 8.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
-        end
-
-        tabLineSize:SetHeightOverride(2.0)
-        tabLineSize:SetVisibility(3)
-        tabLine:SetBrushColor(COLORS.TabLineInactive)
-        tabLine:SetVisibility(3)
-        tabLineSize:AddChild(tabLine)
-        local lSlot = tabVBox:AddChildToVerticalBox(tabLineSize)
-        if Core.IsValidObj(lSlot) then
-            lSlot:SetHorizontalAlignment(0) -- Fill
-            lSlot:SetVerticalAlignment(3)   -- Bottom
-        end
-
-        local bSlot = tabOverlay:AddChildToOverlay(tabBtn)
-        if Core.IsValidObj(bSlot) then
-            bSlot:SetHorizontalAlignment(0)
-            bSlot:SetVerticalAlignment(0)
-        end
-        local vSlot = tabOverlay:AddChildToOverlay(tabVBox)
-        if Core.IsValidObj(vSlot) then
-            vSlot:SetHorizontalAlignment(0)
-            vSlot:SetVerticalAlignment(0)
-        end
-    end)
-
-    local function ApplyTabLabel()
         pcall(function()
-            tabTxt:SetVisibility(3)
-            tabTxt:SetSize(13)
-            tabTxt:SetText(Core.MakeText("Eqol"))
-            if Core.IsValidObj(tabTxt.TextBlock) then
-                tabTxt.TextBlock:SetVisibility(3)
-                tabTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.TabTextInactive, ColorUseRule = 0 })
+            if tabBtn.SetBackgroundColour then tabBtn:SetBackgroundColour(COLORS.Transparent) end
+            tabBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+
+            tabVBox:SetVisibility(3)
+            local tSlot = tabVBox:AddChildToVerticalBox(tabTxt)
+            if Core.IsValidObj(tSlot) then
+                tSlot:SetHorizontalAlignment(2)
+                tSlot:SetVerticalAlignment(2)
+                tSlot:SetSize({ Value = 1.0, SizeRule = 1 })
+                tSlot:SetPadding({ Left = 8.0, Top = 6.0, Right = 8.0, Bottom = 6.0 })
+            end
+
+            tabLineSize:SetHeightOverride(2.0)
+            tabLineSize:SetVisibility(3)
+            tabLine:SetBrushColor(COLORS.TabLineInactive)
+            tabLine:SetVisibility(3)
+            tabLineSize:AddChild(tabLine)
+            local lSlot = tabVBox:AddChildToVerticalBox(tabLineSize)
+            if Core.IsValidObj(lSlot) then
+                lSlot:SetHorizontalAlignment(0)
+                lSlot:SetVerticalAlignment(3)
+            end
+
+            local bSlot = tabOverlay:AddChildToOverlay(tabBtn)
+            if Core.IsValidObj(bSlot) then
+                bSlot:SetHorizontalAlignment(0)
+                bSlot:SetVerticalAlignment(0)
+            end
+            local vSlot = tabOverlay:AddChildToOverlay(tabVBox)
+            if Core.IsValidObj(vSlot) then
+                vSlot:SetHorizontalAlignment(0)
+                vSlot:SetVerticalAlignment(0)
             end
         end)
+
+        local function ApplyTabLabel()
+            pcall(function()
+                tabTxt:SetVisibility(3)
+                tabTxt:SetSize(13)
+                tabTxt:SetText(Core.MakeText("Eqol"))
+                if Core.IsValidObj(tabTxt.TextBlock) then
+                    tabTxt.TextBlock:SetVisibility(3)
+                    tabTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.TabTextInactive, ColorUseRule = 0 })
+                end
+            end)
+        end
+        ApplyTabLabel()
+        ExecuteInGameThreadAfterFrames(1, ApplyTabLabel)
     end
-    ApplyTabLabel()
-    ExecuteInGameThreadAfterFrames(1, ApplyTabLabel)
 
     local addedSlot = nil
     pcall(function()
@@ -542,39 +693,41 @@ local function EnsureEqolSettingsTab(menu)
             if refRow > refCol then
                 targetRow, targetCol = refRow + 1, refCol
             end
-            addedSlot = tabBar:AddChildToGrid(tabOverlay, targetRow, targetCol)
+            addedSlot = tabBar:AddChildToGrid(tabRoot, targetRow, targetCol)
             if tabBar.SetColumnFill then
                 tabBar:SetColumnFill(targetCol, 1.0)
             end
         elseif tabBar.AddChildToHorizontalBox then
-            addedSlot = tabBar:AddChildToHorizontalBox(tabOverlay)
+            addedSlot = tabBar:AddChildToHorizontalBox(tabRoot)
         elseif tabBar.AddChildToVerticalBox then
-            addedSlot = tabBar:AddChildToVerticalBox(tabOverlay)
+            addedSlot = tabBar:AddChildToVerticalBox(tabRoot)
         else
-            addedSlot = tabBar:AddChild(tabOverlay)
+            addedSlot = tabBar:AddChild(tabRoot)
         end
     end)
 
     if Core.IsValidObj(addedSlot) and Core.IsValidObj(refTabBtn) and Core.IsValidObj(refTabBtn.Slot) then
         pcall(function()
             addedSlot:SetPadding(refTabBtn.Slot.Padding)
-            addedSlot:SetHorizontalAlignment(0) -- Fill equal column width
+            addedSlot:SetHorizontalAlignment(0)
             addedSlot:SetVerticalAlignment(refTabBtn.Slot.VerticalAlignment)
         end)
     end
 
     local menuState = {
-        Menu          = menu,
-        Switcher      = switcher,
-        EqolIndex     = eqolIdx,
-        TabBtn        = tabBtn,
-        TabTxt        = tabTxt,
-        TabLine       = tabLine,
-        TabPage       = pageScroll,
-        PageVBox      = pageVBox,
-        SiblingTabs   = siblingTabs,
-        PagePopulated = false,
-        Rows          = {},
+        Menu             = menu,
+        Switcher         = switcher,
+        EqolIndex        = eqolIdx,
+        TabBtn           = tabBtn,
+        TabWidget        = tabWidget,
+        IsNativeCleanTab = isNativeCleanTab,
+        TabTxt           = tabTxt,
+        TabLine          = tabLine,
+        TabPage          = pageScroll,
+        PageVBox         = pageVBox,
+        SiblingTabs      = siblingTabs,
+        PagePopulated    = false,
+        Rows             = {},
     }
     InjectedMenus[menuAddr] = menuState
     HookSiblingTabButtons(menuState)

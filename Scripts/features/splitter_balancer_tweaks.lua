@@ -550,11 +550,17 @@ local function EnsureTargetHeight(actor)
                     local src = c.GetArchetype and c:GetArchetype() or nil
                     if not Core.IsValidObj(src) then src = c end
 
-                    local rl = src.RelativeLocation or c.RelativeLocation
+                    local rl = c.RelativeLocation or src.RelativeLocation
                     if rl then
                         rx = tonumber(rl.X) or 0.0
                         ry = tonumber(rl.Y) or 0.0
                         rz = tonumber(rl.Z) or 0.0
+                    end
+                    -- Use archetype Z only when live Z was already scaled, but NEVER overwrite live X/Y
+                    -- (BP_UndergroundBeltActor_C moves S_Underground_Belt_02 to (-600, 0, 0) at runtime!)
+                    local srcRl = src.RelativeLocation
+                    if srcRl and type(srcRl.Z) == "number" then
+                        rz = srcRl.Z
                     end
                     local rs = src.RelativeScale3D or c.RelativeScale3D
                     if rs then
@@ -602,9 +608,11 @@ local function EnsureTargetHeight(actor)
                     c:SetRelativeScale3D({ X = st.OrigScaleX, Y = st.OrigScaleY, Z = st.TargetScaleZ })
                 end
                 local curRl = c.RelativeLocation
+                local curLx = curRl and (tonumber(curRl.X) or st.OrigLocX) or st.OrigLocX
+                local curLy = curRl and (tonumber(curRl.Y) or st.OrigLocY) or st.OrigLocY
                 local curLz = curRl and (tonumber(curRl.Z) or 0.0) or 0.0
                 if math.abs(curLz - st.TargetLocZ) > 0.05 then
-                    c:K2_SetRelativeLocation({ X = st.OrigLocX, Y = st.OrigLocY, Z = st.TargetLocZ }, false, {}, false)
+                    c:K2_SetRelativeLocation({ X = curLx, Y = curLy, Z = st.TargetLocZ }, false, {}, false)
                 end
             end)
         end
@@ -818,7 +826,14 @@ local function RestoreOriginalHeights()
         if st and Core.IsValidObj(st.Comp) then
             pcall(function()
                 st.Comp:SetRelativeScale3D({ X = st.OrigScaleX, Y = st.OrigScaleY, Z = st.OrigScaleZ })
-                st.Comp:K2_SetRelativeLocation({ X = st.OrigLocX, Y = st.OrigLocY, Z = st.OrigLocZ }, false, {}, false)
+                -- Preserve live X/Y (never move S_Underground_Belt_02 to archetype (0,0)!)
+                local curRl = st.Comp.RelativeLocation
+                local curLx = curRl and (tonumber(curRl.X) or st.OrigLocX) or st.OrigLocX
+                local curLy = curRl and (tonumber(curRl.Y) or st.OrigLocY) or st.OrigLocY
+                local curLz = curRl and (tonumber(curRl.Z) or st.OrigLocZ) or st.OrigLocZ
+                if math.abs(curLz - st.OrigLocZ) > 0.05 then
+                    st.Comp:K2_SetRelativeLocation({ X = curLx, Y = curLy, Z = st.OrigLocZ }, false, {}, false)
+                end
             end)
         end
     end
