@@ -2482,9 +2482,21 @@ local APPLY_BG_ENABLED   = { R = 0.74, G = 0.48, B = 0.06, A = 0.96 }
 local APPLY_BG_DISABLED  = { R = 0.15, G = 0.17, B = 0.20, A = 0.75 }
 local APPLY_TXT_DISABLED = { R = 0.60, G = 0.64, B = 0.70, A = 0.85 }
 
-local COST_TXT_LACKING = { R = 0.90, G = 0.14, B = 0.24, A = 1.00 }
-local COST_TXT_REFUND  = { R = 0.35, G = 0.88, B = 0.48, A = 1.00 }
-local COST_TXT_OK      = { R = 0.88, G = 0.92, B = 0.96, A = 1.00 }
+local COST_TXT_LACKING = { R = 0.6105, G = 0.0000, B = 0.0612, A = 1.00 } -- #cd0046 in sRGB
+local COST_TXT_REFUND  = { R = 0.1400, G = 0.7200, B = 0.2400, A = 1.00 }
+local COST_TXT_OK      = { R = 0.8800, G = 0.9200, B = 0.9600, A = 1.00 }
+
+local function SetWBPTextColor(w, col)
+    if not Core.IsValidObj(w) or not col then return end
+    pcall(function()
+        if w.SetColorAndOpacity then
+            w:SetColorAndOpacity(col)
+        end
+        if Core.IsValidObj(w.TextBlock) and w.TextBlock.SetColorAndOpacity then
+            w.TextBlock:SetColorAndOpacity({ SpecifiedColor = col, ColorUseRule = 0 })
+        end
+    end)
+end
 
 local function RefreshModificationCostPanel(summary)
     if not MapUI or not Core.IsValidObj(MapUI.CostPanel) or not Core.IsValidObj(MapUI.CostListVBox) then return end
@@ -2542,10 +2554,8 @@ local function RefreshModificationCostPanel(summary)
                     amtTxt:SetVisibility(3)
                     amtTxt:SetSize(11)
                     amtTxt:SetText(Core.MakeText(amtStr))
-                    if Core.IsValidObj(amtTxt.TextBlock) and amtTxt.TextBlock.SetColorAndOpacity then
-                        amtTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = amtCol, ColorUseRule = 0 })
-                    end
                 end)
+                SetWBPTextColor(amtTxt, amtCol)
                 local aSlot = row:AddChildToHorizontalBox(amtTxt)
                 if Core.IsValidObj(aSlot) then
                     pcall(function()
@@ -2555,17 +2565,15 @@ local function RefreshModificationCostPanel(summary)
                 end
             end
 
-            -- Item display name
+            -- Item display name (red #cd0046 when lacking so missing materials stand out clearly)
             local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
             if Core.IsValidObj(nameTxt) then
                 pcall(function()
                     nameTxt:SetVisibility(3)
                     nameTxt:SetSize(11)
                     nameTxt:SetText(Core.MakeText(entry.name))
-                    if Core.IsValidObj(nameTxt.TextBlock) and nameTxt.TextBlock.SetColorAndOpacity then
-                        nameTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
-                    end
                 end)
+                SetWBPTextColor(nameTxt, entry.lacking and COST_TXT_LACKING or COLORS.PlayerLocal)
                 local nSlot = row:AddChildToHorizontalBox(nameTxt)
                 if Core.IsValidObj(nSlot) then
                     pcall(function()
@@ -5649,7 +5657,7 @@ local function OpenStationMap()
             if Core.IsValidObj(costHeader) then
                 costHeader:SetVisibility(3)
                 costHeader:SetSize(13)
-                costHeader:SetText(Core.MakeText("▼  Modification Cost"))
+                costHeader:SetText(Core.MakeText("Modification Cost"))
                 if Core.IsValidObj(costHeader.TextBlock) and costHeader.TextBlock.SetColorAndOpacity then
                     costHeader.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.PlayerLocal, ColorUseRule = 0 })
                 end
@@ -5783,8 +5791,8 @@ local function OpenStationMap()
                 if bg then
                     bg.DrawAs = 4 -- ESlateBrushDrawType::RoundedBox
                     if bg.OutlineSettings then
-                        bg.OutlineSettings.CornerRadii = { X = 2.0, Y = 2.0, Z = 2.0, W = 2.0 }
-                        bg.OutlineSettings.RoundingType = 1 -- ESlateBrushRoundingType::FixedRadius
+                        bg.OutlineSettings.CornerRadii = { X = 3.0, Y = 3.0, Z = 3.0, W = 3.0 }
+                        bg.OutlineSettings.RoundingType = 0 -- ESlateBrushRoundingType::FixedRadius (0=FixedRadius, 1=HalfHeightRadius)
                         bg.OutlineSettings.Width = 0.0
                         bg.OutlineSettings.bUseBrushTransparency = true
                     end
@@ -6030,9 +6038,7 @@ local function OpenStationMap()
                     valX:SetVisibility(3)
                     valX:SetSize(15)
                     valX:SetText(Core.MakeText("X"))
-                    if Core.IsValidObj(valX.TextBlock) and valX.TextBlock.SetColorAndOpacity then
-                        valX.TextBlock:SetColorAndOpacity({ SpecifiedColor = COST_TXT_LACKING, ColorUseRule = 0 })
-                    end
+                    SetWBPTextColor(valX, COST_TXT_LACKING)
                     local vxSlot = valHdrRow:AddChildToHorizontalBox(valX)
                     if Core.IsValidObj(vxSlot) then vxSlot:SetVerticalAlignment(2) end
                 end
@@ -6045,9 +6051,7 @@ local function OpenStationMap()
                 valMsg:SetVisibility(3)
                 valMsg:SetSize(11)
                 valMsg:SetText(Core.MakeText("Missing Building Materials"))
-                if Core.IsValidObj(valMsg.TextBlock) and valMsg.TextBlock.SetColorAndOpacity then
-                    valMsg.TextBlock:SetColorAndOpacity({ SpecifiedColor = COST_TXT_LACKING, ColorUseRule = 0 })
-                end
+                SetWBPTextColor(valMsg, COST_TXT_LACKING)
                 local vmSlot = validationBox:AddChildToVerticalBox(valMsg)
                 if Core.IsValidObj(vmSlot) then
                     vmSlot:SetHorizontalAlignment(3) -- Right-aligned matching Designer Validation
