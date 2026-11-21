@@ -6,7 +6,9 @@
 local Core = require("core")
 
 local Feature = {
-    Name = "HudVersionBar",
+    Name        = "HudVersionBar",
+    DisplayName = "HUD FPS & Version Bar",
+    Description = "Displays live FPS and Eqol version alongside the game version in the bottom-right HUD.",
 }
 
 local TargetTextBlock = nil
@@ -114,6 +116,10 @@ local function StartLoop()
     LastFpsTime = os.clock()
 
     local function Tick()
+        if not Core.IsFeatureEnabled("HudVersionBar") then
+            PollRunning = false
+            return
+        end
         FrameCount = FrameCount + 1
         local now = os.clock()
         local dt = now - LastFpsTime
@@ -153,20 +159,32 @@ Feature.WatchWidgets = {
     end,
 }
 
+function Feature.OnToggle(enabled)
+    if enabled then
+        StartLoop()
+    else
+        if Core.IsValidObj(TargetTextBlock) and OriginalMSVersion then
+            pcall(function() TargetTextBlock:SetText(Core.MakeText(OriginalMSVersion)) end)
+        end
+    end
+end
+
 function Feature.Init()
-    StartLoop()
+    if Core.IsFeatureEnabled("HudVersionBar") then
+        StartLoop()
+    end
 end
 
 function Feature.OnMapLoad()
     TargetTextBlock = nil
     LastScanTime = -999.0
-    StartLoop()
+    if Core.IsFeatureEnabled("HudVersionBar") then StartLoop() end
 end
 
 function Feature.OnClientRestart()
     TargetTextBlock = nil
     LastScanTime = -999.0
-    StartLoop()
+    if Core.IsFeatureEnabled("HudVersionBar") then StartLoop() end
 end
 
 return Feature

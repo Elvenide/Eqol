@@ -5,7 +5,9 @@
 local Core = require("core")
 
 local Feature = {
-    Name = "ShipCamera",
+    Name        = "ShipCamera",
+    DisplayName = "Ship 3rd-Person Camera & Zoom",
+    Description = "Hotkey (default V) for 3rd-person ship perspective with scroll-wheel zoom.",
 }
 
 local MIN_ARM_DIST = 600.0
@@ -229,6 +231,7 @@ local function StartScrollPoll()
 end
 
 local function ToggleShipPerspective()
+    if not Core.IsFeatureEnabled("ShipCamera") then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
     local shipActor = GetPilotedShipActor(pc)
@@ -259,6 +262,12 @@ function Feature.Init()
         Label       = "Ship Camera Perspective",
         OnPress     = ToggleShipPerspective,
     })
+end
+
+function Feature.OnToggle(enabled)
+    if not enabled then
+        ResetCameraState()
+    end
 end
 
 function Feature.OnClientRestart()

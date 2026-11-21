@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.20"
+Core.VERSION = "0.1.21"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -417,9 +417,50 @@ function Core.TryRegisterHook(hookKey, ufuncPath, callbackFn)
     return false
 end
 
+local FeatureToggles = {}
+local FeatureToggleByName = {}
+
+function Core.IsFeatureEnabled(name)
+    if not name then return true end
+    return Core.Config["Enable_" .. name] ~= false
+end
+
+function Core.SetFeatureEnabled(name, enabled)
+    if not name then return end
+    local val = (enabled == true)
+    local cfgKey = "Enable_" .. name
+    if Core.Config[cfgKey] == val then return end
+    Core.Config[cfgKey] = val
+    Core.WriteConfig()
+    local entry = FeatureToggleByName[name]
+    if entry and entry.Feature and type(entry.Feature.OnToggle) == "function" then
+        local ok, err = pcall(entry.Feature.OnToggle, val)
+        if not ok then
+            Core.Log(string.format("[EqolSettings] OnToggle(%s, %s) err: %s", tostring(name), tostring(val), tostring(err)))
+        end
+    end
+end
+
+function Core.GetToggleableFeatures()
+    return FeatureToggles
+end
+
 function Core.RegisterFeature(feature)
     if type(feature) ~= "table" then return end
     table.insert(Features, feature)
+    if feature.Name and feature.Toggleable ~= false then
+        local cfgKey = "Enable_" .. feature.Name
+        Core.ReadConfig({ [cfgKey] = true })
+        local entry = {
+            Name        = feature.Name,
+            DisplayName = feature.DisplayName or feature.Name,
+            Description = feature.Description or "",
+            ConfigKey   = cfgKey,
+            Feature     = feature,
+        }
+        table.insert(FeatureToggles, entry)
+        FeatureToggleByName[feature.Name] = entry
+    end
     if type(feature.WatchWidgets) == "table" then
         for clsName, handler in pairs(feature.WatchWidgets) do
             WatchedWidgetClasses[clsName] = WatchedWidgetClasses[clsName] or {}

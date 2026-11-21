@@ -7,7 +7,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "PowerOverview",
+    Name        = "PowerOverview",
+    DisplayName = "Station Power Overview",
+    Description = "Hotkey (default P) for station Power Overview plus summary production/consumption bars.",
 }
 
 local DEFAULT_KEY = "P"
@@ -67,6 +69,7 @@ local function ResolvePlayerFrameAndGrid(playerObj)
 end
 
 local function TogglePowerOverview()
+    if not Core.IsFeatureEnabled("PowerOverview") then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then
         Core.Log("TogglePowerOverview: no PlayerController")

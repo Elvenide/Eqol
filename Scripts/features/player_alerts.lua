@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "PlayerAlerts",
+    Name        = "PlayerAlerts",
+    DisplayName = "Player Join / Leave Alerts",
+    Description = "Displays native HUD alerts when players join or leave the session.",
 }
 
 local PATHS = {
@@ -95,6 +97,7 @@ local function PushBuiltInAlert(messageStr)
 end
 
 local function PollPlayerPresence(forceRefresh)
+    if not Core.IsFeatureEnabled("PlayerAlerts") then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) or not Core.IsValidObj(pc.PlayerObject) then return end
 

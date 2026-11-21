@@ -4,7 +4,9 @@
 local Core = require("core")
 
 local Feature = {
-    Name = "CinematicFreecam",
+    Name        = "CinematicFreecam",
+    DisplayName = "Cinematic Freecam",
+    Description = "Hotkey (default C) to toggle Spectator Mode and hide HUD simultaneously.",
 }
 
 local FreecamActive = false
@@ -22,6 +24,7 @@ local function GetSpectatorModeState(pc)
 end
 
 local function ToggleCinematicFreecam()
+    if not Core.IsFeatureEnabled("CinematicFreecam") then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
@@ -80,6 +83,12 @@ end
 
 function Feature.OnClientRestart()
     ResetFreecamState()
+end
+
+function Feature.OnToggle(enabled)
+    if not enabled then
+        ResetFreecamState()
+    end
 end
 
 function Feature.OnMapLoad()

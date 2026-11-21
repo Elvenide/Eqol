@@ -4,10 +4,13 @@
 local Core = require("core")
 
 local Feature = {
-    Name = "ShipZeroThrottle",
+    Name        = "ShipZeroThrottle",
+    DisplayName = "Ship Instant Zero Throttle",
+    Description = "Hotkey (default 0) to immediately set ship throttle to zero.",
 }
 
 local function ZeroShipThrottle()
+    if not Core.IsFeatureEnabled("ShipZeroThrottle") then return end
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 

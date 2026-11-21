@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "ResearchEnhancements",
+    Name        = "ResearchEnhancements",
+    DisplayName = "Research Search & Queue Drag-Reorder",
+    Description = "Adds a live search bar to the Research screen and drag-and-drop queue reordering.",
 }
 
 local PATHS = {
@@ -1204,11 +1206,25 @@ function Feature.RegisterHooks()
                 end
             end)
 
-            if startIdx and count > 1 then
+            if startIdx and count > 1 and Core.IsFeatureEnabled("ResearchEnhancements") then
                 StartQueueDrag(tree, queueBox, widget, startIdx, count)
             end
         end
     )
+end
+
+function Feature.OnToggle(enabled)
+    for _, st in pairs(InjectedTrees) do
+        if st and Core.IsValidObj(st.SearchInput) then
+            pcall(function() st.SearchInput:SetVisibility(enabled and 0 or 1) end)
+        end
+    end
+    if not enabled then
+        ActiveDrag = nil
+        DestroyDragGhost()
+    else
+        ScanExistingTrees()
+    end
 end
 
 function Feature.OnClientRestart()

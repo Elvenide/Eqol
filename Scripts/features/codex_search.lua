@@ -4,7 +4,9 @@
 local Core = require("core")
 
 local Feature = {
-    Name = "CodexSearch",
+    Name        = "CodexSearch",
+    DisplayName = "Help / Codex Search Bar",
+    Description = "Adds a live search box to filter entries in the Help / Codex menu (K).",
 }
 
 local PATHS = {
@@ -239,6 +241,19 @@ Feature.WatchWidgets = {
     end,
 }
 
+function Feature.OnToggle(enabled)
+    for _, st in pairs(InjectedCodex) do
+        if st and Core.IsValidObj(st.SearchInput) then
+            pcall(function() st.SearchInput:SetVisibility(enabled and 0 or 1) end)
+            if not enabled then
+                ApplyCodexFilter(st, "")
+            else
+                ApplyCodexFilter(st)
+            end
+        end
+    end
+end
+
 function Feature.RegisterHooks()
     local codexHookFns = {
         "SetSelectedTab",
@@ -254,10 +269,11 @@ function Feature.RegisterHooks()
             "CodexSearch_" .. fnName,
             PATHS.CodexContentClass .. ":" .. fnName,
             function(Context)
+                if not Core.IsFeatureEnabled("CodexSearch") then return end
                 local codexContent = Context:get()
                 if Core.IsValidObj(codexContent) then
                     ExecuteInGameThreadWithDelay(30, function()
-                        if Core.IsValidObj(codexContent) then
+                        if Core.IsValidObj(codexContent) and Core.IsFeatureEnabled("CodexSearch") then
                             SyncTabAndFilter(codexContent)
                         end
                     end)

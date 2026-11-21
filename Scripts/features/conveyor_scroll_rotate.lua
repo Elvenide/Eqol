@@ -5,7 +5,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "ConveyorScrollRotate",
+    Name        = "ConveyorScrollRotate",
+    DisplayName = "Scroll-to-Rotate Station Machines",
+    Description = "Rotate station machines and conveyor belts using the mouse scroll wheel.",
 }
 
 local PollActive = false
@@ -69,6 +71,11 @@ local function StartScrollRotatePoll()
     local kRMB = { KeyName = FName("RightMouseButton") }
 
     local function Tick()
+        if not Core.IsFeatureEnabled("ConveyorScrollRotate") then
+            PollActive = false
+            ConveyorPullingActive = false
+            return
+        end
         local pc = Core.GetLocalPlayerController()
         local activeBuilding = false
         if Core.IsValidObj(pc) and not pc.bShowMouseCursor then
@@ -207,8 +214,18 @@ function Feature.RegisterHooks()
     )
 end
 
+function Feature.OnToggle(enabled)
+    if enabled then
+        StartScrollRotatePoll()
+    else
+        ConveyorPullingActive = false
+    end
+end
+
 function Feature.Init()
-    StartScrollRotatePoll()
+    if Core.IsFeatureEnabled("ConveyorScrollRotate") then
+        StartScrollRotatePoll()
+    end
 end
 
 function Feature.OnMapLoad()

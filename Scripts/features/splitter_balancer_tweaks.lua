@@ -7,7 +7,9 @@
 local Core = require("core")
 
 local Feature = {
-    Name = "SplitterBalancerTweaks",
+    Name        = "SplitterBalancerTweaks",
+    DisplayName = "Splitter & Balancer Walk-Through + Compact Height",
+    Description = "Lets you walk over splitters/balancers and scales them & underground belts to 2/3 height.",
 }
 
 local HEIGHT_SCALE     = 2.0 / 3.0
@@ -627,6 +629,7 @@ local StaggeredScanActive = false
 local StaggeredScanPending = false
 
 local function RunStaggeredScan()
+    if not Core.IsFeatureEnabled("SplitterBalancerTweaks") then return end
     if StaggeredScanActive then
         StaggeredScanPending = true
         return
@@ -752,6 +755,7 @@ local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
     NewObjHookRegistered = true
     local function HandleNewMachineObj(obj)
+        if not Core.IsFeatureEnabled("SplitterBalancerTweaks") then return end
         if not Core.IsValidObj(obj) then return end
         local clsName = SafeClassName(obj)
         local low = clsName:lower()
@@ -783,6 +787,22 @@ local function RegisterMachineObjectHook()
     end
     -- MachineObject is the true base class for newly built splitters, balancers, and underground belts
     pcall(NotifyOnNewObject, "/Script/MainSequence.MachineObject", HandleNewMachineObj)
+end
+
+function Feature.OnToggle(enabled)
+    if enabled then
+        ScheduleStaggeredScan(50)
+    else
+        -- Restore original mesh Z scale & Z location for any scaled splitters/balancers/undergrounds
+        for _, st in pairs(OrigMeshState) do
+            if st and Core.IsValidObj(st.Comp) then
+                pcall(function()
+                    st.Comp:SetRelativeScale3D({ X = st.OrigScaleX, Y = st.OrigScaleY, Z = st.OrigScaleZ })
+                    st.Comp:K2_SetRelativeLocation({ X = st.OrigLocX, Y = st.OrigLocY, Z = st.OrigLocZ }, false, {}, false)
+                end)
+            end
+        end
+    end
 end
 
 function Feature.Init()

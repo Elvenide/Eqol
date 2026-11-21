@@ -13,7 +13,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "StationMap",
+    Name        = "StationMap",
+    DisplayName = "Interactive Station Map",
+    Description = "Hotkey (default N) for the 2D gridded station map with copy/paste, delete, and building.",
 }
 
 local PATHS = {
@@ -5448,6 +5450,10 @@ local function OpenStationMap()
 end
 
 local function ToggleStationMap()
+    if not Core.IsFeatureEnabled("StationMap") then
+        if IsMapOpen() then CloseStationMap() end
+        return
+    end
     if IsMapOpen() then
         CloseStationMap()
     else

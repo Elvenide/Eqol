@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "ElevatorHotkeys",
+    Name        = "ElevatorHotkeys",
+    DisplayName = "Elevator Floor Hotkeys",
+    Description = "Press number keys 1-9 / 0 inside an elevator to jump directly to that floor.",
 }
 
 local PATHS = {
@@ -464,6 +466,7 @@ function Feature.Init()
         for _, keyCode in ipairs(entry.keys) do
             if keyCode ~= nil then
                 pcall(RegisterKeyBind, keyCode, function()
+                    if not Core.IsFeatureEnabled("ElevatorHotkeys") then return end
                     ExecuteInGameThread(function()
                         GoToElevatorFloor(floorNum)
                     end)

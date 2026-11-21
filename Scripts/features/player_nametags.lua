@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "PlayerNametags",
+    Name        = "PlayerNametags",
+    DisplayName = "3D Player Nametags",
+    Description = "Displays floating world-space nametags with online/offline status above players.",
 }
 
 local PATHS = {
@@ -189,6 +191,10 @@ local function StartPoll()
     PollActive = true
 
     local function Tick()
+        if not Core.IsFeatureEnabled("PlayerNametags") then
+            PollActive = false
+            return
+        end
         local ok, visCount, totalPlayers = pcall(UpdateNametags)
         local delayMs = 1500
         if ok then
@@ -205,8 +211,18 @@ local function StartPoll()
     ExecuteInGameThreadWithDelay(500, Tick)
 end
 
+function Feature.OnToggle(enabled)
+    if enabled then
+        StartPoll()
+    else
+        DestroyTagPool()
+    end
+end
+
 function Feature.Init()
-    StartPoll()
+    if Core.IsFeatureEnabled("PlayerNametags") then
+        StartPoll()
+    end
 end
 
 function Feature.OnClientRestart()

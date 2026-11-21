@@ -36,6 +36,7 @@ Core.RegisterFeature(require("features.research_enhancements"))
 Core.RegisterFeature(require("features.splitter_balancer_tweaks"))
 Core.RegisterFeature(require("features.hud_version_bar"))
 Core.RegisterFeature(require("features.hotbar_build_counts"))
+Core.RegisterFeature(require("features.eqol_settings"))
 
 -- Startup
 Core.InitAll()

@@ -7,7 +7,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "ElevatorLabels",
+    Name        = "ElevatorLabels",
+    DisplayName = "3D Elevator Port Item Icons",
+    Description = "Displays 3D item icons above elevator conveyor ports across every floor in a shaft.",
 }
 
 local PATHS = {
@@ -848,6 +850,10 @@ local function StartPoll()
             LogOnce("err:tick:" .. tostring(hasPorts), "Step[Tick] Unhandled error: %s", tostring(hasPorts))
         end
         local delayMs = (okTick and hasPorts) and 200 or 500
+        if not Core.IsFeatureEnabled("ElevatorLabels") then
+            PollActive = false
+            return
+        end
         ExecuteInGameThreadWithDelay(delayMs, Tick)
     end
     ExecuteInGameThreadWithDelay(250, Tick)
@@ -865,9 +871,19 @@ local function ResetWorldCaches()
     LastPortRefresh = -10.0
 end
 
+function Feature.OnToggle(enabled)
+    if enabled then
+        StartPoll()
+    else
+        DestroyIconPool()
+    end
+end
+
 function Feature.Init()
     LastWorldAddr = GetCurrentWorldAddr()
-    StartPoll()
+    if Core.IsFeatureEnabled("ElevatorLabels") then
+        StartPoll()
+    end
     Core.Log("[ElevatorLabels] Initialized (3D WidgetComponent ItemColumns port icons).")
 end
 

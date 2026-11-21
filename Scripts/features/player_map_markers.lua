@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "PlayerMapMarkers",
+    Name        = "PlayerMapMarkers",
+    DisplayName = "World Map Player Markers",
+    Description = "Shows player positions and nametags on the Solar System / Sector map.",
 }
 
 local PATHS = {
@@ -187,9 +189,25 @@ end
 
 Feature.WatchWidgets = {
     WBP_SolarSystemMap_C = function(m)
-        RefreshWorldMapPlayers(m)
+        if Core.IsFeatureEnabled("PlayerMapMarkers") then
+            RefreshWorldMapPlayers(m)
+        end
     end,
 }
+
+function Feature.OnToggle(enabled)
+    if not enabled then
+        for _, st in pairs(MapOverlays) do
+            HideAllMarkers(st)
+        end
+    else
+        for _, st in pairs(MapOverlays) do
+            if st and Core.IsValidObj(st.SolarMap) then
+                pcall(RefreshWorldMapPlayers, st.SolarMap)
+            end
+        end
+    end
+end
 
 function Feature.RegisterHooks()
     local hooks = {
@@ -204,6 +222,7 @@ function Feature.RegisterHooks()
             "SolarSystemMap_" .. h.fn,
             "/Game/Blueprints/Widgets/HUDs/Map/WBP_SolarSystemMap.WBP_SolarSystemMap_C:" .. h.fn,
             function(Context)
+                if not Core.IsFeatureEnabled("PlayerMapMarkers") then return end
                 local m = Context:get()
                 if Core.IsValidObj(m) then
                     pcall(RefreshWorldMapPlayers, m, modeOverride)

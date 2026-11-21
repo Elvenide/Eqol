@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "HotbarBuildCounts",
+    Name        = "HotbarBuildCounts",
+    DisplayName = "Hotbar Buildable Counts",
+    Description = "Shows how many of each buildable on your bottom hotbar you can craft from inventory.",
 }
 
 local PATHS = {
@@ -659,10 +661,29 @@ local function RefreshHotbarCounts()
     return anyValid
 end
 
+local function HideAllHotbarBadges()
+    for _, entry in pairs(TrackedHuds) do
+        if entry and entry.Slots then
+            for _, s in ipairs(entry.Slots) do
+                if Core.IsValidObj(s.Badge) then
+                    s.LastVis = 1
+                    s.LastText = nil
+                    pcall(function() s.Badge:SetVisibility(1) end)
+                end
+            end
+        end
+    end
+end
+
 local function StartPoll()
-    if PollActive then return end
+    if PollActive or not Core.IsFeatureEnabled("HotbarBuildCounts") then return end
     PollActive = true
     local function Tick()
+        if not Core.IsFeatureEnabled("HotbarBuildCounts") then
+            HideAllHotbarBadges()
+            PollActive = false
+            return
+        end
         local ok, anyValid = pcall(RefreshHotbarCounts)
         if not ok then
             Core.Log("[HotbarCounts] RefreshHotbarCounts error (retrying): " .. tostring(anyValid))
@@ -757,6 +778,15 @@ function Feature.PruneCaches()
         if not entry or not Core.IsValidObj(entry.Buildable) then
             CostStacksByBuildable[bAddr] = nil
         end
+    end
+end
+
+function Feature.OnToggle(enabled)
+    if enabled then
+        TryAttachExistingHuds()
+        StartPoll()
+    else
+        HideAllHotbarBadges()
     end
 end
 

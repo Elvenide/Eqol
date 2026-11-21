@@ -9,7 +9,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "Logistics",
+    Name        = "Logistics",
+    DisplayName = "Station Logistics Overview",
+    Description = "Hotkey (default L) for station storage totals, machine production rates, and bottlenecks.",
 }
 
 local DEFAULT_KEY = "L"
@@ -1175,6 +1177,10 @@ local function OpenLogisticsWindow()
 end
 
 local function ToggleLogistics()
+    if not Core.IsFeatureEnabled("Logistics") then
+        if Core.IsValidObj(ActiveLogisticsWin) then CloseLogisticsWindow() end
+        return
+    end
     if Core.IsSelectingAnyRegisteredKeybind()
         or Core.IsAnyTextInputFocused()
     then
@@ -1367,9 +1373,9 @@ local function EnsureHudKeybindIndicator(hud)
 
     local inputIconCls = "/Game/Blueprints/Widgets/HUDs/WBP_InputIcon.WBP_InputIcon_C"
     local defs = {
-        { Kind = "Power",      ConfigKey = "PowerOverviewKey", DefaultKey = "P" },
-        { Kind = "StationMap", ConfigKey = "StationMapKey",    DefaultKey = "N" },
-        { Kind = "Logistics",  ConfigKey = "LogisticsKey",     DefaultKey = DEFAULT_KEY },
+        { Kind = "Power",      FeatureName = "PowerOverview", ConfigKey = "PowerOverviewKey", DefaultKey = "P" },
+        { Kind = "StationMap", FeatureName = "StationMap",    ConfigKey = "StationMapKey",    DefaultKey = "N" },
+        { Kind = "Logistics",  FeatureName = "Logistics",     ConfigKey = "LogisticsKey",     DefaultKey = DEFAULT_KEY },
     }
 
     local createdItems = {}
@@ -1378,6 +1384,7 @@ local function EnsureHudKeybindIndicator(hud)
         if Core.IsValidObj(iconW) then
             local itemEntry = {
                 Kind = def.Kind,
+                FeatureName = def.FeatureName,
                 ConfigKey = def.ConfigKey,
                 DefaultKey = def.DefaultKey,
                 Icon = iconW,
@@ -1459,7 +1466,11 @@ local function StartHudIndicatorPoll()
                 pcall(function() entry.Root:SetVisibility(targetVis) end)
                 if showIndicator and entry.Items then
                     for _, item in ipairs(entry.Items) do
-                        if Core.IsValidObj(item.KeyText) then
+                        local featOn = (not item.FeatureName) or Core.IsFeatureEnabled(item.FeatureName)
+                        if Core.IsValidObj(item.Icon) then
+                            pcall(function() item.Icon:SetVisibility(featOn and 0 or 1) end)
+                        end
+                        if featOn and Core.IsValidObj(item.KeyText) then
                             local keyStr = GetFormattedKeybind(item.ConfigKey, item.DefaultKey)
                             if item.LastKeyStr ~= keyStr then
                                 item.LastKeyStr = keyStr

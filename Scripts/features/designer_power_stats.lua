@@ -6,7 +6,9 @@ local Core = require("core")
 local StationData = require("station_data")
 
 local Feature = {
-    Name = "DesignerPowerStats",
+    Name        = "DesignerPowerStats",
+    DisplayName = "Ship Designer Power Stats",
+    Description = "Displays live power generation, consumption, and balance stats inside the Ship Designer.",
 }
 
 local PATHS = {
@@ -1142,6 +1144,17 @@ function Feature.RegisterHooks()
             ScheduleAllDesignersRefresh("RemoveBlock")
         end
     )
+end
+
+function Feature.OnToggle(enabled)
+    for _, st in pairs(InjectedDesigners) do
+        if st and Core.IsValidObj(st.Root) then
+            pcall(function() st.Root:SetVisibility(enabled and 0 or 1) end)
+        end
+    end
+    if enabled and next(InjectedDesigners) ~= nil then
+        ScanAndRefreshAllDesigners("OnToggle", false)
+    end
 end
 
 function Feature.OnClientRestart()
