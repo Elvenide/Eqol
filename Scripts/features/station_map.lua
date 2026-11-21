@@ -2333,7 +2333,7 @@ UpdateStatusBanner = function(textOverride)
     if Core.IsValidObj(MapUI.ModePillWrap) and Core.IsValidObj(MapUI.ModePillText) then
         local modeMsg = textOverride
         if not modeMsg and InteractionMode == "Paste" then
-            modeMsg = string.format("PASTE (%d)  Rot %d°  |  LMB: Stamp  RMB: Cancel", #Clipboard, PendingRotationDeg)
+            modeMsg = string.format("Pasting %d  (%d°)", #Clipboard, PendingRotationDeg)
         end
         pcall(function()
             if modeMsg and modeMsg ~= "" then
@@ -2348,8 +2348,11 @@ UpdateStatusBanner = function(textOverride)
         pcall(function() MapUI.StatusText:SetText(Core.MakeText(textOverride)) end)
     end
     local hasSelection = (selCount > 0)
-    local canRotate = (InteractionMode == "Paste" and #Clipboard > 0)
+    local isPasting = (InteractionMode == "Paste" and #Clipboard > 0)
         or (InteractionMode == "Place" and Core.IsValidObj(PendingBuildable))
+    if Core.IsValidObj(MapUI.HintSelectLabel) then
+        pcall(function() MapUI.HintSelectLabel:SetText(Core.MakeText(isPasting and "Paste" or "Box Select")) end)
+    end
     if Core.IsValidObj(MapUI.HintCopyRow) then
         pcall(function() MapUI.HintCopyRow:SetVisibility(hasSelection and 3 or 1) end)
     end
@@ -2357,7 +2360,10 @@ UpdateStatusBanner = function(textOverride)
         pcall(function() MapUI.HintDeleteRow:SetVisibility(hasSelection and 3 or 1) end)
     end
     if Core.IsValidObj(MapUI.HintRotateRow) then
-        pcall(function() MapUI.HintRotateRow:SetVisibility(canRotate and 3 or 1) end)
+        pcall(function() MapUI.HintRotateRow:SetVisibility(isPasting and 3 or 1) end)
+    end
+    if Core.IsValidObj(MapUI.HintCancelRow) then
+        pcall(function() MapUI.HintCancelRow:SetVisibility(isPasting and 3 or 1) end)
     end
 end
 
@@ -4966,38 +4972,34 @@ CloseStationMap = function()
     end
 end
 
-local CachedLMBIconTex = nil
-local LMBIconSearched = false
+local CachedMouseIconTex = {}
+local MouseIconSearched = {}
 
-local function FindLMBIconTexture()
-    if Core.IsValidObj(CachedLMBIconTex) then return CachedLMBIconTex end
-    if LMBIconSearched then return nil end
-    LMBIconSearched = true
+local function FindMouseIconTexture(side)
+    if Core.IsValidObj(CachedMouseIconTex[side]) then return CachedMouseIconTex[side] end
+    if MouseIconSearched[side] then return nil end
+    MouseIconSearched[side] = true
 
-    local candidatePaths = {
+    local isLeft = (side == "LMB")
+    local candidatePaths = isLeft and {
+        "/Game/Materials/Icons/UI/T_UI_LMB.T_UI_LMB",
         "/Game/Materials/UI_Textures/T_LMB.T_LMB",
-        "/Game/Materials/UI_Textures/T_MouseLeft.T_MouseLeft",
-        "/Game/Materials/UI_Textures/T_Mouse_Left.T_Mouse_Left",
-        "/Game/Materials/UI_Textures/T_LeftMouse.T_LeftMouse",
-        "/Game/Materials/UI_Textures/T_LeftMouseButton.T_LeftMouseButton",
         "/Game/Materials/Icons/T_LMB.T_LMB",
-        "/Game/Materials/Icons/T_MouseLeft.T_MouseLeft",
-        "/Game/Materials/Icons/T_Mouse_Left.T_Mouse_Left",
-        "/Game/Textures/Icons/T_LMB.T_LMB",
-        "/Game/Textures/Icons/T_MouseLeft.T_MouseLeft",
-        "/Game/Textures/Icons/T_Mouse_Left.T_Mouse_Left",
-        "/Game/Textures/UI/T_MouseLeft.T_MouseLeft",
-        "/Game/Textures/UI/T_LMB.T_LMB",
+    } or {
+        "/Game/Materials/Icons/UI/T_UI_RMB.T_UI_RMB",
+        "/Game/Materials/UI_Textures/T_RMB.T_RMB",
+        "/Game/Materials/Icons/T_RMB.T_RMB",
     }
     for _, p in ipairs(candidatePaths) do
         local tex = Core.FindOrLoadClass(p)
         if Core.IsValidObj(tex) then
-            CachedLMBIconTex = tex
+            CachedMouseIconTex[side] = tex
             return tex
         end
     end
 
-    local mouseMatches = {}
+    local token = isLeft and "lmb" or "rmb"
+    local dirWord = isLeft and "left" or "right"
     local okAll, texList = pcall(FindAllOf, "Texture2D")
     if okAll and texList then
         for _, tex in ipairs(texList) do
@@ -5005,22 +5007,16 @@ local function FindLMBIconTexture()
                 local okN, fullName = pcall(function() return tex:GetFullName() end)
                 if okN and type(fullName) == "string" then
                     local low = fullName:lower()
-                    if low:find("lmb", 1, true)
-                        or (low:find("mouse", 1, true) and (low:find("left", 1, true) or low:find("_l.", 1, true) or low:find("_l_", 1, true)))
+                    if low:find(token, 1, true)
+                        or (low:find("mouse", 1, true) and low:find(dirWord, 1, true))
                     then
-                        CachedLMBIconTex = tex
-                        Core.Log("[StationMap] Found LMB icon texture: " .. fullName)
+                        CachedMouseIconTex[side] = tex
+                        Core.Log(string.format("[StationMap] Found %s icon texture: %s", side, fullName))
                         return tex
-                    elseif low:find("mouse", 1, true) and #mouseMatches < 10 then
-                        mouseMatches[#mouseMatches + 1] = fullName
                     end
                 end
             end
         end
-    end
-
-    if #mouseMatches > 0 then
-        Core.Log("[StationMap] Mouse Texture2D candidates: " .. table.concat(mouseMatches, " | "))
     end
     return nil
 end
@@ -5427,10 +5423,11 @@ local function OpenStationMap()
 
     -- 3. Bottom-Left Keybind Hints Overlay (matching World Map bottom-left style)
     local keybindsVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
-    local hintCopyRow, hintDeleteRow, hintRotateRow = nil, nil, nil
+    local hintSelectLabel, hintCopyRow, hintDeleteRow, hintRotateRow, hintCancelRow = nil, nil, nil, nil, nil
     if Core.IsValidObj(keybindsVBox) then
         pcall(function() keybindsVBox:SetVisibility(4) end) -- SelfHitTestInvisible
-        local lmbTex = FindLMBIconTexture()
+        local lmbTex = FindMouseIconTexture("LMB")
+        local rmbTex = FindMouseIconTexture("RMB")
         local keybindDefs = {
             { id = "select", key = "LMB",    iconTex = lmbTex, label = "Box Select",      conditional = false },
             { id = "pan",    key = "WASD",   iconTex = nil,    label = "Pan Map",         conditional = false },
@@ -5438,9 +5435,30 @@ local function OpenStationMap()
             { id = "copy",   key = "CTRL+C", iconTex = nil,    label = "Copy Selected",   conditional = true  },
             { id = "delete", key = "X",      iconTex = nil,    label = "Delete Selected", conditional = true  },
             { id = "rotate", key = "R",      iconTex = nil,    label = "Rotate",          conditional = true  },
+            { id = "cancel", key = "RMB",    iconTex = rmbTex, label = "Cancel",          conditional = true  },
         }
         local hintLabelCol = { R = 0.86, G = 0.88, B = 0.92, A = 0.96 }
-        local capFillCol   = { R = 0.0194, G = 0.0194, B = 0.0194, A = 0.96 } -- ~#262626 in sRGB
+        local capFillCol   = { R = 0.0194, G = 0.0194, B = 0.0194, A = 0.78 } -- ~#262626 in sRGB, slightly translucent
+
+        local function applyRoundedBadgeStyle(bdr, padTbl)
+            pcall(function()
+                bdr:SetBrushColor(capFillCol)
+                bdr:SetPadding(padTbl)
+                bdr:SetVisibility(3)
+                local bg = bdr.Background
+                if bg then
+                    bg.DrawAs = 4 -- ESlateBrushDrawType::RoundedBox
+                    if bg.OutlineSettings then
+                        bg.OutlineSettings.CornerRadii = { X = 4.0, Y = 4.0, Z = 4.0, W = 4.0 }
+                        bg.OutlineSettings.RoundingType = 1 -- ESlateBrushRoundingType::FixedRadius
+                        bg.OutlineSettings.Width = 0.0
+                        bg.OutlineSettings.bUseBrushTransparency = true
+                    end
+                    bdr:SetBrush(bg)
+                end
+            end)
+        end
+
         for rIdx, def in ipairs(keybindDefs) do
             local rowHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
             if Core.IsValidObj(rowHBox) then
@@ -5452,10 +5470,8 @@ local function OpenStationMap()
                         local iconSb = CreateRawFast(PATHS.SizeBoxClass, outer)
                         local iconImg = CreateRawFast(PATHS.ImageClass, outer)
                         if Core.IsValidObj(iconSb) and Core.IsValidObj(iconImg) then
+                            applyRoundedBadgeStyle(capBg, { Left = 4.0, Top = 3.0, Right = 4.0, Bottom = 3.0 })
                             pcall(function()
-                                capBg:SetBrushColor(capFillCol)
-                                capBg:SetPadding({ Left = 4.0, Top = 3.0, Right = 4.0, Bottom = 3.0 })
-                                capBg:SetVisibility(3)
                                 iconSb:SetWidthOverride(18.0)
                                 iconSb:SetHeightOverride(18.0)
                                 iconSb:SetVisibility(3)
@@ -5470,10 +5486,8 @@ local function OpenStationMap()
                     if not builtBadge then
                         local capTxt = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
                         if Core.IsValidObj(capTxt) then
+                            applyRoundedBadgeStyle(capBg, { Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
                             pcall(function()
-                                capBg:SetBrushColor(capFillCol)
-                                capBg:SetPadding({ Left = 7.0, Top = 2.0, Right = 7.0, Bottom = 2.0 })
-                                capBg:SetVisibility(3)
                                 capTxt:SetVisibility(3)
                                 capTxt:SetSize(10)
                                 capTxt:SetText(Core.MakeText(def.key))
@@ -5520,9 +5534,11 @@ local function OpenStationMap()
                     end)
                 end
 
-                if def.id == "copy" then hintCopyRow = rowHBox
+                if def.id == "select" then hintSelectLabel = lbl
+                elseif def.id == "copy" then hintCopyRow = rowHBox
                 elseif def.id == "delete" then hintDeleteRow = rowHBox
                 elseif def.id == "rotate" then hintRotateRow = rowHBox
+                elseif def.id == "cancel" then hintCancelRow = rowHBox
                 end
             end
         end
@@ -5532,7 +5548,7 @@ local function OpenStationMap()
             pcall(function()
                 blSlot:SetHorizontalAlignment(1) -- Left
                 blSlot:SetVerticalAlignment(3)   -- Bottom
-                blSlot:SetPadding({ Left = 18.0, Top = 0.0, Right = 0.0, Bottom = 16.0 })
+                blSlot:SetPadding({ Left = 10.0, Top = 0.0, Right = 0.0, Bottom = 14.0 })
             end)
         end
     end
@@ -5727,9 +5743,11 @@ local function OpenStationMap()
         ApplyBtnText = applyBtnText,
         DiscardBtn = discardWrap,
         CloseBtnFrame = closeBtnFrame,
+        HintSelectLabel = hintSelectLabel,
         HintCopyRow = hintCopyRow,
         HintDeleteRow = hintDeleteRow,
         HintRotateRow = hintRotateRow,
+        HintCancelRow = hintCancelRow,
         SelPillWrap = selPillWrap,
         SelPillText = selPillText,
         DelPillWrap = delPillWrap,
