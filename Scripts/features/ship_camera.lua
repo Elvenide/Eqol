@@ -404,15 +404,17 @@ local TELEM_ORANGE = { R = 0.9200, G = 0.4500, B = 0.0400, A = 0.96 }
 local TELEM_GREEN  = { R = 0.1400, G = 0.7200, B = 0.2400, A = 0.96 }
 local TELEM_GOLD   = { R = 0.8800, G = 0.3600, B = 0.0150, A = 1.00 } -- Matches vanilla Main Sequence HUD amber-gold
 local TELEM_BOOST  = { R = 0.2000, G = 0.8400, B = 1.0000, A = 1.00 }
+local TELEM_SHIELD = { R = 0.1200, G = 0.6200, B = 0.9800, A = 0.96 }
 local TELEM_DIM    = { R = 0.2600, G = 0.2800, B = 0.3200, A = 0.85 }
 local TELEM_EMPTY  = { R = 0.0300, G = 0.0350, B = 0.0450, A = 0.78 }
 local TELEM_PANEL  = { R = 0.0150, G = 0.0180, B = 0.0240, A = 0.76 }
 local TELEM_WHITE  = { R = 0.9400, G = 0.9500, B = 0.9800, A = 1.00 }
 local TELEM_MUTED  = { R = 0.6800, G = 0.7200, B = 0.7800, A = 0.90 }
 
-local BOOST_BAR_H = 132.0
-local WING_CARD_W = 192.0
-local WING_CARD_H = 176.0
+local BOOST_BAR_H  = 132.0
+local SHIELD_BAR_H = 144.0
+local WING_CARD_W  = 204.0
+local WING_CARD_H  = 176.0
 local WING_CHAMFER = 14.0
 
 local function ReadNumericOrFixed(val)
@@ -913,12 +915,14 @@ local function EnsureShipLegend(pc)
         end
     end
 
-    -- Right-Center 3rd-Person Hull Card (identical unified 192x176 card with left corners chamfered)
+    -- Right-Center 3rd-Person Hull & Shield Card (identical unified 204x176 card with left corners chamfered)
     local rightWing, rightOv = createChamferedWingCard("left")
     local rightInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
     local hullValTxt = nil
     local hullTitleTxt = nil
     local hullSegs = {} -- [1]=bottom, [2]=middle, [3]=top
+    local shieldFillSlot = nil
+    local shieldFillBorder = nil
 
     if Core.IsValidObj(rightWing) and Core.IsValidObj(rightOv) and Core.IsValidObj(rightInnerH) then
         pcall(function() rightInnerH:SetVisibility(3) end)
@@ -962,12 +966,12 @@ local function EnsureShipLegend(pc)
                 pcall(function()
                     hpSlot:SetVerticalAlignment(2)
                     hpSlot:SetSize({ Value = 1.0, SizeRule = 1 })
-                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 22.0, Bottom = 0.0 })
+                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 18.0, Bottom = 0.0 })
                 end)
             end
         end
 
-        -- Right column inside card: 3 distinct separated vertical hull rectangles (top=[3], mid=[2], bot=[1])
+        -- Middle-right column inside card: 3 distinct separated vertical hull rectangles (top=[3], mid=[2], bot=[1])
         local segsVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
         if Core.IsValidObj(segsVBox) then
             pcall(function() segsVBox:SetVisibility(3) end)
@@ -997,12 +1001,50 @@ local function EnsureShipLegend(pc)
             if Core.IsValidObj(svSlot) then pcall(function() svSlot:SetVerticalAlignment(2) end) end
         end
 
+        -- Far-right column inside card: Smooth vertical shield progress bar (same style as boost bar)
+        local shieldTrackSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
+        local shieldTrackBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local shieldCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
+        shieldFillBorder = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        if Core.IsValidObj(shieldTrackSb) and Core.IsValidObj(shieldTrackBg)
+            and Core.IsValidObj(shieldCanvas) and Core.IsValidObj(shieldFillBorder)
+        then
+            pcall(function()
+                shieldTrackSb:SetWidthOverride(10.0)
+                shieldTrackSb:SetHeightOverride(SHIELD_BAR_H)
+                shieldTrackSb:SetVisibility(3)
+                shieldTrackBg:SetBrushColor(TELEM_EMPTY)
+                shieldTrackBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                shieldTrackBg:SetVisibility(3)
+                shieldCanvas:SetVisibility(3)
+                shieldFillBorder:SetBrushColor(TELEM_SHIELD)
+                shieldFillBorder:SetVisibility(3)
+
+                shieldFillSlot = shieldCanvas:AddChildToCanvas(shieldFillBorder)
+                if Core.IsValidObj(shieldFillSlot) then
+                    shieldFillSlot:SetAnchors({ Minimum = { X = 0.0, Y = 1.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+                    shieldFillSlot:SetAlignment({ X = 0.0, Y = 1.0 })
+                    shieldFillSlot:SetPosition({ X = 0.0, Y = 0.0 })
+                    shieldFillSlot:SetSize({ X = 0.0, Y = SHIELD_BAR_H })
+                end
+                shieldTrackBg:AddChild(shieldCanvas)
+                shieldTrackSb:AddChild(shieldTrackBg)
+            end)
+            local shSlot = rightInnerH:AddChildToHorizontalBox(shieldTrackSb)
+            if Core.IsValidObj(shSlot) then
+                pcall(function()
+                    shSlot:SetVerticalAlignment(2)
+                    shSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                end)
+            end
+        end
+
         local rBodySlot = rightOv:AddChildToOverlay(rightInnerH)
         if Core.IsValidObj(rBodySlot) then
             pcall(function()
                 rBodySlot:SetHorizontalAlignment(0)
                 rBodySlot:SetVerticalAlignment(0)
-                rBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 22.0, Bottom = 10.0 })
+                rBodySlot:SetPadding({ Left = 10.0, Top = 10.0, Right = 14.0, Bottom = 10.0 })
             end)
         end
 
@@ -1042,6 +1084,8 @@ local function EnsureShipLegend(pc)
         HullTitleTxt = hullTitleTxt,
         HullValTxt = hullValTxt,
         HullSegs = hullSegs,
+        ShieldFillSlot = shieldFillSlot,
+        ShieldFillBorder = shieldFillBorder,
         LastPerspKey = nil,
         LastZeroKey = nil,
     }
@@ -1209,6 +1253,18 @@ local function ReadCockpitFuelStrings(shipActor)
     return usingStr, fuelStr
 end
 
+local function ParseEnergyStringToMJ(str)
+    if type(str) ~= "string" then return nil end
+    local numStr, unit = str:match("([%d%.]+)%s*([kKMG]?[jJ])")
+    local num = tonumber(numStr)
+    if not num or not unit then return nil end
+    local u = unit:upper()
+    if u == "GJ" then return num * 1000.0 end
+    if u == "MJ" then return num end
+    if u == "KJ" then return num / 1000.0 end
+    return num / 1000000.0
+end
+
 local TelemetryTrack = {
     ShipAddr = nil,
     SeenMaxBoost = 180.0,
@@ -1216,9 +1272,9 @@ local TelemetryTrack = {
     LastLocY = nil,
     LastLocZ = nil,
     LastLocClock = nil,
-    LastFuel = nil,
-    LastFuelClock = nil,
-    SmoothedFuelRate = nil,
+    FuelScaleToMJ = nil,
+    IntegratedFuelMJ = nil,
+    LastFuelTickClock = nil,
 }
 
 local function UpdateShipTelemetry(shipActor, shipObj, pc)
@@ -1235,9 +1291,9 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         TelemetryTrack.LastLocY = nil
         TelemetryTrack.LastLocZ = nil
         TelemetryTrack.LastLocClock = nil
-        TelemetryTrack.LastFuel = nil
-        TelemetryTrack.LastFuelClock = nil
-        TelemetryTrack.SmoothedFuelRate = nil
+        TelemetryTrack.FuelScaleToMJ = nil
+        TelemetryTrack.IntegratedFuelMJ = nil
+        TelemetryTrack.LastFuelTickClock = nil
     end
 
     -- 1. Boost charge & active boosting state (BoostCharge counts down from ~180 to 0)
@@ -1334,31 +1390,55 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
     end
 
-    -- 3. Fuel usage & fuel availability (prefer exact live cockpit TextBlocks; fallback to calibrated shipObj GetTotalFuel / FuelConsumptionRate)
-    local cockpitUsingStr, cockpitFuelStr = ReadCockpitFuelStrings(shipActor)
-    local totalFuel = nil
-    local fuelUse = nil
-    if not cockpitUsingStr or not cockpitFuelStr then
-        pcall(function()
-            if shipObj.GetTotalFuel then totalFuel = ReadNumericOrFixed(shipObj:GetTotalFuel()) end
-            if totalFuel == nil then totalFuel = ReadNumericOrFixed(shipObj.RemainingFuelDouble) end
-            if totalFuel == nil then totalFuel = ReadNumericOrFixed(shipObj.RemainingFuel) end
+    -- 3. Live fuel usage (always from live shipObj.FuelConsumptionRate * 0.3 MJ/s, since 3D cockpit freezes in 3P!)
+    --    and live total fuel available (GetTotalFuel auto-calibrated against initial cockpit Fuel readout,
+    --    with continuous live burn-rate integration fallback if GetTotalFuel is unavailable)
+    local rawFuelUse = nil
+    local rawTotalFuel = nil
+    pcall(function()
+        rawFuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
+        if rawFuelUse == nil then rawFuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
+        if shipObj.GetTotalFuel then rawTotalFuel = ReadNumericOrFixed(shipObj:GetTotalFuel()) end
+    end)
 
-            fuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
-            if fuelUse == nil then fuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
+    local fuelUseMJPerSec = rawFuelUse and (rawFuelUse * 0.3) or 0.0
+    if Core.IsValidObj(ui.FuelUseTxt) then
+        pcall(function()
+            ui.FuelUseTxt:SetText(Core.MakeText("Using: " .. FormatEnergyValue(fuelUseMJPerSec, true)))
         end)
     end
-    if Core.IsValidObj(ui.FuelUseTxt) then
-        local uStr = cockpitUsingStr
-            or (fuelUse and ("Using: " .. FormatEnergyValue(fuelUse * 0.3, true)) or "Using: 0.0 MJ/s")
-        pcall(function() ui.FuelUseTxt:SetText(Core.MakeText(uStr)) end)
+
+    -- Auto-calibrate GetTotalFuel unit scale once against the fresh cockpit Fuel string on 3P entry
+    local fuelAvailMJ = nil
+    if TelemetryTrack.FuelScaleToMJ == nil and TelemetryTrack.IntegratedFuelMJ == nil then
+        local _, cockpitFuelStr = ReadCockpitFuelStrings(shipActor)
+        local cockpitMJ = ParseEnergyStringToMJ(cockpitFuelStr)
+        if cockpitMJ and cockpitMJ > 0.0 then
+            if rawTotalFuel and rawTotalFuel > 0.001 then
+                TelemetryTrack.FuelScaleToMJ = cockpitMJ / rawTotalFuel
+            else
+                TelemetryTrack.IntegratedFuelMJ = cockpitMJ
+                TelemetryTrack.LastFuelTickClock = now
+            end
+        end
     end
+
+    if rawTotalFuel ~= nil then
+        local scale = TelemetryTrack.FuelScaleToMJ or 0.005
+        fuelAvailMJ = rawTotalFuel * scale
+    elseif TelemetryTrack.IntegratedFuelMJ ~= nil then
+        if TelemetryTrack.LastFuelTickClock then
+            local dtF = math.max(0.0, math.min(0.5, now - TelemetryTrack.LastFuelTickClock))
+            TelemetryTrack.IntegratedFuelMJ = math.max(0.0, TelemetryTrack.IntegratedFuelMJ - fuelUseMJPerSec * dtF)
+        end
+        TelemetryTrack.LastFuelTickClock = now
+        fuelAvailMJ = TelemetryTrack.IntegratedFuelMJ
+    end
+
     if Core.IsValidObj(ui.FuelAvailTxt) then
-        local aStr = cockpitFuelStr
-            or (totalFuel and ("Fuel: " .. FormatEnergyValue(totalFuel * 0.005, false)) or "Fuel: --")
+        local aStr = fuelAvailMJ and ("Fuel: " .. FormatEnergyValue(fuelAvailMJ, false)) or "Fuel: --"
         pcall(function() ui.FuelAvailTxt:SetText(Core.MakeText(aStr)) end)
-        local lowFuel = (totalFuel ~= nil and totalFuel <= 0.1)
-            or (cockpitFuelStr ~= nil and (cockpitFuelStr:find("0.0 ", 1, true) ~= nil or cockpitFuelStr:find("0 kJ", 1, true) ~= nil))
+        local lowFuel = (fuelAvailMJ ~= nil and fuelAvailMJ <= 0.1)
         SetWBPTextCol(ui.FuelAvailTxt, lowFuel and TELEM_RED or TELEM_GOLD)
     end
 
@@ -1404,11 +1484,34 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         end
     end
 
+    -- 5. Shields smooth vertical progress bar (GetShields / GetMaxShields)
+    local curShields = nil
+    local maxShields = nil
+    pcall(function()
+        if shipObj.GetShields then curShields = ReadNumericOrFixed(shipObj:GetShields()) end
+        if curShields == nil then curShields = ReadNumericOrFixed(shipObj.Shields) end
+        if shipObj.GetMaxShields then maxShields = ReadNumericOrFixed(shipObj:GetMaxShields()) end
+        if maxShields == nil then maxShields = ReadNumericOrFixed(shipObj.MaxShields) end
+    end)
+    local shieldPct = 0.0
+    if curShields and maxShields and maxShields > 0.001 then
+        shieldPct = Core.Clamp(curShields / maxShields, 0.0, 1.0)
+    end
+    if Core.IsValidObj(ui.ShieldFillSlot) then
+        pcall(function() ui.ShieldFillSlot:SetSize({ X = 0.0, Y = math.max(0.0, SHIELD_BAR_H * shieldPct) }) end)
+    end
+    if Core.IsValidObj(ui.ShieldFillBorder) then
+        pcall(function()
+            ui.ShieldFillBorder:SetBrushColor((shieldPct > 0.005) and TELEM_SHIELD or TELEM_DIM)
+        end)
+    end
+
     if not TelemetryDiagLogged then
         TelemetryDiagLogged = true
-        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%s totalFuel=%s cockpit=(%s | %s) hull=%s/%s",
+        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%.2f rawTotalFuel=%s scale=%s hull=%s/%s shields=%s/%s",
             tostring(boostCharge), tostring(effMaxBoost), speedMs,
-            tostring(fuelUse), tostring(totalFuel), tostring(cockpitUsingStr), tostring(cockpitFuelStr), tostring(curHull), tostring(maxHull)))
+            fuelUseMJPerSec, tostring(rawTotalFuel), tostring(TelemetryTrack.FuelScaleToMJ),
+            tostring(curHull), tostring(maxHull), tostring(curShields), tostring(maxShields)))
     end
 end
 
