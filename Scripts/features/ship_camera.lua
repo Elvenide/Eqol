@@ -394,9 +394,46 @@ end
 -- Contextual Bottom-Left Ship Keybind Legend (matching Station Map / World Map style)
 --------------------------------------------------------------------------------
 
-local LegendUI = nil -- { Root, PerspRow, PerspKeyTxt, ZeroRow, ZeroKeyTxt, ZoomRow, ResetRow, LastPerspKey, LastZeroKey }
+local LegendUI = nil -- { Root, PerspRow, PerspKeyTxt, ZeroRow, ZeroKeyTxt, ZoomRow, ResetRow, LeftWing, RightWing, ... }
+local TelemetryDiagLogged = false
 local CachedMMBIconTex = nil
 local MMBIconSearched = false
+
+local TELEM_RED    = { R = 0.6105, G = 0.0000, B = 0.0612, A = 1.00 } -- #cd0046 (matches Station Map missing materials)
+local TELEM_ORANGE = { R = 0.9200, G = 0.4500, B = 0.0400, A = 0.96 }
+local TELEM_GREEN  = { R = 0.1400, G = 0.7200, B = 0.2400, A = 0.96 }
+local TELEM_GOLD   = { R = 0.9400, G = 0.6600, B = 0.1000, A = 1.00 }
+local TELEM_BOOST  = { R = 0.2000, G = 0.8400, B = 1.0000, A = 1.00 }
+local TELEM_DIM    = { R = 0.2600, G = 0.2800, B = 0.3200, A = 0.85 }
+local TELEM_EMPTY  = { R = 0.0300, G = 0.0350, B = 0.0450, A = 0.78 }
+local TELEM_PANEL  = { R = 0.0150, G = 0.0180, B = 0.0240, A = 0.74 }
+local TELEM_WHITE  = { R = 0.9400, G = 0.9500, B = 0.9800, A = 1.00 }
+local TELEM_MUTED  = { R = 0.6800, G = 0.7200, B = 0.7800, A = 0.90 }
+
+local BOOST_BAR_H = 160.0
+
+local function SetWBPTextCol(w, col)
+    if not Core.IsValidObj(w) or not col then return end
+    pcall(function()
+        if w.SetColorAndOpacity then w:SetColorAndOpacity(col) end
+        if Core.IsValidObj(w.TextBlock) and w.TextBlock.SetColorAndOpacity then
+            w.TextBlock:SetColorAndOpacity({ SpecifiedColor = col, ColorUseRule = 0 })
+        end
+    end)
+end
+
+local function FormatEnergyValue(val, isRate)
+    if type(val) ~= "number" then return "--" end
+    local absV = math.abs(val)
+    local suffix = isRate and "/s" or ""
+    if absV >= 1000.0 then
+        return string.format("%.1f GJ%s", val / 1000.0, suffix)
+    elseif absV >= 1.0 then
+        return string.format("%.1f MJ%s", val, suffix)
+    else
+        return string.format("%.0f kJ%s", val * 1000.0, suffix)
+    end
+end
 
 local KEY_DISPLAY_MAP = {
     Zero = "0", One = "1", Two = "2", Three = "3", Four = "4",
@@ -592,6 +629,310 @@ local function EnsureShipLegend(pc)
         end)
     end
 
+    -- Helper for tiny gold hairline accent bars
+    local function makeHairline(col, hPx)
+        local sb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
+        local bdr = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        if Core.IsValidObj(sb) and Core.IsValidObj(bdr) then
+            pcall(function()
+                sb:SetHeightOverride(hPx or 2.0)
+                sb:SetVisibility(3)
+                bdr:SetBrushColor(col)
+                bdr:SetVisibility(3)
+                sb:AddChild(bdr)
+            end)
+        end
+        return sb
+    end
+
+    -- Left-Center 3rd-Person Telemetry Wing (seamlessly connected right next to the left-center HUD bracket)
+    local leftWing = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+    local boostFillSlot = nil
+    local boostFillBorder = nil
+    local boostLabelTxt = nil
+    local speedTxt = nil
+    local fuelUseTxt = nil
+    local fuelAvailTxt = nil
+
+    if Core.IsValidObj(leftWing) then
+        pcall(function() leftWing:SetVisibility(1) end) -- Collapsed until 3rd-person active
+
+        -- Vertical smooth boost progress bar
+        local boostColVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local boostTrackSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
+        local boostTrackBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local boostCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
+        boostFillBorder = Core.CreateRawWidget("/Script/UMG.Border", outer)
+
+        if Core.IsValidObj(boostColVBox) and Core.IsValidObj(boostTrackSb) and Core.IsValidObj(boostTrackBg)
+            and Core.IsValidObj(boostCanvas) and Core.IsValidObj(boostFillBorder)
+        then
+            pcall(function()
+                boostColVBox:SetVisibility(3)
+                boostTrackSb:SetWidthOverride(10.0)
+                boostTrackSb:SetHeightOverride(BOOST_BAR_H)
+                boostTrackSb:SetVisibility(3)
+                boostTrackBg:SetBrushColor(TELEM_EMPTY)
+                boostTrackBg:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                boostTrackBg:SetVisibility(3)
+                boostCanvas:SetVisibility(3)
+                boostFillBorder:SetBrushColor(TELEM_GOLD)
+                boostFillBorder:SetVisibility(3)
+
+                boostFillSlot = boostCanvas:AddChildToCanvas(boostFillBorder)
+                if Core.IsValidObj(boostFillSlot) then
+                    boostFillSlot:SetAnchors({ Minimum = { X = 0.0, Y = 1.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+                    boostFillSlot:SetAlignment({ X = 0.0, Y = 1.0 })
+                    boostFillSlot:SetPosition({ X = 0.0, Y = 0.0 })
+                    boostFillSlot:SetSize({ X = 0.0, Y = BOOST_BAR_H })
+                end
+                boostTrackBg:AddChild(boostCanvas)
+                boostTrackSb:AddChild(boostTrackBg)
+                local btSlot = boostColVBox:AddChildToVerticalBox(boostTrackSb)
+                if Core.IsValidObj(btSlot) then btSlot:SetHorizontalAlignment(2) end
+            end)
+
+            boostLabelTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
+            if Core.IsValidObj(boostLabelTxt) then
+                pcall(function()
+                    boostLabelTxt:SetVisibility(3)
+                    boostLabelTxt:SetSize(8)
+                    boostLabelTxt:SetText(Core.MakeText("BOOST"))
+                end)
+                SetWBPTextCol(boostLabelTxt, TELEM_MUTED)
+                local blbSlot = boostColVBox:AddChildToVerticalBox(boostLabelTxt)
+                if Core.IsValidObj(blbSlot) then
+                    pcall(function()
+                        blbSlot:SetHorizontalAlignment(2)
+                        blbSlot:SetPadding({ Left = 0.0, Top = 4.0, Right = 0.0, Bottom = 0.0 })
+                    end)
+                end
+            end
+
+            local bColSlot = leftWing:AddChildToHorizontalBox(boostColVBox)
+            if Core.IsValidObj(bColSlot) then pcall(function() bColSlot:SetVerticalAlignment(2) end) end
+        end
+
+        -- Speed, movement direction & fuel panel right next to boost bar
+        local infoPanel = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local infoOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local infoInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        if Core.IsValidObj(infoPanel) and Core.IsValidObj(infoOuterV) and Core.IsValidObj(infoInnerV) then
+            pcall(function()
+                infoPanel:SetBrushColor(TELEM_PANEL)
+                infoPanel:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                infoPanel:SetVisibility(3)
+                infoOuterV:SetVisibility(3)
+                infoInnerV:SetVisibility(3)
+            end)
+
+            local topLine = makeHairline(TELEM_GOLD, 2.0)
+            if Core.IsValidObj(topLine) then
+                local tlS = infoOuterV:AddChildToVerticalBox(topLine)
+                if Core.IsValidObj(tlS) then pcall(function() tlS:SetHorizontalAlignment(0) end) end
+            end
+
+            speedTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
+            if Core.IsValidObj(speedTxt) then
+                pcall(function()
+                    speedTxt:SetVisibility(3)
+                    speedTxt:SetSize(14)
+                    speedTxt:SetText(Core.MakeText("0 m/s"))
+                end)
+                SetWBPTextCol(speedTxt, TELEM_GOLD)
+                local spS = infoInnerV:AddChildToVerticalBox(speedTxt)
+                if Core.IsValidObj(spS) then
+                    pcall(function()
+                        spS:SetHorizontalAlignment(1)
+                        spS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 6.0 })
+                    end)
+                end
+            end
+
+            fuelUseTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
+            if Core.IsValidObj(fuelUseTxt) then
+                pcall(function()
+                    fuelUseTxt:SetVisibility(3)
+                    fuelUseTxt:SetSize(11)
+                    fuelUseTxt:SetText(Core.MakeText("Using: --"))
+                end)
+                SetWBPTextCol(fuelUseTxt, TELEM_GOLD)
+                local fuS = infoInnerV:AddChildToVerticalBox(fuelUseTxt)
+                if Core.IsValidObj(fuS) then
+                    pcall(function()
+                        fuS:SetHorizontalAlignment(1)
+                        fuS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 3.0 })
+                    end)
+                end
+            end
+
+            fuelAvailTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
+            if Core.IsValidObj(fuelAvailTxt) then
+                pcall(function()
+                    fuelAvailTxt:SetVisibility(3)
+                    fuelAvailTxt:SetSize(11)
+                    fuelAvailTxt:SetText(Core.MakeText("Fuel: --"))
+                end)
+                SetWBPTextCol(fuelAvailTxt, TELEM_GOLD)
+                local faS = infoInnerV:AddChildToVerticalBox(fuelAvailTxt)
+                if Core.IsValidObj(faS) then pcall(function() faS:SetHorizontalAlignment(1) end) end
+            end
+
+            local inS = infoOuterV:AddChildToVerticalBox(infoInnerV)
+            if Core.IsValidObj(inS) then
+                pcall(function()
+                    inS:SetPadding({ Left = 10.0, Top = 8.0, Right = 12.0, Bottom = 8.0 })
+                    inS:SetHorizontalAlignment(1)
+                end)
+            end
+
+            local botLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
+            if Core.IsValidObj(botLine) then
+                local blS = infoOuterV:AddChildToVerticalBox(botLine)
+                if Core.IsValidObj(blS) then pcall(function() blS:SetHorizontalAlignment(0) end) end
+            end
+
+            pcall(function() infoPanel:AddChild(infoOuterV) end)
+            local ipSlot = leftWing:AddChildToHorizontalBox(infoPanel)
+            if Core.IsValidObj(ipSlot) then
+                pcall(function()
+                    ipSlot:SetVerticalAlignment(2)
+                    ipSlot:SetPadding({ Left = 8.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                end)
+            end
+        end
+
+        local lwSlot = rootOverlay:AddChildToOverlay(leftWing)
+        if Core.IsValidObj(lwSlot) then
+            pcall(function()
+                lwSlot:SetHorizontalAlignment(1) -- Left
+                lwSlot:SetVerticalAlignment(2)   -- Center (aligned with left-center HUD bracket)
+                lwSlot:SetPadding({ Left = 28.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+            end)
+        end
+    end
+
+    -- Right-Center 3rd-Person Hull Wing (seamlessly connected right next to the right-center HUD bracket)
+    local rightWing = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+    local hullValTxt = nil
+    local hullTitleTxt = nil
+    local hullSegs = {} -- [1]=bottom, [2]=middle, [3]=top
+
+    if Core.IsValidObj(rightWing) then
+        pcall(function() rightWing:SetVisibility(1) end) -- Collapsed until 3rd-person active
+
+        -- Hull numeric readout card to the left of the 3 vertical segments
+        local hullPanel = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local hullOuterV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local hullInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        if Core.IsValidObj(hullPanel) and Core.IsValidObj(hullOuterV) and Core.IsValidObj(hullInnerV) then
+            pcall(function()
+                hullPanel:SetBrushColor(TELEM_PANEL)
+                hullPanel:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                hullPanel:SetVisibility(3)
+                hullOuterV:SetVisibility(3)
+                hullInnerV:SetVisibility(3)
+            end)
+
+            local hTopLine = makeHairline(TELEM_GOLD, 2.0)
+            if Core.IsValidObj(hTopLine) then
+                local htS = hullOuterV:AddChildToVerticalBox(hTopLine)
+                if Core.IsValidObj(htS) then pcall(function() htS:SetHorizontalAlignment(0) end) end
+            end
+
+            hullTitleTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
+            if Core.IsValidObj(hullTitleTxt) then
+                pcall(function()
+                    hullTitleTxt:SetVisibility(3)
+                    hullTitleTxt:SetSize(9)
+                    hullTitleTxt:SetText(Core.MakeText("HULL"))
+                end)
+                SetWBPTextCol(hullTitleTxt, TELEM_MUTED)
+                local htlS = hullInnerV:AddChildToVerticalBox(hullTitleTxt)
+                if Core.IsValidObj(htlS) then
+                    pcall(function()
+                        htlS:SetHorizontalAlignment(3) -- Right
+                        htlS:SetPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 2.0 })
+                    end)
+                end
+            end
+
+            hullValTxt = Core.CreateUserWidget(wbpTextPath, rootWin, pc)
+            if Core.IsValidObj(hullValTxt) then
+                pcall(function()
+                    hullValTxt:SetVisibility(3)
+                    hullValTxt:SetSize(13)
+                    hullValTxt:SetText(Core.MakeText("--/--"))
+                end)
+                SetWBPTextCol(hullValTxt, TELEM_GOLD)
+                local hvS = hullInnerV:AddChildToVerticalBox(hullValTxt)
+                if Core.IsValidObj(hvS) then pcall(function() hvS:SetHorizontalAlignment(3) end) end
+            end
+
+            local hiS = hullOuterV:AddChildToVerticalBox(hullInnerV)
+            if Core.IsValidObj(hiS) then
+                pcall(function()
+                    hiS:SetPadding({ Left = 12.0, Top = 8.0, Right = 10.0, Bottom = 8.0 })
+                    hiS:SetHorizontalAlignment(3)
+                end)
+            end
+
+            local hBotLine = makeHairline({ R = 0.94, G = 0.66, B = 0.10, A = 0.55 }, 1.5)
+            if Core.IsValidObj(hBotLine) then
+                local hbS = hullOuterV:AddChildToVerticalBox(hBotLine)
+                if Core.IsValidObj(hbS) then pcall(function() hbS:SetHorizontalAlignment(0) end) end
+            end
+
+            pcall(function() hullPanel:AddChild(hullOuterV) end)
+            local hpSlot = rightWing:AddChildToHorizontalBox(hullPanel)
+            if Core.IsValidObj(hpSlot) then
+                pcall(function()
+                    hpSlot:SetVerticalAlignment(2)
+                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 8.0, Bottom = 0.0 })
+                end)
+            end
+        end
+
+        -- 3 distinct separated vertical hull rectangles (top = [3], middle = [2], bottom = [1])
+        local segsVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        if Core.IsValidObj(segsVBox) then
+            pcall(function() segsVBox:SetVisibility(3) end)
+            for segIdx = 3, 1, -1 do
+                local segSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
+                local segBdr = Core.CreateRawWidget("/Script/UMG.Border", outer)
+                if Core.IsValidObj(segSb) and Core.IsValidObj(segBdr) then
+                    pcall(function()
+                        segSb:SetWidthOverride(12.0)
+                        segSb:SetHeightOverride(48.0)
+                        segSb:SetVisibility(3)
+                        segBdr:SetBrushColor(TELEM_GREEN)
+                        segBdr:SetVisibility(3)
+                        segSb:AddChild(segBdr)
+                    end)
+                    hullSegs[segIdx] = segBdr
+                    local ss = segsVBox:AddChildToVerticalBox(segSb)
+                    if Core.IsValidObj(ss) then
+                        pcall(function()
+                            ss:SetHorizontalAlignment(2)
+                            ss:SetPadding({ Left = 0.0, Top = (segIdx == 3) and 0.0 or 6.0, Right = 0.0, Bottom = 0.0 })
+                        end)
+                    end
+                end
+            end
+            local svSlot = rightWing:AddChildToHorizontalBox(segsVBox)
+            if Core.IsValidObj(svSlot) then pcall(function() svSlot:SetVerticalAlignment(2) end) end
+        end
+
+        local rwSlot = rootOverlay:AddChildToOverlay(rightWing)
+        if Core.IsValidObj(rwSlot) then
+            pcall(function()
+                rwSlot:SetHorizontalAlignment(3) -- Right
+                rwSlot:SetVerticalAlignment(2)   -- Center (aligned with right-center HUD bracket)
+                rwSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 28.0, Bottom = 0.0 })
+            end)
+        end
+    end
+
     pcall(function()
         rootWin.WidgetTree.RootWidget = rootOverlay
         rootWin:SetVisibility(1) -- Collapsed until piloting
@@ -607,6 +948,17 @@ local function EnsureShipLegend(pc)
         ZeroKeyTxt = zeroKeyTxt,
         ZoomRow = zoomRow,
         ResetRow = resetRow,
+        LeftWing = leftWing,
+        RightWing = rightWing,
+        BoostFillSlot = boostFillSlot,
+        BoostFillBorder = boostFillBorder,
+        BoostLabelTxt = boostLabelTxt,
+        SpeedTxt = speedTxt,
+        FuelUseTxt = fuelUseTxt,
+        FuelAvailTxt = fuelAvailTxt,
+        HullTitleTxt = hullTitleTxt,
+        HullValTxt = hullValTxt,
+        HullSegs = hullSegs,
         LastPerspKey = nil,
         LastZeroKey = nil,
     }
@@ -650,8 +1002,156 @@ local function UpdateShipLegend()
         if Core.IsValidObj(ui.ZeroRow)  then ui.ZeroRow:SetVisibility(showZero and 3 or 1) end
         if Core.IsValidObj(ui.ZoomRow)  then ui.ZoomRow:SetVisibility(showZoom and 3 or 1) end
         if Core.IsValidObj(ui.ResetRow) then ui.ResetRow:SetVisibility(showZoom and 3 or 1) end
+        if Core.IsValidObj(ui.LeftWing) then ui.LeftWing:SetVisibility(showZoom and 3 or 1) end
+        if Core.IsValidObj(ui.RightWing) then ui.RightWing:SetVisibility(showZoom and 3 or 1) end
         ui.Root:SetVisibility(4) -- SelfHitTestInvisible
     end)
+end
+
+local function UpdateShipTelemetry(shipActor, shipObj, pc)
+    if not (IsThirdPerson and LegendUI and Core.IsValidObj(LegendUI.LeftWing) and Core.IsValidObj(shipObj)) then
+        return
+    end
+    local ui = LegendUI
+
+    -- 1. Boost charge & active boosting state
+    local boostCharge = nil
+    local maxBoost = nil
+    local isBoosting = IsShipActivelyBoosting(shipObj, pc)
+    pcall(function()
+        boostCharge = ReadNumericOrFixed(shipObj.BoostCharge)
+        maxBoost = ReadNumericOrFixed(shipObj.MaxBoostCharge)
+    end)
+    local boostPct = 0.0
+    if boostCharge and maxBoost and maxBoost > 0.001 then
+        boostPct = Core.Clamp(boostCharge / maxBoost, 0.0, 1.0)
+    elseif boostCharge then
+        boostPct = Core.Clamp(boostCharge, 0.0, 1.0)
+    end
+    if Core.IsValidObj(ui.BoostFillSlot) then
+        pcall(function() ui.BoostFillSlot:SetSize({ X = 0.0, Y = math.max(0.0, BOOST_BAR_H * boostPct) }) end)
+    end
+    if Core.IsValidObj(ui.BoostFillBorder) then
+        local bCol = isBoosting and TELEM_BOOST or (boostPct > 0.05 and TELEM_GOLD or TELEM_DIM)
+        pcall(function() ui.BoostFillBorder:SetBrushColor(bCol) end)
+    end
+    if Core.IsValidObj(ui.BoostLabelTxt) then
+        SetWBPTextCol(ui.BoostLabelTxt, isBoosting and TELEM_BOOST or TELEM_MUTED)
+    end
+
+    -- 2. Live speed & movement direction (forward / reverse / stopped)
+    local speedMs = 0.0
+    local forwardDot = 0.0
+    local gotVel = false
+    pcall(function()
+        if shipObj.Velocity then
+            local vx = ReadNumericOrFixed(shipObj.Velocity.X)
+            local vy = ReadNumericOrFixed(shipObj.Velocity.Y)
+            local vz = ReadNumericOrFixed(shipObj.Velocity.Z)
+            if vx and vy and vz then
+                speedMs = math.sqrt(vx * vx + vy * vy + vz * vz)
+                gotVel = true
+                if Core.IsValidObj(shipActor) and shipActor.GetActorForwardVector then
+                    local fwd = shipActor:GetActorForwardVector()
+                    if fwd then
+                        forwardDot = vx * (tonumber(fwd.X) or 0) + vy * (tonumber(fwd.Y) or 0) + vz * (tonumber(fwd.Z) or 0)
+                    end
+                end
+            end
+        end
+    end)
+    if not gotVel and Core.IsValidObj(shipActor) and shipActor.GetVelocity then
+        pcall(function()
+            local v = shipActor:GetVelocity()
+            if v then
+                local vx, vy, vz = tonumber(v.X) or 0, tonumber(v.Y) or 0, tonumber(v.Z) or 0
+                speedMs = math.sqrt(vx * vx + vy * vy + vz * vz) / 100.0 -- Unreal cm/s -> m/s
+                if shipActor.GetActorForwardVector then
+                    local fwd = shipActor:GetActorForwardVector()
+                    if fwd then
+                        forwardDot = (vx * (tonumber(fwd.X) or 0) + vy * (tonumber(fwd.Y) or 0) + vz * (tonumber(fwd.Z) or 0)) / 100.0
+                    end
+                end
+            end
+        end)
+    end
+    local dirPrefix = "— "
+    if speedMs >= 0.5 then
+        dirPrefix = (forwardDot < -0.5) and "▼ " or "▲ "
+    end
+    if Core.IsValidObj(ui.SpeedTxt) then
+        local spStr = string.format("%s%.0f m/s", dirPrefix, speedMs)
+        pcall(function() ui.SpeedTxt:SetText(Core.MakeText(spStr)) end)
+        SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
+    end
+
+    -- 3. Fuel usage & fuel availability
+    local fuelUse = nil
+    local fuelAvail = nil
+    pcall(function()
+        fuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
+        fuelAvail = ReadNumericOrFixed(shipObj.Fuel)
+        if fuelAvail == nil then fuelAvail = ReadNumericOrFixed(shipObj.Energy) end
+    end)
+    if Core.IsValidObj(ui.FuelUseTxt) then
+        local uStr = fuelUse and ("Using: " .. FormatEnergyValue(fuelUse, true)) or "Using: 0.0 MJ/s"
+        pcall(function() ui.FuelUseTxt:SetText(Core.MakeText(uStr)) end)
+    end
+    if Core.IsValidObj(ui.FuelAvailTxt) then
+        local aStr = fuelAvail and ("Fuel: " .. FormatEnergyValue(fuelAvail, false)) or "Fuel: --"
+        pcall(function() ui.FuelAvailTxt:SetText(Core.MakeText(aStr)) end)
+        local lowFuel = (fuelAvail ~= nil and fuelAvail <= 0.1)
+        SetWBPTextCol(ui.FuelAvailTxt, lowFuel and TELEM_RED or TELEM_GOLD)
+    end
+
+    -- 4. Hull integrity & 3-segment vertical bar (3 green / 2 orange / 1 red / 3 red + red text when destroyed)
+    local curHull = nil
+    local maxHull = nil
+    pcall(function()
+        if shipObj.GetCurrentHull then curHull = ReadNumericOrFixed(shipObj:GetCurrentHull()) end
+        if curHull == nil then curHull = ReadNumericOrFixed(shipObj.Hull) end
+        if shipObj.GetMaxHull then maxHull = ReadNumericOrFixed(shipObj:GetMaxHull()) end
+        if maxHull == nil then maxHull = ReadNumericOrFixed(shipObj.MaxHull) end
+        if maxHull == nil then maxHull = ReadNumericOrFixed(shipObj.Hull) end
+    end)
+    if curHull ~= nil then
+        local maxH = (maxHull and maxHull > 0) and maxHull or math.max(1.0, curHull)
+        local pct = Core.Clamp(curHull / maxH, 0.0, 1.0)
+        local isDestroyed = (curHull <= 0.001)
+
+        if Core.IsValidObj(ui.HullValTxt) then
+            pcall(function()
+                ui.HullValTxt:SetText(Core.MakeText(string.format("%.0f/%.0f", math.max(0, curHull), maxH)))
+            end)
+            SetWBPTextCol(ui.HullValTxt, isDestroyed and TELEM_RED or TELEM_GOLD)
+        end
+        if Core.IsValidObj(ui.HullTitleTxt) then
+            SetWBPTextCol(ui.HullTitleTxt, isDestroyed and TELEM_RED or TELEM_MUTED)
+        end
+
+        local segColors = { TELEM_EMPTY, TELEM_EMPTY, TELEM_EMPTY }
+        if isDestroyed then
+            segColors = { TELEM_RED, TELEM_RED, TELEM_RED }
+        elseif pct > 0.66 then
+            segColors = { TELEM_GREEN, TELEM_GREEN, TELEM_GREEN }
+        elseif pct > 0.33 then
+            segColors = { TELEM_ORANGE, TELEM_ORANGE, TELEM_EMPTY }
+        else
+            segColors = { TELEM_RED, TELEM_EMPTY, TELEM_EMPTY }
+        end
+        for i = 1, 3 do
+            if ui.HullSegs and Core.IsValidObj(ui.HullSegs[i]) then
+                pcall(function() ui.HullSegs[i]:SetBrushColor(segColors[i]) end)
+            end
+        end
+    end
+
+    if not TelemetryDiagLogged then
+        TelemetryDiagLogged = true
+        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%s fuel=%s hull=%s/%s",
+            tostring(boostCharge), tostring(maxBoost), speedMs,
+            tostring(fuelUse), tostring(fuelAvail), tostring(curHull), tostring(maxHull)))
+    end
 end
 
 local function StartPilotLegendPoll()
@@ -707,6 +1207,7 @@ local function StartScrollPoll()
     ScrollPollGen = ScrollPollGen + 1
     local myGen = ScrollPollGen
     local lastClock = os.clock()
+    local lastTelemClock = 0.0
     EnsureScrollKeyTables()
 
     local function Tick()
@@ -803,6 +1304,11 @@ local function StartScrollPoll()
 
         if needsApply then
             ApplyShipCameraState(pc, false)
+        end
+
+        if (now - lastTelemClock) >= 0.08 then
+            lastTelemClock = now
+            pcall(UpdateShipTelemetry, shipActor, shipObj, pc)
         end
 
         ExecuteInGameThreadAfterFrames(1, Tick)
