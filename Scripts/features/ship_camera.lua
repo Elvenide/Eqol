@@ -1156,21 +1156,24 @@ local function ReadCockpitFuelStrings(shipActor)
                 -- Fallback one-time TextBlock scan (cockpit display often lives on a child actor / sub-widget)
                 local okAll, tbs = pcall(FindAllOf, "TextBlock")
                 if okAll and tbs then
+                    local ownUsingTB = LegendUI and Core.IsValidObj(LegendUI.FuelUseTxt) and LegendUI.FuelUseTxt.TextBlock or nil
+                    local ownFuelTB  = LegendUI and Core.IsValidObj(LegendUI.FuelAvailTxt) and LegendUI.FuelAvailTxt.TextBlock or nil
+                    local ownUsingAddr = Core.IsValidObj(ownUsingTB) and ownUsingTB:GetAddress() or nil
+                    local ownFuelAddr  = Core.IsValidObj(ownFuelTB) and ownFuelTB:GetAddress() or nil
                     for _, tb in ipairs(tbs) do
                         if Core.IsValidObj(tb) and tb.GetText then
-                            local okT, tObj = pcall(function() return tb:GetText() end)
-                            local s = (okT and tObj and tObj.ToString) and tObj:ToString() or (type(tObj) == "string" and tObj or "")
-                            if not Core.IsValidObj(CockpitTextCache.UsingTB) and s:find("Using:", 1, true) then
-                                CockpitTextCache.UsingTB = tb
-                            elseif not Core.IsValidObj(CockpitTextCache.FuelTB) and (s:find("Fuel::", 1, true) or s:find("Fuel: ", 1, true)) then
-                                -- Avoid matching our own 3P telemetry FuelAvailTxt!
-                                local ownTB = LegendUI and Core.IsValidObj(LegendUI.FuelAvailTxt) and LegendUI.FuelAvailTxt.TextBlock or nil
-                                if not (Core.IsValidObj(ownTB) and tb:GetAddress() == ownTB:GetAddress()) then
+                            local tbAddr = tb:GetAddress()
+                            if tbAddr ~= ownUsingAddr and tbAddr ~= ownFuelAddr then
+                                local okT, tObj = pcall(function() return tb:GetText() end)
+                                local s = (okT and tObj and tObj.ToString) and tObj:ToString() or (type(tObj) == "string" and tObj or "")
+                                if not Core.IsValidObj(CockpitTextCache.UsingTB) and s:find("Using:", 1, true) and not s:find("--", 1, true) then
+                                    CockpitTextCache.UsingTB = tb
+                                elseif not Core.IsValidObj(CockpitTextCache.FuelTB) and (s:find("Fuel::", 1, true) or s:find("Fuel: ", 1, true)) and not s:find("--", 1, true) then
                                     CockpitTextCache.FuelTB = tb
                                 end
-                            end
-                            if Core.IsValidObj(CockpitTextCache.UsingTB) and Core.IsValidObj(CockpitTextCache.FuelTB) then
-                                break
+                                if Core.IsValidObj(CockpitTextCache.UsingTB) and Core.IsValidObj(CockpitTextCache.FuelTB) then
+                                    break
+                                end
                             end
                         end
                     end
