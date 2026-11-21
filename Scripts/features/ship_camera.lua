@@ -170,15 +170,21 @@ local function ApplyShipCameraState(pc)
     end
 end
 
+local ScrollPollGen = 0
+
 -- On-demand frame-synchronized scroll loop: runs ONLY while IsThirdPerson is active (learning.md §8)
 local function StartScrollPoll()
     if ScrollPollActive then return end
     ScrollPollActive = true
+    ScrollPollGen = ScrollPollGen + 1
+    local myGen = ScrollPollGen
     EnsureScrollKeyTables()
 
     local function Tick()
-        if not IsThirdPerson then
-            ScrollPollActive = false
+        if myGen ~= ScrollPollGen or not IsThirdPerson then
+            if myGen == ScrollPollGen then
+                ScrollPollActive = false
+            end
             return
         end
 
@@ -250,6 +256,7 @@ local function ResetCameraState()
     end
     IsThirdPerson = false
     ScrollPollActive = false
+    ScrollPollGen = ScrollPollGen + 1
     ActiveShipAddr = nil
     SavedOriginalCamera = {}
 end

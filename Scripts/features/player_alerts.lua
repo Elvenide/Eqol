@@ -24,6 +24,7 @@ end
 local KnownOnlinePlayers = {} -- playerKey -> { Name = string, IsOnline = bool }
 local InitializedSnapshot = false
 local PollActive = false
+local PollGen = 0
 local CachedAlertWidget = nil
 local LastAlertScanTime = -999.0
 local ALERT_SCAN_COOLDOWN = 8.0   -- Safety-net FindAllOf interval (>= 8s per learning.md §7)
@@ -156,12 +157,44 @@ end
 
 local function StartPoll()
     if PollActive then return end
+    if not Core.IsFeatureEnabled("PlayerAlerts") then return end
     PollActive = true
+    PollGen = PollGen + 1
+    local myGen = PollGen
     local function Tick()
+        if myGen ~= PollGen or not Core.IsFeatureEnabled("PlayerAlerts") then
+            if myGen == PollGen then
+                PollActive = false
+            end
+            return
+        end
         pcall(PollPlayerPresence)
         ExecuteInGameThreadWithDelay(PRESENCE_POLL_MS, Tick)
     end
     ExecuteInGameThreadWithDelay(PRESENCE_POLL_MS, Tick)
+end
+
+local function SyncBaselineSilently()
+    local pc = Core.GetLocalPlayerController()
+    if not Core.IsValidObj(pc) or not Core.IsValidObj(pc.PlayerObject) then return end
+    local players = StationData.GetAllPlayersInfo(pc, true)
+    if #players == 0 then return end
+    KnownOnlinePlayers = {}
+    for _, p in ipairs(players) do
+        KnownOnlinePlayers[p.Key] = { Name = p.Name, IsOnline = p.IsOnline }
+    end
+    InitializedSnapshot = true
+end
+
+function Feature.OnToggle(enabled)
+    if not enabled then
+        PollActive = false
+        PollGen = PollGen + 1
+    else
+        -- Re-snapshot silently so players who joined/left while disabled don't flood stale alerts
+        SyncBaselineSilently()
+        StartPoll()
+    end
 end
 
 Feature.WatchWidgets = {

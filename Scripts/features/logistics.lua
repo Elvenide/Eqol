@@ -1411,7 +1411,8 @@ local function EnsureHudKeybindIndicator(hud)
                         itemEntry.KeyText = iconW.WBP_InputKey.WBP_Text
                         itemEntry.KeyText:SetText(Core.MakeText(keyStr))
                     end
-                    iconW:SetVisibility(0)
+                    local featEnabled = (not def.FeatureName) or Core.IsFeatureEnabled(def.FeatureName)
+                    iconW:SetVisibility(featEnabled and 0 or 1)
                 end)
             end
 
@@ -1555,7 +1556,8 @@ function Feature.RegisterHooks()
                     for _, item in ipairs(entry.Items) do
                         if item.IconAddr == iconAddr then
                             pcall(function()
-                                iconW:SetVisibility(0)
+                                local featEnabled = (not item.FeatureName) or Core.IsFeatureEnabled(item.FeatureName)
+                                iconW:SetVisibility(featEnabled and 0 or 1)
                                 local kt = item.KeyText
                                 if not Core.IsValidObj(kt) and Core.IsValidObj(iconW.WBP_InputKey) then
                                     kt = iconW.WBP_InputKey.WBP_Text
@@ -1599,6 +1601,13 @@ function Feature.RegisterHooks()
             end
         end
     end
+end
+
+function Feature.OnToggle(enabled)
+    if not enabled and Core.IsValidObj(ActiveLogisticsWin) then
+        CloseLogisticsWindow()
+    end
+    UpdateAllHudKeyIndicators()
 end
 
 function Feature.OnMapLoad()

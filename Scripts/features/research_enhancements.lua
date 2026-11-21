@@ -499,6 +499,7 @@ EnsureResearchSearchBar = function(tree)
         Tree = tree,
         ResearchList = rList,
         SearchInput = searchInput,
+        SearchBox = searchSizeBox,
         HiddenByEqol = {},
         FilterDirty = true,
     }
@@ -510,6 +511,17 @@ EnsureResearchSearchBar = function(tree)
     return st
 end
 
+local function SetResearchSearchVisible(st, visible)
+    if not st then return end
+    local vis = visible and 0 or 1
+    if Core.IsValidObj(st.SearchBox) then
+        pcall(function() st.SearchBox:SetVisibility(vis) end)
+    end
+    if Core.IsValidObj(st.SearchInput) then
+        pcall(function() st.SearchInput:SetVisibility(vis) end)
+    end
+end
+
 local function EnsureAndFilterTree(tree, markFilterDirty)
     if not Core.IsValidObj(tree) then return end
     if not Core.IsFeatureEnabled("ResearchEnhancements") then
@@ -519,18 +531,17 @@ local function EnsureAndFilterTree(tree, markFilterDirty)
             existing.FilterDirty = false
             existing.LastAppliedQuery = nil
             ApplyResearchFilter(existing, "")
-            if Core.IsValidObj(existing.SearchInput) then
-                pcall(function() existing.SearchInput:SetVisibility(1) end)
-            end
+            SetResearchSearchVisible(existing, false)
         end
         return
     end
     local st = EnsureResearchSearchBar(tree)
     if st then
-        if Core.IsValidObj(st.SearchInput) then
-            pcall(function() st.SearchInput:SetVisibility(0) end)
-        end
+        SetResearchSearchVisible(st, true)
         if markFilterDirty then
+            -- Native SetFilter / RefreshList owns baseline visibility; clear stale HiddenByEqol
+            -- so clearing search later cannot un-hide techs hidden by a native filter tab.
+            st.HiddenByEqol = {}
             st.FilterDirty = true
         end
         ApplyResearchFilter(st)
@@ -1268,6 +1279,14 @@ function Feature.RegisterHooks()
     )
 end
 
+local function CancelActiveDrag()
+    if ActiveDrag and Core.IsValidObj(ActiveDrag.QueueBox) then
+        ResetQueueChildVisuals(ActiveDrag.QueueBox)
+    end
+    ActiveDrag = nil
+    DestroyDragGhost()
+end
+
 function Feature.OnToggle(enabled)
     PendingFilterToken = PendingFilterToken + 1
     if not enabled then
@@ -1277,18 +1296,15 @@ function Feature.OnToggle(enabled)
                 st.FilterDirty = false
                 st.LastAppliedQuery = nil
                 ApplyResearchFilter(st, "")
-                if Core.IsValidObj(st.SearchInput) then
-                    pcall(function() st.SearchInput:SetVisibility(1) end)
-                end
+                SetResearchSearchVisible(st, false)
             end
         end
-        ActiveDrag = nil
-        DestroyDragGhost()
+        CancelActiveDrag()
     else
         for _, st in pairs(InjectedTrees) do
             if st and Core.IsValidObj(st.SearchInput) then
                 InputToTree[st.SearchInput:GetAddress()] = st
-                pcall(function() st.SearchInput:SetVisibility(0) end)
+                SetResearchSearchVisible(st, true)
                 st.LastAppliedQuery = nil
                 ApplyResearchFilter(st)
             end
@@ -1298,8 +1314,7 @@ function Feature.OnToggle(enabled)
 end
 
 function Feature.OnClientRestart()
-    ActiveDrag = nil
-    DestroyDragGhost()
+    CancelActiveDrag()
     TechSearchTextCache = {}
     ObjectSearchTextCache = {}
     Feature.RegisterHooks()
@@ -1307,7 +1322,7 @@ function Feature.OnClientRestart()
 end
 
 function Feature.OnMapLoad()
-    ActiveDrag = nil
+    CancelActiveDrag()
     DestroyDragGhost()
     InjectedTrees = {}
     InputToTree = {}

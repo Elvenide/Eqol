@@ -1361,7 +1361,8 @@ local function GetPlayerObjectID(pc)
     pcall(function()
         if pc.PlayerObjectID ~= nil then
             pid = tonumber(pc.PlayerObjectID) or 0
-        elseif Core.IsValidObj(pc.PlayerObject) and pc.PlayerObject.ID ~= nil then
+        end
+        if pid == 0 and Core.IsValidObj(pc.PlayerObject) and pc.PlayerObject.ID ~= nil then
             pid = tonumber(pc.PlayerObject.ID) or 0
         end
     end)
@@ -5281,10 +5282,10 @@ local function OpenStationMap()
     -- Vertically stacked +/- zoom buttons overlaid in the top-right corner of the map rectangle
     local zoomVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
     local zoomInWrap = CreateLabeledButton(win, pc, outer, "+", 15, 32.0, 32.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ZoomMapByFactor(1.22)
+        ExecuteInGameThreadWithDelay(10, function() ZoomMapByFactor(1.22) end)
     end)
     local zoomOutWrap = CreateLabeledButton(win, pc, outer, "-", 15, 32.0, 32.0, COLORS.FloorNormal, COLORS.PlayerLocal, function()
-        ZoomMapByFactor(1.0 / 1.22)
+        ExecuteInGameThreadWithDelay(10, function() ZoomMapByFactor(1.0 / 1.22) end)
     end)
     if Core.IsValidObj(zoomVBox) then
         pcall(function() zoomVBox:SetVisibility(4) end)
@@ -5443,7 +5444,9 @@ local function OpenStationMap()
     end
 
     if Core.IsValidObj(win.WBP_WindowHeader) and Core.IsValidObj(win.WBP_WindowHeader.CloseButton) then
-        Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, CloseStationMap)
+        Core.RegisterWBPButtonClick(win.WBP_WindowHeader.CloseButton, function()
+            ExecuteInGameThreadWithDelay(10, CloseStationMap)
+        end)
     end
 
     MapUI = {
@@ -5652,6 +5655,12 @@ function Feature.RegisterHooks()
             end
         end
     )
+end
+
+function Feature.OnToggle(enabled)
+    if not enabled and IsMapOpen() then
+        CloseStationMap()
+    end
 end
 
 function Feature.OnClientRestart()

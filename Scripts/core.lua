@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.32"
+Core.VERSION = "0.1.33"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -272,6 +272,7 @@ function Core.ReadConfig(defaults)
 end
 
 local CachedLocalPC = nil
+local LastSettingsMenuSyncClock = {}
 
 function Core.GetLocalPlayerController()
     if Core.IsValidObj(CachedLocalPC) then
@@ -895,6 +896,7 @@ function Core.PruneAllCaches()
     end
     SuppressedCharacterInput = false
     SuppressedCharacterInputPC = nil
+    LastSettingsMenuSyncClock = {}
     for _, feature in ipairs(Features) do
         if type(feature.PruneCaches) == "function" then
             feature.PruneCaches(Core)
@@ -1238,8 +1240,6 @@ local function EnsureMenuKeybindRows(menu)
         pcall(cb, menu)
     end
 end
-
-local LastSettingsMenuSyncClock = {}
 
 local function ScheduleSettingsMenuSync(menu)
     if not Core.IsValidObj(menu) then return end

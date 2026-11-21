@@ -980,7 +980,8 @@ local MachineCacheVersion = 0
 function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, playerZ)
     local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
     local now = os.clock()
-    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 300.0 then
+    -- 30s TTL ensures remote multiplayer Station Designer structural edits appear promptly
+    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 30.0 then
         local cFloors = CachedFloorMap.floors
         local cXform = CachedFloorMap.xform
         -- Re-bin only fl.machines when InvalidateMachineCache() bumped MachineCacheVersion
@@ -1212,6 +1213,10 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     if Core.IsValidObj(station) and #floors > 0 then
         local stWallKey = tostring(station:GetAddress())
         local cachedWalls = CachedStationWallsByKey[stWallKey]
+        if cachedWalls and cachedWalls.time and (now - cachedWalls.time) >= 60.0 then
+            cachedWalls = nil
+            CachedStationWallsByKey[stWallKey] = nil
+        end
 
         if not cachedWalls then
             local machineIdSet = {}
@@ -1485,7 +1490,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 mergeWallList(extractedWalls)
             end
 
-            cachedWalls = { total = wallDiagTotal, scale = wallDiagScale, status = wallDiagStatus, walls = extractedWalls }
+            cachedWalls = { total = wallDiagTotal, scale = wallDiagScale, status = wallDiagStatus, walls = extractedWalls, time = now }
             CachedStationWallsByKey[stWallKey] = cachedWalls
         else
             wallDiagTotal = cachedWalls.total or 0
@@ -2492,8 +2497,9 @@ function StationData.GetUndergroundBeltPairInfo(machine, xform)
                 local bestDist = 80.0
                 StationData.ForEachArray(rawComps, function(_, elem)
                     local c = Core.UnwrapArrayElem(elem)
-                    if Core.IsValidObj(c) and c.K2_GetComponentLocation then
-                        local loc = c:K2_GetComponentLocation()
+                    if Core.IsValidObj(c) and c.K2_GetComponentToWorld then
+                        local xf = c:K2_GetComponentToWorld()
+                        local loc = xf and xf.Translation or nil
                         if loc and type(loc.X) == "number" then
                             local lox, loy, loz = StationData.WorldToStationLocal(xform, loc.X, loc.Y or 0, loc.Z or 0, nil, nil, nil)
                             local d = math.sqrt((lox - mx) ^ 2 + (loy - my) ^ 2)
@@ -2650,10 +2656,11 @@ function StationData.GetMachineItemPorts(machine, mwx, mwy, myaw, cellsX, cellsY
                     local rawComps = actor:K2_GetComponentsByClass(scCls)
                     StationData.ForEachArray(rawComps, function(_, elem)
                         local cmp = Core.UnwrapArrayElem(elem)
-                        if Core.IsValidObj(cmp) and cmp.K2_GetComponentLocation then
+                        if Core.IsValidObj(cmp) and cmp.K2_GetComponentToWorld then
                             local cn = cmp:GetFName():ToString()
                             if cn:match("^Port%d+$") or cn:find("MachinePort", 1, true) then
-                                local loc = cmp:K2_GetComponentLocation()
+                                local xf = cmp:K2_GetComponentToWorld()
+                                local loc = xf and xf.Translation or nil
                                 if loc and type(loc.X) == "number" then
                                     local lpx, lpy = StationData.WorldToStationLocal(xform, loc.X, loc.Y or 0, loc.Z or 0, nil, nil, nil)
                                     -- Transform into unrotated machine-local space to snap to exact side & adjacent conveyor cell
@@ -3268,7 +3275,7 @@ function StationData.GetAllPlayersInfo(localPC, forceRefresh)
                 name = isLocal and "You" or "Player"
             end
 
-            -- Resolve world position & actor
+            -- Resolve world position & actor (before final online check so live replicated actors count as online on MP clients)
             local actor = StationData.GetObjectActor(po)
             if not Core.IsValidObj(actor) and isLocal and Core.IsValidObj(pc) then
                 local okPawn, pawn = pcall(function() return pc.Pawn end)
@@ -3277,6 +3284,12 @@ function StationData.GetAllPlayersInfo(localPC, forceRefresh)
             if not Core.IsValidObj(actor) then
                 pcall(function() actor = po.Character or po.Pawn end)
             end
+            if not isOnline and Core.IsValidObj(actor) then
+                isOnline = true
+            end
+            local frame = nil
+            pcall(function() frame = po:GetFrame() end)
+
             local px, py, pz = 0, 0, 0
             local hasPos = false
             if Core.IsValidObj(actor) then
@@ -3295,20 +3308,24 @@ function StationData.GetAllPlayersInfo(localPC, forceRefresh)
                     end
                 end
             end
-            if not hasPos then
+            if not hasPos and Core.IsValidObj(frame) then
                 local okL, loc = pcall(function() return po.Location end)
                 if okL and loc ~= nil then
-                    -- po.Location is a simulation FFPVector (fixed-point Int64), not float FVector
+                    -- po.Location is a simulation FFPVector in frame-local meters; convert to world cm
+                    -- so WorldToStationLocal callers plot out-of-relevancy MP players accurately.
                     local fx, fy, fz = Core.GetFPVector(loc)
                     if type(fx) == "number" and type(fy) == "number" and type(fz) == "number" then
-                        px, py, pz = fx, fy, fz
-                        hasPos = true
+                        local okX, wx, wy, wz = pcall(function()
+                            local xf = StationData.GetStationFrameTransform(frame)
+                            return StationData.StationLocalToWorld(xf, fx * 100.0, fy * 100.0, fz * 100.0)
+                        end)
+                        if okX and type(wx) == "number" and type(wy) == "number" and type(wz) == "number" then
+                            px, py, pz = wx, wy, wz
+                            hasPos = true
+                        end
                     end
                 end
             end
-
-            local frame = nil
-            pcall(function() frame = po:GetFrame() end)
 
             local solarSystemID = nil
             pcall(function()

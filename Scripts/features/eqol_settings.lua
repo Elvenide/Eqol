@@ -250,18 +250,50 @@ local function SyncAllCheckboxes(menuState)
     end
 end
 
-local function BuildFeatureRow(menu, pc, outer, featEntry)
+local CachedWidgetClasses = nil
+
+local function GetCachedWidgetClasses()
+    if CachedWidgetClasses and Core.IsValidObj(CachedWidgetClasses.Overlay) and Core.IsValidObj(CachedWidgetClasses.WBPButton) then
+        return CachedWidgetClasses
+    end
+    CachedWidgetClasses = {
+        Overlay    = Core.FindOrLoadClass(PATHS.OverlayClass),
+        Border     = Core.FindOrLoadClass(PATHS.BorderClass),
+        HBox       = Core.FindOrLoadClass(PATHS.HorizontalBoxClass),
+        VBox       = Core.FindOrLoadClass(PATHS.VerticalBoxClass),
+        SizeBox    = Core.FindOrLoadClass(PATHS.SizeBoxClass),
+        ScrollBox  = Core.FindOrLoadClass(PATHS.ScrollBoxClass),
+        WBPButton  = Core.FindOrLoadClass(PATHS.WBPButtonClass),
+        WBPText    = Core.FindOrLoadClass(PATHS.WBPTextClass),
+        WBL        = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO),
+    }
+    return CachedWidgetClasses
+end
+
+local function CreateRawFast(cls, outer)
+    if not Core.IsValidObj(cls) or not Core.IsValidObj(outer) then return nil end
+    local ok, w = pcall(StaticConstructObject, cls, outer)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
+
+local function CreateUserFast(wbl, cls, worldContext, pc)
+    if not (Core.IsValidObj(wbl) and Core.IsValidObj(cls) and Core.IsValidObj(worldContext)) then return nil end
+    local ok, w = pcall(function() return wbl:Create(worldContext, cls, pc) end)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
+
+local function BuildFeatureRow(menu, pc, outer, featEntry, cls, menuState)
     -- Full-card clickable Overlay: full-bleed WBP_Button_C behind HitTestInvisible card content
-    local cardOverlay = Core.CreateRawWidget(PATHS.OverlayClass, outer)
-    local cardBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, menu, pc)
-    local rowBorder = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    local rowHBox = Core.CreateRawWidget(PATHS.HorizontalBoxClass, outer)
-    local chkSize = Core.CreateRawWidget(PATHS.SizeBoxClass, outer)
-    local chkBg = Core.CreateRawWidget(PATHS.BorderClass, outer)
-    local chkMark = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
-    local textCol = Core.CreateRawWidget(PATHS.VerticalBoxClass, outer)
-    local titleTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
-    local descTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
+    local cardOverlay = CreateRawFast(cls.Overlay, outer)
+    local cardBtn     = CreateUserFast(cls.WBL, cls.WBPButton, menu, pc)
+    local rowBorder   = CreateRawFast(cls.Border, outer)
+    local rowHBox     = CreateRawFast(cls.HBox, outer)
+    local chkSize     = CreateRawFast(cls.SizeBox, outer)
+    local chkBg       = CreateRawFast(cls.Border, outer)
+    local chkMark     = CreateUserFast(cls.WBL, cls.WBPText, menu, pc)
+    local textCol     = CreateRawFast(cls.VBox, outer)
+    local titleTxt    = CreateUserFast(cls.WBL, cls.WBPText, menu, pc)
+    local descTxt     = CreateUserFast(cls.WBL, cls.WBPText, menu, pc)
 
     if not (Core.IsValidObj(cardOverlay) and Core.IsValidObj(cardBtn) and Core.IsValidObj(rowBorder)
         and Core.IsValidObj(rowHBox) and Core.IsValidObj(chkSize) and Core.IsValidObj(chkBg)
@@ -271,12 +303,14 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
     end
 
     local rowState = {
-        Name       = featEntry.Name,
-        CardBtn    = cardBtn,
-        CheckBoxBg = chkBg,
-        CheckMark  = chkMark,
-        TitleTxt   = titleTxt,
-        DescTxt    = descTxt,
+        Name        = featEntry.Name,
+        DisplayName = featEntry.DisplayName or featEntry.Name,
+        Description = featEntry.Description or "",
+        CardBtn     = cardBtn,
+        CheckBoxBg  = chkBg,
+        CheckMark   = chkMark,
+        TitleTxt    = titleTxt,
+        DescTxt     = descTxt,
     }
 
     pcall(function()
@@ -331,7 +365,8 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
         end
     end)
 
-    local function ApplyTextDefaults()
+    local function ApplyRowTextDefaults()
+        if not Core.IsValidObj(cardBtn) then return end
         pcall(function()
             chkMark:SetVisibility(3)
             chkMark:SetSize(14)
@@ -339,12 +374,12 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
 
             titleTxt:SetVisibility(3)
             titleTxt:SetSize(13)
-            titleTxt:SetText(Core.MakeText(featEntry.DisplayName or featEntry.Name))
+            titleTxt:SetText(Core.MakeText(rowState.DisplayName))
             if Core.IsValidObj(titleTxt.TextBlock) then titleTxt.TextBlock:SetVisibility(3) end
 
             descTxt:SetVisibility(3)
             descTxt:SetSize(10)
-            descTxt:SetText(Core.MakeText(featEntry.Description or ""))
+            descTxt:SetText(Core.MakeText(rowState.Description))
             if Core.IsValidObj(descTxt.TextBlock) and descTxt.TextBlock.SetColorAndOpacity then
                 descTxt.TextBlock:SetVisibility(3)
                 descTxt.TextBlock:SetColorAndOpacity({ SpecifiedColor = COLORS.DescText, ColorUseRule = 0 })
@@ -352,11 +387,8 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
         end)
         ApplyCheckboxVisual(rowState)
     end
-
-    ApplyTextDefaults()
-    ExecuteInGameThreadAfterFrames(1, function()
-        if Core.IsValidObj(cardBtn) then ApplyTextDefaults() end
-    end)
+    rowState.ApplyTextDefaults = ApplyRowTextDefaults
+    ApplyRowTextDefaults()
 
     -- Never do heavy work synchronously inside WBP_Button_C click hook (learning.md §6)
     Core.RegisterWBPButtonClick(cardBtn, function()
@@ -366,6 +398,9 @@ local function BuildFeatureRow(menu, pc, outer, featEntry)
             ApplyCheckboxVisual(rowState)
         end)
     end)
+    if menuState and menuState.RegisteredButtons then
+        menuState.RegisteredButtons[#menuState.RegisteredButtons + 1] = cardBtn
+    end
 
     return cardOverlay, rowState
 end
@@ -379,9 +414,10 @@ local function PopulateEqolPageLazy(menuState)
     local pc = Core.IsValidObj(menu.PC) and menu.PC or Core.GetLocalPlayerController()
     local outer = Core.GetWidgetOuter(menu)
     local pageVBox = menuState.PageVBox
+    local cls = GetCachedWidgetClasses()
 
-    local headerTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
-    local subTxt = Core.CreateUserWidget(PATHS.WBPTextClass, menu, pc)
+    local headerTxt = CreateUserFast(cls.WBL, cls.WBPText, menu, pc)
+    local subTxt = CreateUserFast(cls.WBL, cls.WBPText, menu, pc)
     if Core.IsValidObj(headerTxt) then
         local hSlot = pageVBox:AddChildToVerticalBox(headerTxt)
         if Core.IsValidObj(hSlot) then
@@ -414,12 +450,11 @@ local function PopulateEqolPageLazy(menuState)
         end)
     end
     ApplyHeaderText()
-    ExecuteInGameThreadAfterFrames(1, ApplyHeaderText)
 
     local rows = {}
     menuState.Rows = rows
     for _, featEntry in ipairs(Core.GetToggleableFeatures()) do
-        local rowWidget, rowState = BuildFeatureRow(menu, pc, outer, featEntry)
+        local rowWidget, rowState = BuildFeatureRow(menu, pc, outer, featEntry, cls, menuState)
         if Core.IsValidObj(rowWidget) and rowState then
             local rSlot = pageVBox:AddChildToVerticalBox(rowWidget)
             if Core.IsValidObj(rSlot) then
@@ -428,6 +463,17 @@ local function PopulateEqolPageLazy(menuState)
             rows[#rows + 1] = rowState
         end
     end
+
+    -- Single batched next-frame style re-application (replaces 18+ per-row timers)
+    ExecuteInGameThreadAfterFrames(1, function()
+        if not Core.IsValidObj(menu) then return end
+        ApplyHeaderText()
+        for _, r in ipairs(rows) do
+            if r and r.ApplyTextDefaults then
+                r.ApplyTextDefaults()
+            end
+        end
+    end)
 end
 
 local function LogCleanTabMetaOnce(refTabBtn)
@@ -454,7 +500,8 @@ end
 
 local function HookSiblingTabButtons(menuState)
     if not menuState or not menuState.SiblingTabs then return end
-    local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
+    local cls = GetCachedWidgetClasses()
+    local btnCls = cls.WBPButton
     for _, sib in ipairs(menuState.SiblingTabs) do
         if Core.IsValidObj(sib) then
             local sibBtn = FindCleanTabClickButton(sib)
@@ -464,41 +511,9 @@ local function HookSiblingTabButtons(menuState)
                         SetEqolTabVisualActive(menuState, false)
                     end)
                 end)
-            end
-        end
-    end
-    -- Also hook WBP_SettingsMenu_C's native tab-select or WBP_CleanTab_C's OnClicked if present
-    if menuState.SiblingTabs[1] and Core.IsValidObj(menuState.SiblingTabs[1]) then
-        local clsPath = nil
-        pcall(function()
-            local full = menuState.SiblingTabs[1]:GetClass():GetFullName()
-            clsPath = full:match("^%S+ (.+)$")
-        end)
-        if clsPath then
-            for _, fnName in ipairs({ "SetSelected", "Select", "OnClicked", "BndEvt__WBP_CleanTab_Button_K2Node_ComponentBoundEvent_0_OnButtonClickedEvent__DelegateSignature" }) do
-                Core.TryRegisterHook(
-                    "EqolSettings_CleanTab_" .. fnName,
-                    clsPath .. ":" .. fnName,
-                    function(Context)
-                        local selfTab = Context:get()
-                        if not Core.IsValidObj(selfTab) then return end
-                        local selfAddr = selfTab:GetAddress()
-                        for _, st in pairs(InjectedMenus) do
-                            if st and Core.IsValidObj(st.TabWidget) and st.TabWidget:GetAddress() ~= selfAddr then
-                                if Core.IsValidObj(st.Switcher) and st.Switcher.GetActiveWidgetIndex then
-                                    ExecuteInGameThreadWithDelay(15, function()
-                                        if Core.IsValidObj(st.Switcher) then
-                                            local curIdx = tonumber(st.Switcher:GetActiveWidgetIndex())
-                                            if curIdx ~= st.EqolIndex then
-                                                SetEqolTabVisualActive(st, false)
-                                            end
-                                        end
-                                    end)
-                                end
-                            end
-                        end
-                    end
-                )
+                if menuState.RegisteredButtons then
+                    menuState.RegisteredButtons[#menuState.RegisteredButtons + 1] = sibBtn
+                end
             end
         end
     end
@@ -566,10 +581,9 @@ local function EnsureEqolSettingsTab(menu)
             if okCreate and Core.IsValidObj(nativeTab) then
                 isNativeCleanTab = true
                 tabWidget = nativeTab
-                pcall(function()
-                    nativeTab.WidgetSwitcher = switcher
-                    nativeTab.Index = eqolIdx
-                end)
+                -- Do NOT assign nativeTab.WidgetSwitcher / nativeTab.Index here: our WBP_Button click
+                -- callback populates the page BEFORE switching WidgetSwitcher, preventing a 1-frame empty flash
+                -- and redundant double-switch.
                 SetCleanTabLabel(nativeTab, "Eqol")
                 ApplyCleanTabState(nativeTab, false)
                 ExecuteInGameThreadAfterFrames(1, function()
@@ -714,19 +728,20 @@ local function EnsureEqolSettingsTab(menu)
     end
 
     local menuState = {
-        Menu             = menu,
-        Switcher         = switcher,
-        EqolIndex        = eqolIdx,
-        TabBtn           = tabBtn,
-        TabWidget        = tabWidget,
-        IsNativeCleanTab = isNativeCleanTab,
-        TabTxt           = tabTxt,
-        TabLine          = tabLine,
-        TabPage          = pageScroll,
-        PageVBox         = pageVBox,
-        SiblingTabs      = siblingTabs,
-        PagePopulated    = false,
-        Rows             = {},
+        Menu              = menu,
+        Switcher          = switcher,
+        EqolIndex         = eqolIdx,
+        TabBtn            = tabBtn,
+        TabWidget         = tabWidget,
+        IsNativeCleanTab  = isNativeCleanTab,
+        TabTxt            = tabTxt,
+        TabLine           = tabLine,
+        TabPage           = pageScroll,
+        PageVBox          = pageVBox,
+        SiblingTabs       = siblingTabs,
+        PagePopulated     = false,
+        Rows              = {},
+        RegisteredButtons = { tabBtn },
     }
     InjectedMenus[menuAddr] = menuState
     HookSiblingTabButtons(menuState)
@@ -760,6 +775,11 @@ end
 function Feature.PruneCaches()
     for addr, st in pairs(InjectedMenus) do
         if not st or not Core.IsValidObj(st.Menu) then
+            if st and st.RegisteredButtons then
+                for _, btn in ipairs(st.RegisteredButtons) do
+                    Core.UnregisterWBPButtonClick(btn)
+                end
+            end
             InjectedMenus[addr] = nil
         end
     end

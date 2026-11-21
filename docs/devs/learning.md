@@ -115,6 +115,8 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
   - Merge collinear wall segments before rendering, and draw as a 2-pass continuous shape (expanded border pass at `Z=5`, opaque fill pass at `Z=6`) so adjacent wall segments merge seamlessly without internal seams.
 - **Walk-Through Collision Patching** (used by `splitter_balancer_tweaks.lua`):
   - Setting `bColliderEnabled = false` on splitter/balancer simulation objects disables character collision while keeping `MachineBounds` / building placement intact.
+  - **Multiplayer Rule**: Because walk-through mutates local simulation collision envelopes and CDO `bColliderEnabled`, it MUST be automatically disabled in multiplayer sessions (detect via `UKismetSystemLibrary:IsStandalone(pc) == false`, `World:GetNetMode() ~= 0`, or `GameState.PlayerArray > 1`) to avoid client/server movement desync. Visual-only mesh scaling (2/3 height) remains safe in multiplayer.
+  - **Underground Belt Mesh Scaling (`BP_UndergroundBeltActor_C`)**: `S_Underground_Belt_02` has a live world-dependent `RelativeLocation.X/Y` representing the underground belt span. When scaling Z or restoring original height, always read live `RelativeLocation.X/Y` and only update `Z`—never overwrite `X/Y` with CDO/archetype `(0, 0)`.
 
 ---
 
@@ -187,6 +189,16 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
   - Use `RegisterKeyBind(Key.C, { ModifierKey.CONTROL }, ...)` for `Ctrl+C` (with `IsInputKeyDown("LeftControl"/"RightControl")` fallback).
 - **Widget Caching**:
   - Hide reusable `WBP_WindowBase_C` windows with `SetVisibility(1)` (`Collapsed`) instead of destroying them for ~3ms reopens.
+- **Settings Menu Tab Injection (`WBP_SettingsMenu_C` / `WBP_CleanTab_C`)**:
+  - `WBP_SettingsMenu_C` hosts its top tab bar in a `UGridPanel` (`GridPanel_207`) paired with a `UWidgetSwitcher`.
+  - Instantiating the same native `WBP_CleanTab_C` class as sibling tabs matches vanilla styling, but do **not** wire `nativeTab.WidgetSwitcher` / `nativeTab.Index` when using lazy page population—let the `WBP_Button` click handler populate the page first and then call `switcher:SetActiveWidget(pageScroll)` to avoid a 1-frame empty flash and double-trigger.
+- **Main Menu Cursor Preservation**:
+  - Never clear `pc.bShowMouseCursor` or set `GameOnly` input mode when `WBP_MainMenu_C` is visible (e.g., when closing a Settings or text-input focus state on the title screen).
+- **Research Tree Search (`WBP_ResearchTree_2_C`)**:
+  - Track only rows hidden by Eqol (`HiddenByEqol[addr] = origVis`) rather than snapshotting all rows, and clear `HiddenByEqol` whenever native `SetupWidget` / `SetFilter` / `RefreshList` runs so clearing search never un-hides techs hidden by a native filter tab.
+- **Multiplayer Hook & RPC Discipline**:
+  - Always guard `PlayerController` hooks (`ClientRestart`, `EnterBuildingMode`, `ConfirmBuild`, `Client_AddRemotePlayer`, `Client_RemovePlayer`, Designer hooks) with `pc:IsLocalPlayerController()` so remote clients on a listen-server host never trigger host-side UI/state resets.
+  - Never mutate simulation properties directly (e.g. `stopObj.DoorOpenProgress`); always use native `AddInputCommand` / `AddBuildCommand` / `AddDisassembleCommand` / `AddQueueResearchCommand` RPCs, and poll replicated state with timeouts rather than assuming fixed local-RTT delays.
 
 ---
 

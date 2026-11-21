@@ -90,6 +90,7 @@ local function GetOrCreateTagActor(pc, idx)
         comp:SetDrawAtDesiredSize(true)
         comp:SetPivot({ X = 0.5, Y = 1.0 })
         comp:SetTwoSided(true)
+        comp:SetCollisionEnabled(0) -- NoCollision: never intercept player interaction traces
         comp:SetBackgroundColor(COLORS.Bg)
         comp:SetWidget(nameTxt)
         comp:SetWorldScale3D({ X = TAG_SCALE, Y = TAG_SCALE, Z = TAG_SCALE })

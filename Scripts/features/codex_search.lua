@@ -215,6 +215,7 @@ EnsureCodexSearchBar = function(codexContent)
     local st = {
         CodexContent = codexContent,
         SearchInput = searchInput,
+        SearchBox = searchSizeBox,
         EntryList = entryList,
         TabQueries = {},
         LastTab = initTab,
@@ -244,13 +245,23 @@ Feature.WatchWidgets = {
 }
 
 function Feature.OnToggle(enabled)
+    local vis = enabled and 0 or 1
     for _, st in pairs(InjectedCodex) do
-        if st and Core.IsValidObj(st.SearchInput) then
-            pcall(function() st.SearchInput:SetVisibility(enabled and 0 or 1) end)
-            if not enabled then
-                ApplyCodexFilter(st, "")
-            else
-                ApplyCodexFilter(st)
+        if st then
+            if Core.IsValidObj(st.SearchBox) then
+                pcall(function() st.SearchBox:SetVisibility(vis) end)
+            end
+            if Core.IsValidObj(st.SearchInput) then
+                pcall(function() st.SearchInput:SetVisibility(vis) end)
+                if not enabled then
+                    local curTab = 0
+                    pcall(function() curTab = tonumber(st.CodexContent.SelectedTab) or 0 end)
+                    local savedQuery = st.TabQueries[curTab]
+                    ApplyCodexFilter(st, "")
+                    st.TabQueries[curTab] = savedQuery
+                else
+                    ApplyCodexFilter(st)
+                end
             end
         end
     end

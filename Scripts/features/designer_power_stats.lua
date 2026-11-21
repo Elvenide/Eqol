@@ -813,6 +813,7 @@ local function ComputeDesignerPower(designerHud, st)
         local shouldBaseline = (st.InitialLoadedGen == nil)
             or (st.ResetBaseline == true and pendingCount == 0)
             or (st.InitialLoadedCount == 0 and loadedCount > 0 and pendingCount == 0)
+            or (isStationFrame and pendingCount == 0 and st.InitialLoadedCount ~= nil and loadedCount ~= st.InitialLoadedCount)
         if shouldBaseline then
             st.InitialLoadedGen = previewLoadedGen
             st.InitialLoadedCons = previewLoadedCons

@@ -420,6 +420,9 @@ function Feature.RegisterHooks()
         "/Script/MainSequence.DMSPlayerController:EnterBuildingMode",
         function(Context)
             local pc = Context and Context:get() or nil
+            if not Core.IsValidObj(pc) then return end
+            local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
+            if not (okL and isLocal) then return end
             ExitBuildingModeIfInElevator(pc)
         end
     )
@@ -428,6 +431,9 @@ function Feature.RegisterHooks()
         "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C:OnEnterBuildMode",
         function(Context)
             local pc = Context and Context:get() or nil
+            if not Core.IsValidObj(pc) then return end
+            local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
+            if not (okL and isLocal) then return end
             ExitBuildingModeIfInElevator(pc)
         end
     )

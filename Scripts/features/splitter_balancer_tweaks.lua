@@ -110,6 +110,9 @@ local ProcessedEnvNums = {}
 local NeedsEnvClean = false
 local CachedAnchors = {}
 local RegisteredSlotProps = {}
+local RegisteredOffsetProps = {} -- persistent "clsPath:offset" -> { pMin, pMax, pCid }
+local RegisteredOffsetPropCount = 0
+local MAX_CUSTOM_SLOT_PROPS = 2048
 
 local function GetObjectClassPath(obj)
     if not Core.IsValidObj(obj) then return nil end
@@ -202,6 +205,24 @@ local function EnsureSlotProps(elemAddr, preferredEnv)
     end
 
     local baseOffset = elemAddr - anchor.addr
+    local offsetKey = anchor.clsPath .. ":" .. string.format("%X", baseOffset)
+    local cachedNames = RegisteredOffsetProps[offsetKey]
+    if cachedNames then
+        local slot = {
+            anchor = anchor,
+            baseOffset = baseOffset,
+            pMin = cachedNames.pMin,
+            pMax = cachedNames.pMax,
+            pCid = cachedNames.pCid,
+        }
+        RegisteredSlotProps[elemAddr] = slot
+        return slot
+    end
+
+    if RegisteredOffsetPropCount >= MAX_CUSTOM_SLOT_PROPS then
+        return nil, "custom property registration cap reached"
+    end
+
     local tag = string.format("%X_%X", anchor.addr, baseOffset)
     local pMin = "EqolMinX_" .. tag
     local pMax = "EqolMaxX_" .. tag
@@ -230,6 +251,9 @@ local function EnsureSlotProps(elemAddr, preferredEnv)
         return nil, string.format("reg err min=(%s,%s) max=(%s,%s) cid=(%s,%s)",
             tostring(ok1), tostring(e1), tostring(ok2), tostring(e2), tostring(ok3), tostring(e3))
     end
+
+    RegisteredOffsetProps[offsetKey] = { pMin = pMin, pMax = pMax, pCid = pCid }
+    RegisteredOffsetPropCount = RegisteredOffsetPropCount + 1
 
     local slot = {
         anchor = anchor,
@@ -355,7 +379,7 @@ end
 local function TrackSimEnv(simObj)
     local sAddr = simObj:GetAddress()
     if TrackedSimFrames[sAddr] then return end
-    TrackedSimFrames[sAddr] = true
+    TrackedSimFrames[sAddr] = simObj
 
     pcall(function()
         local id = simObj.ID

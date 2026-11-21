@@ -163,14 +163,28 @@ function Feature.RegisterHooks()
     if not BeltSpawnHookRegistered then
         BeltSpawnHookRegistered = true
         pcall(NotifyOnNewObject, "/Script/MainSequence.ConveyorBeltObject", function(obj)
+            if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
             if not Core.IsValidObj(obj) then return end
-            -- Marshal onto game thread and only clear local pulling state if the local player recently confirmed a build,
-            -- preventing remote players' belt builds in multiplayer from cancelling local conveyor pulling.
+            -- Marshal onto game thread and only clear local pulling state if the local player recently confirmed a build
+            -- AND the belt spawned on the local player's current frame (prevents remote MP builds from cancelling local pull).
             ExecuteInGameThread(function()
+                if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
                 local now = os.clock()
                 if (now - LastLocalConfirmClock) <= 0.35 then
-                    LastBeltSpawnClock = now
-                    ConveyorPullingActive = false
+                    local sameFrame = true
+                    pcall(function()
+                        local localPC = Core.GetLocalPlayerController()
+                        local localFrame = Core.IsValidObj(localPC) and Core.IsValidObj(localPC.PlayerObject)
+                            and localPC.PlayerObject.GetFrame and localPC.PlayerObject:GetFrame() or nil
+                        local objFrame = Core.IsValidObj(obj) and obj.GetFrame and obj:GetFrame() or nil
+                        if Core.IsValidObj(localFrame) and Core.IsValidObj(objFrame) then
+                            sameFrame = (localFrame:GetAddress() == objFrame:GetAddress())
+                        end
+                    end)
+                    if sameFrame then
+                        LastBeltSpawnClock = now
+                        ConveyorPullingActive = false
+                    end
                 end
             end)
         end)
@@ -179,11 +193,13 @@ function Feature.RegisterHooks()
         "ScrollRotate_ConfirmBuild",
         "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
         function(Context)
+            if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
             local pc = Context and Context:get() or nil
             if not IsLocalPC(pc) then return end
             local clickClock = os.clock()
             LastLocalConfirmClock = clickClock
             ExecuteInGameThreadWithDelay(80, function()
+                if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
                 -- If real ConveyorBeltObject(s) were spawned by this ConfirmBuild, the pulled segments
                 -- were committed and ConveyorBuilder is back in non-pulling mode.
                 if LastBeltSpawnClock >= clickClock - 0.05 then
@@ -206,6 +222,7 @@ function Feature.RegisterHooks()
         "ScrollRotate_ExitBuildMode",
         "/Script/MainSequence.DMSPlayerController:ExitBuildingMode",
         function(Context)
+            if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
             local pc = Context and Context:get() or nil
             if not IsLocalPC(pc) then return end
             ConveyorPullingActive = false
