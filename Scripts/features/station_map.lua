@@ -4812,6 +4812,7 @@ local function SetStationMapCursorMode(pc, win, active)
 end
 
 local function DestroyStationMap()
+    local wasVisible = MapWinVisible
     CanvasRenderGen = CanvasRenderGen + 1
     MachineRenderGen = MachineRenderGen + 1
     OnViewportChangedStatic = nil
@@ -4853,10 +4854,13 @@ local function DestroyStationMap()
     end
     ActiveMapWin = nil
     MapUI = nil
-    SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
+    if wasVisible then
+        SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
+    end
 end
 
 CloseStationMap = function()
+    local wasVisible = MapWinVisible
     MapWinVisible = false
     InteractionMode = "Select"
     PendingBuildable = nil
@@ -4868,7 +4872,9 @@ CloseStationMap = function()
     if Core.IsValidObj(ActiveMapWin) then
         pcall(function() ActiveMapWin:SetVisibility(1) end) -- Collapsed (keeps UMG tree cached for instant re-open)
     end
-    SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
+    if wasVisible then
+        SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
+    end
 end
 
 local function OpenStationMap()

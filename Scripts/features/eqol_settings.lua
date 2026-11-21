@@ -43,10 +43,10 @@ local function SafeIsA(obj, cls)
     return ok and res == true
 end
 
-local function FindTabBarInTree(rootPanel, panelCls, btnCls, depth, visited)
-    if not Core.IsValidObj(rootPanel) or depth > 4 then return nil, nil end
+local function FindTabBarInTree(rootPanel, panelCls, btnCls, userWidgetCls, switcherAddr, depth, visited)
+    if not Core.IsValidObj(rootPanel) or depth > 5 then return nil, nil end
     local addr = rootPanel:GetAddress()
-    if visited[addr] then return nil, nil end
+    if addr == switcherAddr or visited[addr] then return nil, nil end
     visited[addr] = true
 
     if SafeIsA(rootPanel, panelCls) and rootPanel.GetAllChildren then
@@ -55,12 +55,15 @@ local function FindTabBarInTree(rootPanel, panelCls, btnCls, depth, visited)
             local okLen, len = pcall(function() return ch.GetArrayNum and ch:GetArrayNum() or #ch end)
             if okLen and type(len) == "number" and len > 0 then
                 local btns = {}
+                local uws = {}
                 local childPanels = {}
                 for i = 1, len do
                     local cw = Core.UnwrapArrayElem(ch[i])
-                    if Core.IsValidObj(cw) then
+                    if Core.IsValidObj(cw) and cw:GetAddress() ~= switcherAddr then
                         if SafeIsA(cw, btnCls) then
                             btns[#btns + 1] = cw
+                        elseif SafeIsA(cw, userWidgetCls) then
+                            uws[#uws + 1] = cw
                         elseif SafeIsA(cw, panelCls) then
                             childPanels[#childPanels + 1] = cw
                         end
@@ -69,8 +72,16 @@ local function FindTabBarInTree(rootPanel, panelCls, btnCls, depth, visited)
                 if #btns >= 2 and #btns <= 8 then
                     return rootPanel, btns[#btns]
                 end
+                if #uws >= 2 and #uws <= 8 then
+                    -- Check if these UserWidgets are tab buttons (e.g., WBP_TabButton_C / WBP_Button_C)
+                    local cn = ""
+                    pcall(function() cn = uws[1]:GetClass():GetFName():ToString():lower() end)
+                    if cn:find("button", 1, true) or cn:find("tab", 1, true) then
+                        return rootPanel, uws[#uws]
+                    end
+                end
                 for _, cp in ipairs(childPanels) do
-                    local tb, rb = FindTabBarInTree(cp, panelCls, btnCls, depth + 1, visited)
+                    local tb, rb = FindTabBarInTree(cp, panelCls, btnCls, userWidgetCls, switcherAddr, depth + 1, visited)
                     if Core.IsValidObj(tb) then return tb, rb end
                 end
             end
@@ -87,6 +98,7 @@ local function FindSettingsSwitcherAndTabBar(menu)
     local switcherCls = Core.FindOrLoadClass(PATHS.WidgetSwitcherCls)
     local panelCls = Core.FindOrLoadClass(PATHS.PanelWidgetCls)
     local btnCls = Core.FindOrLoadClass(PATHS.WBPButtonClass)
+    local userWidgetCls = Core.FindOrLoadClass("/Script/UMG.UserWidget")
 
     local switcher = nil
     local topAncestor = menu.ControlSettings
@@ -106,15 +118,16 @@ local function FindSettingsSwitcherAndTabBar(menu)
 
     -- 2. Search from switcher's parent (and topAncestor) for the tab strip PanelWidget holding the tab buttons
     local tabBar, refTabBtn = nil, nil
+    local switcherAddr = Core.IsValidObj(switcher) and switcher:GetAddress() or nil
     local visited = {}
     if Core.IsValidObj(switcher) and switcher.GetParent then
         local okSP, sp = pcall(function() return switcher:GetParent() end)
         if okSP and Core.IsValidObj(sp) then
-            tabBar, refTabBtn = FindTabBarInTree(sp, panelCls, btnCls, 0, visited)
+            tabBar, refTabBtn = FindTabBarInTree(sp, panelCls, btnCls, userWidgetCls, switcherAddr, 0, visited)
         end
     end
     if not Core.IsValidObj(tabBar) and Core.IsValidObj(topAncestor) then
-        tabBar, refTabBtn = FindTabBarInTree(topAncestor, panelCls, btnCls, 0, visited)
+        tabBar, refTabBtn = FindTabBarInTree(topAncestor, panelCls, btnCls, userWidgetCls, switcherAddr, 0, visited)
     end
 
     if not DiagLogged then
@@ -123,6 +136,23 @@ local function FindSettingsSwitcherAndTabBar(menu)
         local tbName = Core.IsValidObj(tabBar) and tabBar:GetFName():ToString() or "nil"
         local rbName = Core.IsValidObj(refTabBtn) and refTabBtn:GetFName():ToString() or "nil"
         Core.Log(string.format("[EqolSettings] Discovered switcher=%s tabBar=%s refBtn=%s", swName, tbName, rbName))
+        if not Core.IsValidObj(tabBar) and Core.IsValidObj(switcher) and switcher.GetParent then
+            local parts = {}
+            pcall(function()
+                local sp = switcher:GetParent()
+                if Core.IsValidObj(sp) and sp.GetAllChildren then
+                    local ch = sp:GetAllChildren()
+                    local len = ch.GetArrayNum and ch:GetArrayNum() or #ch
+                    for i = 1, len do
+                        local cw = Core.UnwrapArrayElem(ch[i])
+                        if Core.IsValidObj(cw) then
+                            parts[#parts + 1] = cw:GetFName():ToString() .. ":" .. cw:GetClass():GetFName():ToString()
+                        end
+                    end
+                end
+            end)
+            Core.Log("[EqolSettings] Switcher parent children: " .. table.concat(parts, ", "))
+        end
     end
 
     return switcher, tabBar, refTabBtn

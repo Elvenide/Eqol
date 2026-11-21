@@ -441,6 +441,7 @@ local function CreateUserWidgetFast(classPath, worldContext, owningPC)
 end
 
 local function DestroyLogisticsWindow()
+    local wasVisible = ActiveLogisticsVisible
     ActiveLogisticsVisible = false
     if Core.IsValidObj(ActiveLogisticsWin) then
         if Core.IsValidObj(ActiveLogisticsWin.WBP_WindowHeader) and Core.IsValidObj(ActiveLogisticsWin.WBP_WindowHeader.CloseButton) then
@@ -450,7 +451,11 @@ local function DestroyLogisticsWindow()
     end
     ActiveLogisticsWin = nil
     ActiveLogisticsUI = nil
-    SetLogisticsCursorMode(Core.GetLocalPlayerController(), nil, false)
+    -- Only restore game-only cursor mode if Logistics actually owned the cursor;
+    -- never hide the cursor on MainMenu/OnMapLoad when Logistics was not open!
+    if wasVisible then
+        SetLogisticsCursorMode(Core.GetLocalPlayerController(), nil, false)
+    end
 end
 
 local function CloseLogisticsWindow()

@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.23"
+Core.VERSION = "0.1.24"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
