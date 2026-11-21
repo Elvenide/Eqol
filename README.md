@@ -26,5 +26,4 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 - **[Hotbar Craftable Count Badges](docs/hotbar-build-counts.md)** — Compact numeric badges on bottom hotbar slots showing how many of each machine you can build from your current inventory.
 - **[HUD Version & FPS Bar](docs/hud-version-bar.md)** — Enhances the bottom-right version label in-place with live FPS, Eqol version, and Main Sequence version.
 - **[Player Nametags](docs/player-nametags.md)** — Floating 3D world-space nametags above players with Online/Offline status indicators.
-- **[Player Markers on Maps](docs/player-map-markers.md)** — Exact player positions and nametags on the Solar System Map and Station Map.
 - **[Player Join & Leave Alerts](docs/player-alerts.md)** — Native HUD alerts when players (including the host) join or leave the game.

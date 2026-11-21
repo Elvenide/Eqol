@@ -289,9 +289,11 @@ Feature.WatchWidgets = {
     end,
 }
 
--- Triggers visual actor door-close animations only; never mutates simulation state (DoorOpenProgress)
--- directly, so multiplayer clients stay deterministically in sync with the server.
-local function CloseElevatorDoorsVisually(bottomElev)
+local DepartureToken = 0
+
+-- Closes elevator pod/shaft doors immediately so the elevator departs without waiting for the
+-- vanilla door-open timeout. Uses standard reflected DoorOpenProgress property + actor door calls.
+local function CloseElevatorDoorsImmediately(bottomElev, forceZero)
     if not Core.IsValidObj(bottomElev) then return false end
 
     local hadOpenDoor = false
@@ -320,6 +322,12 @@ local function CloseElevatorDoorsVisually(bottomElev)
             local curOpen = tonumber(stopObj.DoorOpenProgress) or 0
             if curOpen > 0 then
                 hadOpenDoor = true
+                local maxOpen = tonumber(stopObj.DoorOpenMaxProgress) or 0
+                if forceZero then
+                    pcall(function() stopObj.DoorOpenProgress = 0 end)
+                else
+                    pcall(function() stopObj.DoorOpenProgress = (maxOpen > 0) and maxOpen or 1 end)
+                end
                 pcall(function()
                     local sActors = stopObj.Actors
                     if sActors then
@@ -335,6 +343,39 @@ local function CloseElevatorDoorsVisually(bottomElev)
         end)
     end
     return hadOpenDoor
+end
+
+local function StartQuickDeparture(bottomElev, targetStackIdx)
+    DepartureToken = DepartureToken + 1
+    local myToken = DepartureToken
+    local pressedClock = os.clock()
+    local maxClock = pressedClock + 0.45
+    local forceZeroDone = false
+
+    CloseElevatorDoorsImmediately(bottomElev, false)
+
+    local function Step()
+        if myToken ~= DepartureToken then return end
+        if not Core.IsValidObj(bottomElev) then return end
+
+        local isMoving = false
+        pcall(function() isMoving = (bottomElev.bMoving == true) end)
+        if isMoving then return end
+
+        local now = os.clock()
+        if now > maxClock then return end
+
+        if (now - pressedClock) >= 0.05 and not forceZeroDone then
+            forceZeroDone = true
+            CloseElevatorDoorsImmediately(bottomElev, true)
+        else
+            CloseElevatorDoorsImmediately(bottomElev, false)
+        end
+
+        ExecuteInGameThreadWithDelay(25, Step)
+    end
+
+    ExecuteInGameThreadWithDelay(25, Step)
 end
 
 function Feature.RegisterHooks()
@@ -397,9 +438,9 @@ local function GoToElevatorFloor(floorNum)
     end
 
     if curFloor ~= stackIdx then
-        local hadOpenDoor = CloseElevatorDoorsVisually(bottomElev)
-        Core.Log(string.format("[ElevatorHotkeys] GoToFloor=%s stackIdx=%s curFloor=%s hadOpenDoor=%s",
-            tostring(floorNum), tostring(stackIdx), tostring(curFloor), tostring(hadOpenDoor)))
+        StartQuickDeparture(bottomElev, stackIdx)
+        Core.Log(string.format("[ElevatorHotkeys] GoToFloor=%s stackIdx=%s curFloor=%s",
+            tostring(floorNum), tostring(stackIdx), tostring(curFloor)))
     end
 
     LastExitBuildClock = os.clock()

@@ -208,6 +208,18 @@ local function ReadSearchQuery(st)
     return type(raw) == "string" and raw or ""
 end
 
+local function ClearSearchInput(st)
+    if not st or not Core.IsValidObj(st.SearchInput) then return end
+    st.PendingQuery = nil
+    pcall(function()
+        if Core.IsValidObj(st.SearchInput.EditableTextBox_80) then
+            st.SearchInput.EditableTextBox_80:SetText(Core.MakeText(""))
+        elseif st.SearchInput.SetText then
+            st.SearchInput:SetText(Core.MakeText(""))
+        end
+    end)
+end
+
 local function SetWideWidgetAlpha(st, wideW, targetAlpha)
     if not Core.IsValidObj(wideW) then return end
     st.LastWideAlpha = st.LastWideAlpha or {}
@@ -261,7 +273,10 @@ local function ApplyResearchFilter(st, overrideQuery)
         return
     end
 
-    local rawText = (type(overrideQuery) == "string") and overrideQuery or ReadSearchQuery(st)
+    local rawText = ""
+    if Core.IsFeatureEnabled("ResearchEnhancements") then
+        rawText = (type(overrideQuery) == "string") and overrideQuery or ReadSearchQuery(st)
+    end
     local trimmed = rawText:match("^%s*(.-)%s*$") or ""
     local queryLower = string.lower(trimmed)
 
@@ -486,8 +501,24 @@ end
 
 local function EnsureAndFilterTree(tree, markFilterDirty)
     if not Core.IsValidObj(tree) then return end
+    if not Core.IsFeatureEnabled("ResearchEnhancements") then
+        local existing = InjectedTrees[tree:GetAddress()]
+        if existing then
+            ClearSearchInput(existing)
+            existing.FilterDirty = false
+            existing.LastAppliedQuery = nil
+            ApplyResearchFilter(existing, "")
+            if Core.IsValidObj(existing.SearchInput) then
+                pcall(function() existing.SearchInput:SetVisibility(1) end)
+            end
+        end
+        return
+    end
     local st = EnsureResearchSearchBar(tree)
     if st then
+        if Core.IsValidObj(st.SearchInput) then
+            pcall(function() st.SearchInput:SetVisibility(0) end)
+        end
         if markFilterDirty then
             st.FilterDirty = true
         end
@@ -1089,13 +1120,14 @@ end
 local ScanningTrees = false
 
 local function ScanExistingTrees()
-    if ScanningTrees then return end
+    if ScanningTrees or not Core.IsFeatureEnabled("ResearchEnhancements") then return end
     ScanningTrees = true
     local okTrees, trees = pcall(FindAllOf, "WBP_ResearchTree_2_C")
     if okTrees and trees then
         for _, tree in ipairs(trees) do
             if Core.IsValidObj(tree) then
-                EnsureAndFilterTree(tree, true)
+                local alreadyInjected = InjectedTrees[tree:GetAddress()] ~= nil
+                EnsureAndFilterTree(tree, not alreadyInjected)
             end
         end
     end
@@ -1164,6 +1196,7 @@ function Feature.RegisterHooks()
         "ResearchEnhancements_OnTextChanged",
         PATHS.TextInputClass .. ":BndEvt__WBP_TextInput_EditableTextBox_80_K2Node_ComponentBoundEvent_0_OnEditableTextBoxChangedEvent__DelegateSignature",
         function(Context, textParam)
+            if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
             local inputWidget = Context:get()
             if not Core.IsValidObj(inputWidget) then return end
             local st = InputToTree[inputWidget:GetAddress()]
@@ -1214,15 +1247,30 @@ function Feature.RegisterHooks()
 end
 
 function Feature.OnToggle(enabled)
-    for _, st in pairs(InjectedTrees) do
-        if st and Core.IsValidObj(st.SearchInput) then
-            pcall(function() st.SearchInput:SetVisibility(enabled and 0 or 1) end)
-        end
-    end
+    PendingFilterToken = PendingFilterToken + 1
     if not enabled then
+        for _, st in pairs(InjectedTrees) do
+            if st then
+                ClearSearchInput(st)
+                st.FilterDirty = false
+                st.LastAppliedQuery = nil
+                ApplyResearchFilter(st, "")
+                if Core.IsValidObj(st.SearchInput) then
+                    pcall(function() st.SearchInput:SetVisibility(1) end)
+                end
+            end
+        end
         ActiveDrag = nil
         DestroyDragGhost()
     else
+        for _, st in pairs(InjectedTrees) do
+            if st and Core.IsValidObj(st.SearchInput) then
+                InputToTree[st.SearchInput:GetAddress()] = st
+                pcall(function() st.SearchInput:SetVisibility(0) end)
+                st.LastAppliedQuery = nil
+                ApplyResearchFilter(st)
+            end
+        end
         ScanExistingTrees()
     end
 end

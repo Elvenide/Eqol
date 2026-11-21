@@ -8,16 +8,14 @@ local Core = require("core")
 
 local Feature = {
     Name       = "SplitterBalancerTweaks",
-    Toggleable = false, -- Split into two independent toggles: Walkthrough & CompactHeight
+    Toggleable = false, -- Walk-through is always enabled; CompactHeight is registered as a toggleable option
 }
 
-local FEAT_WALK   = "SplitterBalancerWalkthrough"
 local FEAT_HEIGHT = "SplitterBalancerCompactHeight"
 
 local HEIGHT_SCALE     = 2.0 / 3.0
 local ECC_PAWN         = 2   -- ECollisionChannel::ECC_Pawn (WorldStatic=0, WorldDynamic=1, Pawn=2, Visibility=3)
 local ECR_IGNORE       = 0   -- ECollisionResponse::ECR_Ignore
-local ECR_BLOCK        = 2   -- ECollisionResponse::ECR_Block
 
 local WALKTHROUGH_ACTOR_CLASSES = {
     "BP_Splitter_C",
@@ -50,7 +48,6 @@ for _, clsName in ipairs(WALKTHROUGH_SIM_CLASSES) do
 end
 
 local OrigMeshState            = {} -- compAddr -> { ... }
-local SavedColliderBounds      = {} -- cid -> { env, dataAddr, anchorObj, pCid, pMin, pMax, origMin, origMax }
 local ProcessedHeightActors    = {} -- actorAddr -> true
 local ProcessedCollisionActors = {} -- actorAddr -> true
 local PatchedSimCDOs           = {} -- clsName -> true
@@ -399,18 +396,6 @@ local function CleanTrackedEnvs()
                                         readErr = readErr + 1
                                         if not firstErr then firstErr = "Colliders TArray reallocated mid-pass" end
                                     else
-                                        if not SavedColliderBounds[cid] then
-                                            SavedColliderBounds[cid] = {
-                                                env = env,
-                                                dataAddr = dataAddr,
-                                                anchorObj = anchorObj,
-                                                pCid = slot.pCid,
-                                                pMin = slot.pMin,
-                                                pMax = slot.pMax,
-                                                origMin = oldMin,
-                                                origMax = oldMax,
-                                            }
-                                        end
                                         local okWrite, errW = pcall(function()
                                             anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
                                             anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
@@ -644,7 +629,6 @@ local function ResetWorldCaches()
     DebouncedScanScheduled = false
     DebouncedScanGen = DebouncedScanGen + 1
     OrigMeshState = {}
-    SavedColliderBounds = {}
     ProcessedHeightActors = {}
     ProcessedCollisionActors = {}
     WalkthroughSimIDs = {}
@@ -659,7 +643,6 @@ local function ResetWorldCaches()
 end
 
 local function RunStaggeredScan()
-    if not Core.IsFeatureEnabled(FEAT_WALK) and not Core.IsFeatureEnabled(FEAT_HEIGHT) then return end
     if StaggeredScanActive then
         StaggeredScanPending = true
         return
@@ -695,23 +678,20 @@ local function RunStaggeredScan()
             local ok, list = pcall(FindAllOf, t.cls)
             if ok and list then
                 if t.kind == "walk_actor" then
-                    local doWalk = Core.IsFeatureEnabled(FEAT_WALK)
                     local doHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
                     for _, actor in ipairs(list) do
                         if Core.IsValidObj(actor) then
-                            if doWalk then EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts) end
+                            EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
                             if doHeight then EnsureTargetHeight(actor) end
                         end
                     end
                 elseif t.kind == "walk_sim" then
-                    if Core.IsFeatureEnabled(FEAT_WALK) then
-                        for _, s in ipairs(list) do
-                            if Core.IsValidObj(s) then
-                                local sAddr = s:GetAddress()
-                                if not simSeen[sAddr] then
-                                    simSeen[sAddr] = true
-                                    DisableSimCollider(s, disabledCounts)
-                                end
+                    for _, s in ipairs(list) do
+                        if Core.IsValidObj(s) then
+                            local sAddr = s:GetAddress()
+                            if not simSeen[sAddr] then
+                                simSeen[sAddr] = true
+                                DisableSimCollider(s, disabledCounts)
                             end
                         end
                     end
@@ -795,9 +775,6 @@ local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
     NewObjHookRegistered = true
     local function HandleNewMachineObj(obj)
-        local doWalk = Core.IsFeatureEnabled(FEAT_WALK)
-        local doHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
-        if not doWalk and not doHeight then return end
         if not Core.IsValidObj(obj) then return end
         local clsName = SafeClassName(obj)
         local low = clsName:lower()
@@ -811,19 +788,18 @@ local function RegisterMachineObjectHook()
         local myGen = ScanGeneration
         ExecuteInGameThreadWithDelay(150, function()
             if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
-            local wantWalk = isWalk and Core.IsFeatureEnabled(FEAT_WALK)
             local wantHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
-            if not wantWalk and not wantHeight then return end
-            if wantWalk then
+            if not isWalk and not wantHeight then return end
+            if isWalk then
                 EnsureSimCDODisabled(obj)
                 DisableSimCollider(obj, {})
                 pcall(CleanTrackedEnvs)
             end
-            if wantHeight or wantWalk then
-                if not ApplyDirectToMachineActors(obj, wantWalk) then
+            if wantHeight or isWalk then
+                if not ApplyDirectToMachineActors(obj, isWalk) then
                     ExecuteInGameThreadWithDelay(400, function()
                         if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
-                        if not ApplyDirectToMachineActors(obj, wantWalk) then
+                        if not ApplyDirectToMachineActors(obj, isWalk) then
                             ScheduleStaggeredScan(300)
                         end
                     end)
@@ -854,76 +830,7 @@ local function RestoreOriginalHeights()
     ProcessedHeightActors = {}
 end
 
-local function RestoreWalkthroughCollision()
-    ProcessedCollisionActors = {}
-    ProcessedEnvNums = {}
-
-    -- 1. Restore original MinX..MaxX bounds in CharacterCollisionEnvironment.Colliders
-    for cid, b in pairs(SavedColliderBounds) do
-        if b and Core.IsValidObj(b.env) and Core.IsValidObj(b.anchorObj) then
-            pcall(function()
-                local cols = b.env.Colliders
-                local curDataAddr = cols and cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
-                if curDataAddr == b.dataAddr and b.anchorObj[b.pCid] == cid then
-                    b.anchorObj[b.pMin] = b.origMin
-                    b.anchorObj[b.pMax] = b.origMax
-                end
-            end)
-        end
-    end
-
-    -- 2. Restore bColliderEnabled = true on splitter/balancer simulation objects
-    for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
-        local ok, list = pcall(FindAllOf, simCls)
-        if ok and list then
-            for _, s in ipairs(list) do
-                if Core.IsValidObj(s) then
-                    pcall(function()
-                        if s.bColliderEnabled == false then
-                            s.bColliderEnabled = true
-                        end
-                    end)
-                end
-            end
-        end
-    end
-
-    -- 3. Restore ECC_Pawn = ECR_BLOCK on 3D actors
-    for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
-        local ok, list = pcall(FindAllOf, clsShort)
-        if ok and list then
-            local primCls = CachedPrimCls or Core.FindOrLoadClass("/Script/Engine.PrimitiveComponent")
-            for _, actor in ipairs(list) do
-                if Core.IsValidObj(actor) and Core.IsValidObj(primCls) and actor.K2_GetComponentsByClass then
-                    local comps, n = ExtractArray(actor:K2_GetComponentsByClass(primCls))
-                    for i = 1, n do
-                        local c = comps[i]
-                        if Core.IsValidObj(c) and c.SetCollisionResponseToChannel then
-                            pcall(function() c:SetCollisionResponseToChannel(ECC_PAWN, ECR_BLOCK) end)
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
-
 function Feature.Init()
-    Core.RegisterToggleableOption({
-        Name        = FEAT_WALK,
-        DisplayName = "Splitter & Balancer Walk-Through",
-        Description = "Allows walking over splitters and belt balancers without collision.",
-        OnToggle    = function(enabled)
-            if enabled then
-                ProcessedCollisionActors = {}
-                ProcessedEnvNums = {}
-                NeedsEnvClean = true
-                ScheduleStaggeredScan(50)
-            else
-                RestoreWalkthroughCollision()
-            end
-        end,
-    })
     Core.RegisterToggleableOption({
         Name        = FEAT_HEIGHT,
         DisplayName = "Splitter, Balancer & Underground 2/3 Height",

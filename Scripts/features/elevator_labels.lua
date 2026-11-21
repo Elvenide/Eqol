@@ -845,12 +845,18 @@ local function StartPoll()
     if PollActive then return end
     PollActive = true
     local function Tick()
+        if not Core.IsFeatureEnabled("ElevatorLabels") then
+            DestroyIconPool()
+            PollActive = false
+            return
+        end
         local okTick, hasPorts = pcall(UpdateElevatorPortIcons)
         if not okTick then
             LogOnce("err:tick:" .. tostring(hasPorts), "Step[Tick] Unhandled error: %s", tostring(hasPorts))
         end
         local delayMs = (okTick and hasPorts) and 200 or 500
         if not Core.IsFeatureEnabled("ElevatorLabels") then
+            DestroyIconPool()
             PollActive = false
             return
         end
