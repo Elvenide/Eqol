@@ -33,12 +33,31 @@ local function ExtractMSVersion(str)
     return nil
 end
 
+local function IsVersionOverlayTextBlock(tb)
+    local isVis = false
+    pcall(function() isVis = (tb:IsVisible() == true) end)
+    if not isVis then return false end
+
+    -- Narrow match to the persistent HUD / Version / MainMenu overlay so unrelated semver UI labels
+    -- (save lists, server browser entries, patch notes) are never overwritten.
+    local okFull, fullName = pcall(function() return tb:GetFullName():lower() end)
+    if okFull and type(fullName) == "string" then
+        if fullName:find("save", 1, true) or fullName:find("server", 1, true)
+            or fullName:find("changelog", 1, true) or fullName:find("patch", 1, true)
+            or fullName:find("codex", 1, true) or fullName:find("chat", 1, true)
+        then
+            return false
+        end
+    end
+    return true
+end
+
 local function FindVersionTextBlock()
     local ok, list = pcall(FindAllOf, "TextBlock")
     if not ok or not list then return nil, nil end
     for i = #list, 1, -1 do
         local tb = list[i]
-        if Core.IsValidObj(tb) then
+        if Core.IsValidObj(tb) and IsVersionOverlayTextBlock(tb) then
             local okT, txtObj = pcall(function() return tb:GetText() end)
             if okT and txtObj ~= nil then
                 local okS, s = pcall(function() return txtObj:ToString() end)

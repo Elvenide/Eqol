@@ -228,14 +228,7 @@ end
 --------------------------------------------------------------------------------
 
 Feature.WatchWidgets = {
-    WBP_Codex_C = function(codex)
-        Feature.RegisterHooks()
-        ExecuteInGameThreadWithDelay(60, function()
-            if Core.IsValidObj(codex) and Core.IsValidObj(codex.WBP_CodexContent) then
-                SyncTabAndFilter(codex.WBP_CodexContent)
-            end
-        end)
-    end,
+    -- Watch only WBP_CodexContent_C (always constructed inside WBP_Codex_C) to avoid double-trigger on open
     WBP_CodexContent_C = function(codexContent)
         Feature.RegisterHooks()
         ExecuteInGameThreadWithDelay(60, function()

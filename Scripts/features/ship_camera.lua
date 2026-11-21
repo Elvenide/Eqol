@@ -91,7 +91,7 @@ local function RestoreShipCameraSnapshot(saved)
     if Core.IsValidObj(saved.SpringArm) then
         pcall(function() saved.SpringArm.TargetArmLength = saved.TargetArmLength end)
     elseif Core.IsValidObj(saved.Cam) then
-        pcall(function() saved.Cam:K2_SetRelativeLocation(saved.RelativeLocation, false, nil, false) end)
+        pcall(function() saved.Cam:K2_SetRelativeLocation(saved.RelativeLocation, false, {}, false) end)
     end
     if Core.IsValidObj(saved.ShipObj) then
         pcall(function()
@@ -119,7 +119,13 @@ local function GetPilotedShipActor(pc)
     end
     if not Core.IsValidObj(shipActor) then
         local okPawn, pawn = pcall(function() return pc.Pawn end)
-        if okPawn and Core.IsValidObj(pawn) then shipActor = pawn end
+        if okPawn and Core.IsValidObj(pawn) then
+            -- Verify fallback pc.Pawn is actually a ship actor before mutating its camera/spring-arm
+            local okCls, cn = pcall(function() return pawn:GetClass():GetFName():ToString():lower() end)
+            if okCls and type(cn) == "string" and cn:find("ship", 1, true) then
+                shipActor = pawn
+            end
+        end
     end
     return shipActor, shipObj
 end
@@ -145,10 +151,10 @@ local function ApplyShipCameraState(pc)
     if Core.IsValidObj(cam) and not Core.IsValidObj(springArm) then
         pcall(function()
             if IsThirdPerson then
-                cam:K2_SetRelativeLocation({ X = -ThirdPersonDist, Y = 0.0, Z = ThirdPersonDist * 0.28 }, false, nil, false)
+                cam:K2_SetRelativeLocation({ X = -ThirdPersonDist, Y = 0.0, Z = ThirdPersonDist * 0.28 }, false, {}, false)
             else
                 local orig = saved and saved.RelativeLocation or { X = 0.0, Y = 0.0, Z = 0.0 }
-                cam:K2_SetRelativeLocation(orig, false, nil, false)
+                cam:K2_SetRelativeLocation(orig, false, {}, false)
             end
         end)
     end

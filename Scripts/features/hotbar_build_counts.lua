@@ -28,7 +28,6 @@ local AttachedSlots = {}        -- slotAddr -> { SlotWidget, Badge, Label }
 local CostStacksByBuildable = {} -- buildableAddr -> { Buildable = UBuildable, Stacks = table|false }
 local CachedItemCls = nil
 local PollActive = false
-local DiagLogged = false
 
 local function GetItemKey(item)
     if not Core.IsValidObj(item) then return nil end
@@ -766,7 +765,6 @@ function Feature.OnMapLoad()
     -- because InitGameState + LoadMap can both fire OnMapLoad for the same live HUD.
     Feature.PruneCaches()
     CachedItemCls = nil
-    DiagLogged = false
 end
 
 return Feature

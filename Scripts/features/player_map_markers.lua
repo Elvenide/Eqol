@@ -15,7 +15,20 @@ local PATHS = {
     BorderClass      = "/Script/UMG.Border",
 }
 
-local MapOverlays = {} -- mapAddr -> { SolarMap, PanningCanvas, Outer, PC, Canvas, Pool }
+local MapOverlays = {} -- mapAddr -> { SolarMap, PanningCanvas, Outer, Canvas, Pool, IsSectorMap }
+local CachedUMGClasses = {}
+
+local function CreateRawFast(classPath, outer)
+    if not Core.IsValidObj(outer) then return nil end
+    local cls = CachedUMGClasses[classPath]
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(classPath)
+        if Core.IsValidObj(cls) then CachedUMGClasses[classPath] = cls end
+    end
+    if not Core.IsValidObj(cls) then return nil end
+    local ok, w = pcall(StaticConstructObject, cls, outer)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
 
 local function EnsureMapOverlay(solarMap)
     if not Core.IsValidObj(solarMap) then return nil end
@@ -25,14 +38,20 @@ local function EnsureMapOverlay(solarMap)
         return st
     end
 
+    -- Opportunistically prune stale overlays on insert
+    for k, old in pairs(MapOverlays) do
+        if not old or not Core.IsValidObj(old.SolarMap) or not Core.IsValidObj(old.Canvas) then
+            MapOverlays[k] = nil
+        end
+    end
+
     local panningCanvas = solarMap.WBP_PanningCanvas
     if not Core.IsValidObj(panningCanvas) then return nil end
     local overlay = panningCanvas.Overlay_0
     if not Core.IsValidObj(overlay) then return nil end
 
     local outer = Core.GetWidgetOuter(panningCanvas)
-    local pc = Core.GetLocalPlayerController()
-    local canvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
+    local canvas = CreateRawFast(PATHS.CanvasPanelClass, outer)
     if not Core.IsValidObj(canvas) then return nil end
 
     local slot = overlay:AddChildToOverlay(canvas)
@@ -47,7 +66,6 @@ local function EnsureMapOverlay(solarMap)
         SolarMap = solarMap,
         PanningCanvas = panningCanvas,
         Outer = outer,
-        PC = pc,
         Canvas = canvas,
         Pool = {},
         IsSectorMap = false,
@@ -125,8 +143,8 @@ local function RefreshWorldMapPlayers(solarMap, modeOverride)
             count = count + 1
             local entry = st.Pool[count]
             if not entry or not Core.IsValidObj(entry.Dot) then
-                local dot = Core.CreateRawWidget(PATHS.BorderClass, st.Outer)
-                local lbl = Core.CreateUserWidget(PATHS.WBPTextClass, solarMap, st.PC)
+                local dot = CreateRawFast(PATHS.BorderClass, st.Outer)
+                local lbl = Core.CreateUserWidget(PATHS.WBPTextClass, solarMap, pc)
                 if Core.IsValidObj(dot) and Core.IsValidObj(lbl) then
                     pcall(function() lbl:SetSize(11) end)
                     local dSlot = st.Canvas:AddChildToCanvas(dot)
@@ -197,6 +215,7 @@ end
 
 function Feature.PruneCaches()
     MapOverlays = {}
+    CachedUMGClasses = {}
 end
 
 return Feature

@@ -5,7 +5,30 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.19"
+Core.VERSION = "0.1.20"
+
+-- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
+Core.VIS = {
+    Visible              = 0, -- ESlateVisibility::Visible
+    Collapsed            = 1, -- ESlateVisibility::Collapsed (no layout space)
+    Hidden               = 2, -- ESlateVisibility::Hidden (reserves layout space)
+    HitTestInvisible     = 3, -- ESlateVisibility::HitTestInvisible (visible, passes clicks through)
+    SelfHitTestInvisible = 4, -- ESlateVisibility::SelfHitTestInvisible (children still clickable)
+}
+
+Core.ALIGN = {
+    Fill   = 0, -- HAlign_Fill / VAlign_Fill
+    Left   = 1, -- HAlign_Left
+    Top    = 1, -- VAlign_Top
+    Center = 2, -- HAlign_Center / VAlign_Center
+    Right  = 3, -- HAlign_Right
+    Bottom = 3, -- VAlign_Bottom
+}
+
+Core.SIZE_RULE = {
+    Auto = 0, -- ESlateSizeRule::Automatic
+    Fill = 1, -- ESlateSizeRule::Fill
+}
 
 Core.PATHS = {
     PlayerControllerClass = "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C",

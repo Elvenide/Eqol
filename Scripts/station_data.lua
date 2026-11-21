@@ -2483,7 +2483,7 @@ function StationData.GetUndergroundBeltPairInfo(machine, xform)
     local compDiag = {}
     if not info.pairX and Core.IsValidObj(actor) then
         pcall(function()
-            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            local smCls = GetClassCached("StaticMeshComponent", "/Script/Engine.StaticMeshComponent")
             if Core.IsValidObj(smCls) and actor.K2_GetComponentsByClass then
                 local rawComps = actor:K2_GetComponentsByClass(smCls)
                 local bestDist = 80.0

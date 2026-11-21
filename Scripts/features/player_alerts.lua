@@ -10,9 +10,14 @@ local Feature = {
 }
 
 local PATHS = {
-    PlayerAlertStatusClass    = "/Script/MainSequence.PlayerAlertStatus",
     WBPPlayerAlertStatusClass = "/Game/Blueprints/Widgets/HUDs/WBP_PlayerAlertStatus.WBP_PlayerAlertStatus_C",
 }
+
+local function SanitizeRichText(str)
+    if type(str) ~= "string" then return "" end
+    -- Strip angle brackets so remote player nicknames cannot inject WBP_RichText markup tags
+    return (str:gsub("[<>]", ""))
+end
 
 local KnownOnlinePlayers = {} -- playerKey -> { Name = string, IsOnline = bool }
 local InitializedSnapshot = false
@@ -65,7 +70,7 @@ local function PushBuiltInAlert(messageStr)
     if Core.IsValidObj(entryW) then
         pcall(function()
             if Core.IsValidObj(entryW.WBP_RichText) then
-                entryW.WBP_RichText:SetText(Core.MakeText(messageStr))
+                entryW.WBP_RichText:SetText(Core.MakeText(SanitizeRichText(messageStr)))
             end
             if targetWidget.Container.AddChildToVerticalBox then
                 targetWidget.Container:AddChildToVerticalBox(entryW)

@@ -4181,7 +4181,9 @@ local function HandleMapLeftClick(mx, my, isShift)
             return
         end
         local clsKey = select(1, GetMachineClassKey(nil, PendingBuildable))
+        NextGhostSeq = NextGhostSeq + 1
         table.insert(PendingGhosts, {
+            ghostId = "ghost:" .. tostring(NextGhostSeq),
             buildable = PendingBuildable,
             floorIdx = SelectedFloorIdx,
             x = sx, y = sy, z = floor.z,
@@ -5551,75 +5553,6 @@ end
 
 function Feature.RegisterHooks()
     Core.TryRegisterHook(
-        "DMSPlayerController_AddBuildMachineCommand_Diag",
-        "/Script/MainSequence.DMSPlayerController:AddBuildMachineCommand",
-        function(Context, CmdParam)
-            pcall(function()
-                local st = Core.UnwrapStruct(CmdParam) or (CmdParam and CmdParam.get and CmdParam:get()) or CmdParam
-                if st then
-                    local gx, gy = "?", "?"
-                    if st.GridLocation then
-                        gx, gy = tostring(st.GridLocation.X), tostring(st.GridLocation.Y)
-                    end
-                    local bName = Core.IsValidObj(st.Buildable) and st.Buildable:GetFName():ToString() or "nil"
-                    Core.Log(string.format("[StationMap] RecvBuildCmd: platId=%s grid=(%s,%s) h=%s rot=%s cfg=%s bld=%s",
-                        tostring(st.PlatformID), gx, gy, tostring(st.Height), tostring(st.Rotation), tostring(st.Config), bName))
-                end
-            end)
-        end
-    )
-
-    Core.TryRegisterHook(
-        "DMSPlayerController_AddBuildCommand_Diag",
-        "/Script/MainSequence.DMSPlayerController:AddBuildCommand",
-        function(Context, CmdParam)
-            pcall(function()
-                local st = CmdParam and CmdParam:get()
-                if st then
-                    local bName = Core.IsValidObj(st.Buildable) and st.Buildable:GetFName():ToString() or "nil"
-                    local lx, ly, lz = Core.GetFPVector(st.Location)
-                    local cx, cy, cz = Core.GetFPVector(st.ChunkLocation)
-                    local gx, gy, gh, gr = "?", "?", "?", "?"
-                    pcall(function()
-                        if st.GridTransform then
-                            if st.GridTransform.GridLocation then
-                                gx = tostring(st.GridTransform.GridLocation.X)
-                                gy = tostring(st.GridTransform.GridLocation.Y)
-                            end
-                            gh = tostring(st.GridTransform.Height)
-                            gr = tostring(st.GridTransform.GridRotation)
-                        end
-                    end)
-                    Core.Log(string.format("[StationMap] RecvAddBuildCommand: bld=%s attach=%s sys=%s chunk=(%.0f,%.0f,%.0f) loc=(%.2f,%.2f,%.2f) grid=(%s,%s) h=%s rot=%s cfg=%s",
-                        bName, tostring(st.AttachTargetID), tostring(st.SolarSystemID), cx, cy, cz, lx, ly, lz, gx, gy, gh, gr, tostring(st.Config)))
-                end
-            end)
-        end
-    )
-
-    Core.TryRegisterHook(
-        "DMSPlayerController_ConfirmBuild_Diag",
-        "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
-        function(Context)
-            Core.Log("[StationMap] RecvConfirmBuild fired!")
-        end
-    )
-
-    Core.TryRegisterHook(
-        "DMSPlayerController_SetBuildError_Diag",
-        "/Script/MainSequence.DMSPlayerController:SetBuildError",
-        function(Context, ErrParam)
-            pcall(function()
-                local eVal = Core.UnwrapArrayElem(ErrParam)
-                local eStr = (eVal and eVal.ToString and eVal:ToString()) or tostring(eVal)
-                if eStr and eStr ~= "" then
-                    Core.Log("[StationMap] BuildError: " .. eStr)
-                end
-            end)
-        end
-    )
-
-    Core.TryRegisterHook(
         "WindowBase_CloseWindow_StationMap",
         "/Game/Blueprints/Widgets/Basic/WBP_WindowBase.WBP_WindowBase_C:BndEvt__WBP_WindowBase_WBP_WindowHeader_K2Node_ComponentBoundEvent_1_CloseWindow__DelegateSignature",
         function(Context)
@@ -5629,56 +5562,6 @@ function Feature.RegisterHooks()
             end
         end
     )
-
-    Core.TryRegisterHook(
-        "Building_BuildableSelected_StationMap",
-        "/Game/Blueprints/Widgets/Menus/WBP_Building.WBP_Building_C:BuildableSelected",
-        function(Context, BuildableParam)
-            if not WaitingForBuildMenuSelection or not IsMapOpen() then
-                return
-            end
-            WaitingForBuildMenuSelection = false
-            local bld = Core.UnwrapArrayElem(BuildableParam)
-            if Core.IsValidObj(bld) then
-                PendingBuildable = bld
-                InteractionMode = "Place"
-                PendingRotationDeg = 0
-                local pc = Core.GetLocalPlayerController()
-                if Core.IsValidObj(pc) then
-                    pcall(function() pc:ExitBuildingMode() end)
-                    SetStationMapCursorMode(pc, ActiveMapWin, true)
-                end
-                UpdateStatusBanner()
-                RefreshDynamicOverlay()
-            end
-        end
-    )
-end
-
-local function ScheduleStationPrewarm()
-    local curWorld = GetCurrentWorldAddr()
-    if not curWorld or PrewarmScheduledForWorld == curWorld then return end
-    PrewarmScheduledForWorld = curWorld
-    ExecuteInGameThreadWithDelay(2500, function()
-        if GetCurrentWorldAddr() ~= curWorld or IsMapOpen() then return end
-        local pc = Core.GetLocalPlayerController()
-        if not Core.IsValidObj(pc) then return end
-        local inStation, walkFrame, station = StationData.IsPlayerInStation(pc)
-        if inStation and Core.IsValidObj(station) then
-            local t0 = os.clock()
-            local floors = StationData.BuildStationFloorMap(station, walkFrame, nil, nil, nil)
-            if floors and #floors > 0 then
-                if #CurrentFloors == 0 then CurrentFloors = floors end
-                local firstM = floors[1] and floors[1].machines and floors[1].machines[1] and floors[1].machines[1].machine
-                if Core.IsValidObj(firstM) then
-                    StationData.PrewarmBuildables(firstM)
-                end
-            end
-            InspectBuildMachineCommandLayout()
-            InspectAddBuildCommandLayout()
-            Core.Log(string.format("[StationMap] Prewarmed station caches in %.0fms", (os.clock() - t0) * 1000.0))
-        end
-    end)
 end
 
 function Feature.OnClientRestart()

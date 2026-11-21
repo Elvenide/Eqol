@@ -14,7 +14,6 @@ local HEIGHT_SCALE     = 2.0 / 3.0
 local ECC_PAWN         = 2   -- ECollisionChannel::ECC_Pawn (WorldStatic=0, WorldDynamic=1, Pawn=2, Visibility=3)
 local ECR_IGNORE       = 0   -- ECollisionResponse::ECR_Ignore
 local ECR_BLOCK        = 2   -- ECollisionResponse::ECR_Block
-local SCAN_PERIOD_IDLE = 8.0
 
 local WALKTHROUGH_ACTOR_CLASSES = {
     "BP_Splitter_C",
@@ -51,7 +50,6 @@ local ProcessedHeightActors    = {} -- actorAddr -> true
 local ProcessedCollisionActors = {} -- actorAddr -> true
 local PatchedSimCDOs           = {} -- clsName -> true
 local LoggedKeys               = {} -- key -> true
-local PollActive               = false
 local NewObjHookRegistered     = false
 
 local function SafeName(obj)
@@ -607,51 +605,6 @@ local function EnsureTargetHeight(actor)
             end)
         end
     end
-end
-
-local function ScanAndApplyTweaks()
-    local simSeen = {}
-    local disabledCounts = {}
-
-    for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
-        local ok, list = pcall(FindAllOf, clsShort)
-        if ok and list then
-            for _, actor in ipairs(list) do
-                if Core.IsValidObj(actor) then
-                    EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
-                    EnsureTargetHeight(actor)
-                end
-            end
-        end
-    end
-
-    for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
-        local ok, list = pcall(FindAllOf, simCls)
-        if ok and list then
-            for _, s in ipairs(list) do
-                if Core.IsValidObj(s) then
-                    local sAddr = s:GetAddress()
-                    if not simSeen[sAddr] then
-                        simSeen[sAddr] = true
-                        DisableSimCollider(s, disabledCounts)
-                    end
-                end
-            end
-        end
-    end
-
-    for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
-        local ok, list = pcall(FindAllOf, clsShort)
-        if ok and list then
-            for _, actor in ipairs(list) do
-                if Core.IsValidObj(actor) then
-                    EnsureTargetHeight(actor)
-                end
-            end
-        end
-    end
-
-    CleanTrackedEnvs()
 end
 
 local function ResetWorldCaches()
