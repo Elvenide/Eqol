@@ -505,6 +505,16 @@ local KEY_DISPLAY_MAP = {
 local function FormatKeyLabel(keyName, fallback)
     local raw = (type(keyName) == "string" and keyName ~= "") and keyName or fallback
     if not raw or raw == "None" then return nil end
+    if raw:find("+", 1, true) then
+        local parts = {}
+        for tok in raw:gmatch("[^+]+") do
+            local t = tok:match("^%s*(.-)%s*$")
+            if t ~= "" then
+                parts[#parts + 1] = KEY_DISPLAY_MAP[t] or string.upper(t)
+            end
+        end
+        return table.concat(parts, "+")
+    end
     return KEY_DISPLAY_MAP[raw] or string.upper(raw)
 end
 

@@ -190,8 +190,9 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
 - **In-Place HUD Version Text**:
   - The bottom-right version string (e.g. `0.1.0.109s`) is a standard `UTextBlock` discoverable via `FindAllOf("TextBlock")` matching `^[vV]?%d+%.%d+%.%d+`.
   - Editing it in-place with `tb:SetText(...)` and `tb.Slot:SetAutoSize(true)` preserves the exact vanilla font, size, color, and styling.
-- **Modifier Keybinds**:
+- **Modifier Keybinds & `UInputKeySelector` Re-Entrancy Crash**:
   - Use `RegisterKeyBind(Key.C, { ModifierKey.CONTROL }, ...)` for `Ctrl+C` (with `IsInputKeyDown("LeftControl"/"RightControl")` fallback).
+  - For configurable keybinds in `WBP_InputRemap_C`, **NEVER call `InputKeySelector:SetSelectedKey(...)` synchronously inside `OnKeySelected`** (especially if modifying `bShift`/`bCtrl`/`bAlt`/`bCmd`—when the new chord differs from `SelectedKey`, `SetSelectedKey` re-broadcasts `OnKeySelected` mid-Slate key event and crashes the game). Defer `ApplyKeybindState` with `ExecuteInGameThreadWithDelay(10, ...)`, preserve all `FInputChord` modifier flags (`Ctrl+Alt+Shift+Cmd+Key`), and guard `SetSelectedKey` with a per-row re-entrancy flag.
 - **Widget Caching**:
   - Hide reusable `WBP_WindowBase_C` windows with `SetVisibility(1)` (`Collapsed`) instead of destroying them for ~3ms reopens.
 - **Settings Menu Tab Injection (`WBP_SettingsMenu_C` / `WBP_CleanTab_C`)**:
