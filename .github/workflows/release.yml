@@ -57,12 +57,8 @@ jobs:
           STAGE="dist/Mods/Eqol"
           mkdir -p "${STAGE}"
           cp -r Scripts "${STAGE}/Scripts"
-          cp README.md "${STAGE}/README.md"
-          cp LICENSE "${STAGE}/LICENSE"
-          if [ -d docs ]; then
-            mkdir -p "${STAGE}/docs"
-            cp docs/*.md "${STAGE}/docs/" || true
-          fi
+          cp README.md "${STAGE}/README.txt"
+          cp LICENSE "${STAGE}/LICENSE.txt"
           touch "${STAGE}/enabled.txt"
           cat > "${STAGE}/mscore.mod" <<EOF
           name=Eqol
