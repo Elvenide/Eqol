@@ -99,7 +99,7 @@ end
 
 local CanvasRenderGen = 0
 local MachineRenderGen = 0
-local RenderedMachineWidgets = {} -- mAddr -> { widgets = {}, portKeys = {} }
+local RenderedMachineWidgets = {} -- mAddr -> { widgets = {}, portWidgets = {}, cancelled = false }
 local PlayerMarkerWidgets = {}
 local SyncFloorMachinesIncremental = nil
 local RevalidatePendingChanges = nil
@@ -3452,7 +3452,7 @@ RefreshStationMapCanvas = function(machinesOnly)
     local undergroundPairKeyByAddr = {} -- mAddr -> { pKey1, ... }
     local portBadgeBasePx = math.max(14.0, BASE_CELL_PX * 0.58)
     local portHalfCm = 32.0
-    local portsByKey = {}
+    local nextPortId = 0
 
     -- Stream deferred minor grid lines and viewport-visible walls on static MapCanvas independently of machine refreshes
     if not machinesOnly then
@@ -3538,18 +3538,13 @@ RefreshStationMapCanvas = function(machinesOnly)
         local function removeRenderedMachine(mAddr)
             local track = RenderedMachineWidgets[mAddr]
             if track then
+                track.cancelled = true
                 for _, w in ipairs(track.widgets) do
                     if Core.IsValidObj(w) then pcall(function() w:RemoveFromParent() end) end
                 end
-                for _, pk in ipairs(track.portKeys) do
-                    local pe = portsByKey[pk]
-                    if pe and pe.ownerAddr == mAddr then
-                        if pe.portWidgets then
-                            for _, pw in ipairs(pe.portWidgets) do
-                                if Core.IsValidObj(pw) then pcall(function() pw:RemoveFromParent() end) end
-                            end
-                        end
-                        portsByKey[pk] = nil
+                if track.portWidgets then
+                    for _, pw in ipairs(track.portWidgets) do
+                        if Core.IsValidObj(pw) then pcall(function() pw:RemoveFromParent() end) end
                     end
                 end
                 RenderedMachineWidgets[mAddr] = nil
@@ -3585,10 +3580,12 @@ RefreshStationMapCanvas = function(machinesOnly)
             local m = me.machine
             if not (Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m)) then return end
             local mAddr = m:GetAddress()
+            if not presentAddrs[mAddr] then return end
             if RenderedMachineWidgets[mAddr] then return end
             local mWidgets = {}
-            local mPortKeys = {}
-            RenderedMachineWidgets[mAddr] = { widgets = mWidgets, portKeys = mPortKeys }
+            local mPortWidgets = {}
+            local mTrack = { widgets = mWidgets, portWidgets = mPortWidgets, cancelled = false }
+            RenderedMachineWidgets[mAddr] = mTrack
 
             local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
             local mx, my = WorldToBaseCanvas(mwx, mwy)
@@ -3783,14 +3780,15 @@ RefreshStationMapCanvas = function(machinesOnly)
                 or clsLow:find("merger", 1, true) or clsLow:find("underground", 1, true)
             if not isTransportOnly then
                 local ports = StationData.GetMachineItemPorts(m, mwx, mwy, myaw, cellsX, cellsY, CurrentFrameXform)
+                local seenMachinePorts = {}
                 for _, p in ipairs(ports) do
                     local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
-                    local existing = portsByKey[cellKey]
+                    local existing = seenMachinePorts[cellKey]
                     if not existing then
                         local pmx, pmy = WorldToBaseCanvas(p.px, p.py)
-                        local pWidgets = {}
+                        nextPortId = nextPortId + 1
                         existing = {
-                            idx = #RenderedPorts + 1,
+                            idx = nextPortId,
                             x = p.px,
                             y = p.py,
                             halfW = portHalfCm,
@@ -3799,12 +3797,10 @@ RefreshStationMapCanvas = function(machinesOnly)
                             isOutput = p.isOutput == true,
                             machineName = recEntry.displayName,
                             ownerAddr = mAddr,
-                            portWidgets = pWidgets,
                         }
-                        portsByKey[cellKey] = existing
-                        table.insert(mPortKeys, cellKey)
+                        seenMachinePorts[cellKey] = existing
                         table.insert(RenderedPorts, existing)
-                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy, outWidgets = pWidgets })
+                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy, outWidgets = mPortWidgets, track = mTrack })
                     else
                         if p.isInput then existing.isInput = true end
                         if p.isOutput then existing.isOutput = true end
@@ -3828,9 +3824,11 @@ RefreshStationMapCanvas = function(machinesOnly)
             local pCount = 0
             while pIdx <= #deferredPorts and (pCount < 4 or os.clock() < budgetEnd) and pCount < 16 do
                 local dp = deferredPorts[pIdx]
-                RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22, dp.outWidgets)
                 pIdx = pIdx + 1
-                pCount = pCount + 1
+                if dp and dp.track and not dp.track.cancelled then
+                    RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22, dp.outWidgets)
+                    pCount = pCount + 1
+                end
             end
             if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts then
                 ExecuteInGameThreadAfterFrames(2, pumpMachineBatch)
@@ -3909,7 +3907,12 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
-            if removedCount > 0 then RefreshSelectionLayer() end
+            if removedCount > 0 then
+                LastHoveredPortIdx = nil
+                LastHoveredMachineAddr = nil
+                RefreshSelectionLayer()
+                RefreshDynamicOverlay()
+            end
             if addedCount > 0 and OnViewportChangedMachines then OnViewportChangedMachines() end
             if (removedCount > 0 or addedCount > 0) and RevalidatePendingChanges then
                 RevalidatePendingChanges(false)
