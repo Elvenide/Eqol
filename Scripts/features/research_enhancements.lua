@@ -617,7 +617,7 @@ local function GetViewportMousePos(pc)
     return nil, nil
 end
 
-local function MeasureQueueGridLayout(queueBox, count)
+local function MeasureQueueGridLayout(tree, queueBox, count)
     local stepX, stepY = 64.0, 64.0
     local cols = math.max(1, count or 1)
     if not Core.IsValidObj(queueBox) or (count or 0) < 1 then
@@ -625,7 +625,6 @@ local function MeasureQueueGridLayout(queueBox, count)
     end
 
     local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
-    local queueW = 0.0
     local innerSlotPadX, innerSlotPadY = 4.0, 4.0
 
     pcall(function()
@@ -660,6 +659,9 @@ local function MeasureQueueGridLayout(queueBox, count)
         end
     end)
 
+    local detectSrc = "fallback_count"
+    local boxW = 0.0
+
     -- 1. Try measuring actual row wrap from child 0 vs subsequent children via LocalToAbsolute
     local detectedCols = nil
     if count > 1 and Core.IsValidObj(slateLib) and slateLib.LocalToAbsolute then
@@ -684,7 +686,6 @@ local function MeasureQueueGridLayout(queueBox, count)
                         end
                         if (yi - y0) > (stepY * 0.45) then
                             detectedCols = i
-                            -- Also refine stepY if we got real absolute row spacing (converting via ratio if scaled)
                             if dx1 and dx1 > 20.0 then
                                 local scale = dx1 / stepX
                                 if scale > 0.25 and scale < 4.0 then
@@ -699,28 +700,74 @@ local function MeasureQueueGridLayout(queueBox, count)
         end)
     end
 
-    -- 2. Fallback: compute cols from UWrapBox local width or ExplicitWrapSize
     if detectedCols and detectedCols >= 1 then
         cols = detectedCols
+        detectSrc = "LocalToAbsolute"
     else
-        pcall(function()
-            if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and queueBox.GetCachedGeometry then
-                local qsz = slateLib:GetLocalSize(queueBox:GetCachedGeometry())
-                if qsz and tonumber(qsz.X) and tonumber(qsz.X) >= stepX then
-                    queueW = tonumber(qsz.X)
+        -- 2. Walk queueBox and up to 4 ancestors (plus WBP_ResearchList) to find the sidebar container width
+        local function readWidgetWidth(wgt)
+            if not Core.IsValidObj(wgt) then return 0.0 end
+            local w = 0.0
+            pcall(function()
+                if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and wgt.GetCachedGeometry then
+                    local sz = slateLib:GetLocalSize(wgt:GetCachedGeometry())
+                    if sz and tonumber(sz.X) and tonumber(sz.X) > w then
+                        w = tonumber(sz.X)
+                    end
                 end
+                if w < stepX and wgt.bExplicitWrapSize == true and tonumber(wgt.ExplicitWrapSize) then
+                    w = tonumber(wgt.ExplicitWrapSize)
+                end
+                if w < stepX and tonumber(wgt.WrapSize) and tonumber(wgt.WrapSize) >= stepX then
+                    w = tonumber(wgt.WrapSize)
+                end
+                if w < stepX and wgt.GetDesiredSize then
+                    local dsz = wgt:GetDesiredSize()
+                    if dsz and tonumber(dsz.X) and tonumber(dsz.X) > w then
+                        w = tonumber(dsz.X)
+                    end
+                end
+            end)
+            return w
+        end
+
+        local cur = queueBox
+        for depth = 0, 4 do
+            if not Core.IsValidObj(cur) then break end
+            local w = readWidgetWidth(cur)
+            -- Ignore full-screen root panels (> 900px) and tiny unmeasured panels (< stepX)
+            if w >= stepX and w <= 900.0 then
+                boxW = w
+                detectSrc = "ancestor_" .. depth
+                break
             end
-            if queueW < stepX and queueBox.bExplicitWrapSize == true and tonumber(queueBox.ExplicitWrapSize) then
-                queueW = tonumber(queueBox.ExplicitWrapSize)
-            end
-        end)
-        if queueW >= stepX then
-            cols = math.max(1, math.floor((queueW + innerSlotPadX + 1.0) / stepX))
+            local okP, par = pcall(function() return cur:GetParent() end)
+            cur = (okP and Core.IsValidObj(par)) and par or nil
+        end
+
+        if boxW < stepX and Core.IsValidObj(tree) then
+            pcall(function()
+                if Core.IsValidObj(tree.WBP_ResearchList) then
+                    local w = readWidgetWidth(tree.WBP_ResearchList)
+                    if w >= stepX and w <= 900.0 then
+                        boxW = w
+                        detectSrc = "ResearchList"
+                    end
+                end
+            end)
+        end
+
+        if boxW >= stepX then
+            cols = math.max(1, math.floor((boxW + innerSlotPadX + 2.0) / stepX))
         else
-            cols = count
+            -- Vanilla WBP_ResearchTree_2_C ResearchQueueContainer is 4 columns wide
+            cols = math.min(count, 4)
+            detectSrc = "default_4"
         end
     end
 
+    Core.Log(string.format("[ResearchEnhancements] Drag layout: count=%d cols=%d stepX=%.1f stepY=%.1f boxW=%.1f src=%s",
+        count, cols, stepX, stepY, boxW, detectSrc))
     return cols, stepX, stepY
 end
 
@@ -1083,7 +1130,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
 
     DestroyDragGhost()
     local startX, startY = GetViewportMousePos(pc)
-    local gridCols, slotStepX, slotStepY = MeasureQueueGridLayout(queueBox, count)
+    local gridCols, slotStepX, slotStepY = MeasureQueueGridLayout(tree, queueBox, count)
     local snapshotTechs = CollectQueuedTechs(tree, queueBox)
 
     local dragState = {
