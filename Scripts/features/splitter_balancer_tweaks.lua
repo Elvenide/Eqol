@@ -1,7 +1,7 @@
 -- Eqol Feature: Splitter & Belt Balancer Walk-Through + Compact 2/3 Height (+ Underground Belts)
--- 1. Sets bColliderEnabled = false on splitter and belt balancer simulation objects (matching
---    BP_ConveyorBeltObject_C / BP_UndergroundBeltObject_C) and ignores ECC_Pawn on their actors,
---    leaving MachineBounds / building placement intact.
+-- 1. Neutralizes transient runtime FCharacterCollider entries in UCollisionEnv.Colliders and ignores
+--    ECC_Pawn on splitter/belt balancer actors (NEVER mutating CDO/UMachineObject bColliderEnabled so
+--    saves remain 100% vanilla and save-safe), leaving MachineBounds / building placement intact.
 -- 2. Scales splitter, belt balancer, and underground belt meshes to 2/3 height (~0.67x Z), anchored at floor Z.
 
 local Core = require("core")
@@ -51,7 +51,6 @@ end
 local OrigMeshState            = {} -- compAddr -> { ... }
 local ProcessedHeightActors    = {} -- actorAddr -> true
 local ProcessedCollisionActors = {} -- actorAddr -> true
-local PatchedSimCDOs           = {} -- clsName -> true
 local LoggedKeys               = {} -- key -> true
 local NewObjHookRegistered     = false
 
@@ -266,26 +265,6 @@ local function EnsureSlotProps(elemAddr, preferredEnv)
     return slot
 end
 
-local function GetCDOFromUClass(uclass)
-    if not Core.IsValidObj(uclass) then return nil end
-    if uclass.GetDefaultObject then
-        local okDef, defObj = pcall(function() return uclass:GetDefaultObject() end)
-        if okDef and Core.IsValidObj(defObj) then
-            return defObj
-        end
-    end
-
-    local ok, full = pcall(function() return uclass:GetFullName() end)
-    if not ok or type(full) ~= "string" then return nil end
-    local objPath = full:match("^%S+ (.+)$") or full
-    local pkg, clsName = objPath:match("^(.-)%.([^.]+)$")
-    if not pkg or not clsName then return nil end
-    if string.sub(clsName, 1, 9) == "Default__" then
-        return Core.GetCDO(objPath)
-    end
-    return Core.GetCDO(pkg .. ".Default__" .. clsName)
-end
-
 local LastWorldAddr = nil
 local LoggedMultiplayerDisable = false
 
@@ -299,7 +278,7 @@ local function GetCurrentWorldAddr()
     return nil
 end
 
--- Walk-through mutates local simulation collision envelopes / CDO bColliderEnabled.
+-- Walk-through modifies transient local runtime collision envelopes.
 -- Automatically disable walk-through in multiplayer (both listen-server host and remote clients)
 -- to prevent client/server movement desync; visual 2/3 height scaling remains active.
 local function IsMultiplayerSession()
@@ -348,53 +327,30 @@ local function IsMultiplayerSession()
     return isMP
 end
 
-local function RestorePatchedSimCDOs()
-    if next(PatchedSimCDOs) == nil then return end
-    for clsName, cdo in pairs(PatchedSimCDOs) do
-        if Core.IsValidObj(cdo) then
-            pcall(function() cdo.bColliderEnabled = true end)
-        end
-        PatchedSimCDOs[clsName] = nil
-    end
-end
-
-local function EnsureSimCDODisabled(simObj)
-    if IsMultiplayerSession() then return end
-    if not Core.IsValidObj(simObj) then return end
-    local clsName = SafeClassName(simObj)
-    if PatchedSimCDOs[clsName] then return end
-    pcall(function()
-        local cls = simObj:GetClass()
-        local cdo = GetCDOFromUClass(cls)
-        if Core.IsValidObj(cdo) then
-            PatchedSimCDOs[clsName] = cdo
-            local okVal, prev = pcall(function() return cdo.bColliderEnabled end)
-            if okVal and prev == true then
-                cdo.bColliderEnabled = false
-            end
-        end
-    end)
-end
-
 local function TrackSimEnv(simObj)
     local sAddr = simObj:GetAddress()
     if TrackedSimFrames[sAddr] then return end
-    TrackedSimFrames[sAddr] = simObj
 
+    local gotID = false
     pcall(function()
         local id = simObj.ID
-        if type(id) == "number" and id > 0 and not WalkthroughSimIDs[id] then
-            WalkthroughSimIDs[id] = true
-            NeedsEnvClean = true
+        if type(id) == "number" and id > 0 then
+            gotID = true
+            if not WalkthroughSimIDs[id] then
+                WalkthroughSimIDs[id] = true
+                NeedsEnvClean = true
+            end
         end
     end)
 
+    local gotEnv = false
     pcall(function()
         if not simObj.GetFrame then return end
         local frame = simObj:GetFrame()
         if not Core.IsValidObj(frame) or not frame.GetCollisionEnv then return end
         local env = frame:GetCollisionEnv()
         if Core.IsValidObj(env) then
+            gotEnv = true
             local envAddr = env:GetAddress()
             if not TrackedEnvs[envAddr] then
                 TrackedEnvs[envAddr] = env
@@ -402,6 +358,10 @@ local function TrackSimEnv(simObj)
             end
         end
     end)
+
+    if gotID and gotEnv then
+        TrackedSimFrames[sAddr] = simObj
+    end
 end
 
 local function CleanTrackedEnvs()
@@ -522,18 +482,11 @@ local function CleanTrackedEnvs()
     end
 end
 
-local function DisableSimCollider(simObj, countsByClass)
+local function DisableSimCollider(simObj)
     if not Core.IsValidObj(simObj) then return end
-    EnsureSimCDODisabled(simObj)
+    -- Save-safe: NEVER mutate CDO or simObj.bColliderEnabled (serialized into saves).
+    -- Only track simObj.ID and its station's transient UCollisionEnv for runtime collider neutralization.
     TrackSimEnv(simObj)
-    local okVal, enabled = pcall(function() return simObj.bColliderEnabled end)
-    if okVal and enabled == true then
-        local okSet = pcall(function() simObj.bColliderEnabled = false end)
-        if okSet then
-            local clsName = SafeClassName(simObj)
-            countsByClass[clsName] = (countsByClass[clsName] or 0) + 1
-        end
-    end
 end
 
 local CachedPrimCls = nil
@@ -741,7 +694,6 @@ local function RunStaggeredScan()
     local isMP = IsMultiplayerSession()
     local allowWalkthrough = not isMP
     if isMP then
-        RestorePatchedSimCDOs()
         if not LoggedMultiplayerDisable then
             LoggedMultiplayerDisable = true
             Core.Log("[SplitterBalancerTweaks] Multiplayer session detected; walk-through automatically disabled (2/3 height remains active).")
@@ -895,14 +847,17 @@ local function RegisterMachineObjectHook()
             local wantHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
             if not allowWalk and not wantHeight then return end
             if allowWalk then
-                EnsureSimCDODisabled(obj)
-                DisableSimCollider(obj, {})
+                DisableSimCollider(obj)
                 pcall(CleanTrackedEnvs)
             end
             if wantHeight or allowWalk then
-                if not ApplyDirectToMachineActors(obj, allowWalk) then
+                if not ApplyDirectToMachineActors(obj, allowWalk) or (allowWalk and not TrackedSimFrames[obj:GetAddress()]) then
                     ExecuteInGameThreadWithDelay(400, function()
                         if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
+                        if allowWalk then
+                            DisableSimCollider(obj)
+                            pcall(CleanTrackedEnvs)
+                        end
                         if not ApplyDirectToMachineActors(obj, allowWalk) then
                             ScheduleStaggeredScan(300)
                         end

@@ -1,5 +1,8 @@
 # Getting Started with Eqol
 
+> [!NOTE]
+> **Main Sequence vs. Demo**: Eqol is tested and working in the full version of **Main Sequence**. While some features also work in the **Main Sequence Demo**, not all of them do. Eqol is developed exclusively for the full game, so using it in the full game is recommended and using it in the demo is not recommended.
+
 **Eqol** (*Elvenide's Quality of Life*) is a client-side UE4SS Lua mod for **Main Sequence**. It is designed to be 100% save-safe and cleanly removable at any time without affecting your save files.
 
 ## Prerequisites
