@@ -279,38 +279,46 @@ local function GetCurrentWorldAddr()
 end
 
 -- Walk-through modifies transient local runtime collision envelopes.
--- Automatically disable walk-through in multiplayer (both listen-server host and remote clients)
+-- Automatically disable walk-through in multiplayer (remote clients or host with >1 connected player)
 -- to prevent client/server movement desync; visual 2/3 height scaling remains active.
+-- NOTE: Main Sequence always runs solo saves as NM_ListenServer (GetNetMode() == 2, IsStandalone == false),
+-- so we must check for remote client (IsServer == false / GetNetMode() == 3) or PlayerArray > 1.
 local function IsMultiplayerSession()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then
-        -- Controller not ready yet; treat as non-standalone until valid so we never mutate early
+        -- Controller not ready yet; treat as non-solo until valid so we never mutate early
         return true
     end
 
     local isMP = false
 
-    -- 1. Official Unreal Engine net-mode check via UKismetSystemLibrary:IsStandalone(WorldContext)
+    -- 1. Remote client check via UKismetSystemLibrary:IsServer(WorldContext)
     local ksl = Core.GetCDO("/Script/Engine.Default__KismetSystemLibrary")
-    if Core.IsValidObj(ksl) and ksl.IsStandalone then
-        local okSt, standalone = pcall(function() return ksl:IsStandalone(pc) end)
-        if okSt and standalone == false then
+    if Core.IsValidObj(ksl) and ksl.IsServer then
+        local okSrv, isServer = pcall(function() return ksl:IsServer(pc) end)
+        if okSrv and isServer == false then
             isMP = true
         end
     end
 
-    -- 2. Fallback: UWorld:GetNetMode() (0 = NM_Standalone, 1 = Dedicated, 2 = ListenServer, 3 = Client)
+    -- 2. Fallback remote client check via UWorld:GetNetMode() (3 = NM_Client) or pc:HasAuthority()
     if not isMP then
         local okW, w = pcall(function() return pc:GetWorld() end)
         if okW and Core.IsValidObj(w) and w.GetNetMode then
             local okNm, nm = pcall(function() return w:GetNetMode() end)
-            if okNm and type(nm) == "number" and nm ~= 0 then
+            if okNm and type(nm) == "number" and nm == 3 then
+                isMP = true
+            end
+        end
+        if not isMP and pc.HasAuthority then
+            local okAuth, hasAuth = pcall(function() return pc:HasAuthority() end)
+            if okAuth and hasAuth == false then
                 isMP = true
             end
         end
     end
 
-    -- 3. Fallback: GameState.PlayerArray > 1
+    -- 3. Active multiplayer check on host: GameState.PlayerArray > 1 connected player
     if not isMP then
         pcall(function()
             local w = pc:GetWorld()
