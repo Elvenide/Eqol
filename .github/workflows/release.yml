@@ -49,35 +49,40 @@ jobs:
         env:
           OUTPUT: CHANGELOG_RELEASE.md
 
-      - name: Package Eqol mod zips
+      - name: Package Eqol mod zip and manifest.txt
         if: steps.version.outputs.exists == 'false'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-
-          # 1. Direct UE4SS zip (Eqol/)
-          UE4SS_STAGE="dist-ue4ss/Eqol"
-          mkdir -p "${UE4SS_STAGE}"
-          cp -r Scripts "${UE4SS_STAGE}/Scripts"
-          cp README.md "${UE4SS_STAGE}/README.md"
+          ZIP_NAME="Eqol-v${VERSION}.zip"
+          STAGE="dist/Mods/Eqol"
+          mkdir -p "${STAGE}"
+          cp -r Scripts "${STAGE}/Scripts"
+          cp README.md "${STAGE}/README.md"
+          cp LICENSE "${STAGE}/LICENSE"
           if [ -d docs ]; then
-            mkdir -p "${UE4SS_STAGE}/docs"
-            cp docs/*.md "${UE4SS_STAGE}/docs/" || true
+            mkdir -p "${STAGE}/docs"
+            cp docs/*.md "${STAGE}/docs/" || true
           fi
-          touch "${UE4SS_STAGE}/enabled.txt"
-          (cd dist-ue4ss && zip -r "../Eqol-v${VERSION}-UE4SS.zip" Eqol)
-
-          # 2. MSCoreManager zip (Mods/Eqol/ + mscore.mod)
-          MSCORE_STAGE="dist-mscore/Mods/Eqol"
-          mkdir -p "${MSCORE_STAGE}"
-          cp -r "${UE4SS_STAGE}/." "${MSCORE_STAGE}/"
-          cat > "${MSCORE_STAGE}/mscore.mod" <<EOF
+          touch "${STAGE}/enabled.txt"
+          cat > "${STAGE}/mscore.mod" <<EOF
           name=Eqol
           repo=${{ github.repository }}
           version=${VERSION}
           EOF
-          (cd dist-mscore && zip -r "../Eqol-v${VERSION}-MSCoreManager.zip" Mods)
+          (cd dist && zip -r "../${ZIP_NAME}" Mods)
 
-          ls -lh "Eqol-v${VERSION}-MSCoreManager.zip" "Eqol-v${VERSION}-UE4SS.zip"
+          SHA256=$(sha256sum "${ZIP_NAME}" | awk '{print $1}')
+          SIZE=$(stat -c%s "${ZIP_NAME}")
+          cat > manifest.txt <<EOF
+          name=Eqol
+          version=${VERSION}
+          zip=${ZIP_NAME}
+          sha256=${SHA256}
+          size=${SIZE}
+          EOF
+
+          ls -lh "${ZIP_NAME}" manifest.txt
+          cat manifest.txt
 
       - name: Build GitHub Release notes
         if: steps.version.outputs.exists == 'false'
@@ -86,10 +91,7 @@ jobs:
           {
             echo "## Eqol v${VERSION}"
             echo ""
-            echo "📖 **[Getting Started & Installation Guide](https://github.com/${{ github.repository }}/blob/main/docs/get-started.md)**"
-            echo ""
-            echo "- **MSCoreManager**: \`Eqol-v${VERSION}-MSCoreManager.zip\` (\`Mods/Eqol/\` + \`mscore.mod\`)"
-            echo "- **Manual UE4SS**: \`Eqol-v${VERSION}-UE4SS.zip\` (\`Eqol/\`)"
+            echo "📖 **[Getting Started & Installation Guide](https://github.com/${{ github.repository }}/blob/main/docs/get-started.md)** (supports [MSCoreManager](https://github.com/xxalex3xx97/MSCore/releases/latest) and manual UE4SS installation)"
             echo ""
             echo "## What's Changed"
             echo ""
@@ -108,6 +110,6 @@ jobs:
           name: Eqol v${{ steps.version.outputs.version }}
           body_path: RELEASE_NOTES.md
           files: |
-            Eqol-v${{ steps.version.outputs.version }}-MSCoreManager.zip
-            Eqol-v${{ steps.version.outputs.version }}-UE4SS.zip
+            manifest.txt
+            Eqol-v${{ steps.version.outputs.version }}.zip
           make_latest: true
