@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.VERSION = "0.1.80"
+Core.VERSION = "0.1.81"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -1261,6 +1261,48 @@ local function CanTriggerRegisteredKeybind(bs)
     return Core.IsGameplayInputAllowed(bs)
 end
 
+local function BuildUE4SSModifierList(parsed)
+    local mods = {}
+    local mask = 0
+    if parsed and ModifierKey then
+        if parsed.bCtrl and ModifierKey.CONTROL then
+            mods[#mods + 1] = ModifierKey.CONTROL
+            mask = mask + 1
+        end
+        if parsed.bAlt and ModifierKey.ALT then
+            mods[#mods + 1] = ModifierKey.ALT
+            mask = mask + 2
+        end
+        if parsed.bShift and ModifierKey.SHIFT then
+            mods[#mods + 1] = ModifierKey.SHIFT
+            mask = mask + 4
+        end
+    end
+    return mods, mask
+end
+
+local function CloseBleedthroughVanillaWindow(pc, entry)
+    if not Core.IsValidObj(pc) then return false end
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if not (Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow)) then
+        return false
+    end
+    if entry and entry.AllowNativeWindowClass then
+        local cls = Core.FindOrLoadClass(entry.AllowNativeWindowClass)
+        if Core.IsValidObj(cls) then
+            local okIsA, isA = pcall(function() return widgetSub.CurrentWindow:IsA(cls) end)
+            if okIsA and isA == true then
+                return false
+            end
+        end
+    end
+    if widgetSub.CloseCurrentWindow then
+        pcall(function() widgetSub:CloseCurrentWindow() end)
+        return true
+    end
+    return false
+end
+
 local function ApplyKeybindState(bs, chordSpec, shouldSave)
     local parsed = ParseKeyChord(chordSpec)
     local normalized = parsed.canonical
@@ -1271,26 +1313,51 @@ local function ApplyKeybindState(bs, chordSpec, shouldSave)
     end
 
     local ue4ssKey = ResolveUE4SSKey(parsed.keyName)
+    local modList, modMask = BuildUE4SSModifierList(parsed)
     bs.ParsedChord = parsed
     bs.ActiveUe4ssKey = ue4ssKey
+    bs.ActiveModMask = modMask
     bs.FallbackWasDown = false
 
     if ue4ssKey ~= nil then
-        if not SharedKeyHandlers[ue4ssKey] then
-            SharedKeyHandlers[ue4ssKey] = true
-            RegisterKeyBind(ue4ssKey, function()
+        local handlerKey = tostring(ue4ssKey) .. ":" .. tostring(modMask)
+        if not SharedKeyHandlers[handlerKey] then
+            SharedKeyHandlers[handlerKey] = true
+            local function onUe4ssKeyPress()
                 for _, entry in pairs(RegisteredKeybinds) do
-                    if entry.ActiveUe4ssKey == ue4ssKey then
+                    if entry.ActiveUe4ssKey == ue4ssKey and entry.ActiveModMask == modMask then
                         ExecuteInGameThread(function()
-                            if ModifiersMatch(Core.GetLocalPlayerController(), entry.ParsedChord)
-                                and CanTriggerRegisteredKeybind(entry)
-                            then
+                            local pc = Core.GetLocalPlayerController()
+                            if not ModifiersMatch(pc, entry.ParsedChord) then return end
+                            local hadNativeWin = false
+                            if modMask > 0 and Core.IsValidObj(pc) then
+                                local ws = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+                                hadNativeWin = Core.IsValidObj(ws) and Core.IsValidObj(ws.CurrentWindow)
+                            end
+                            if CanTriggerRegisteredKeybind(entry) then
                                 entry.OnPress()
+                                -- If a modified chord shares a base key with a vanilla keybind (e.g. Shift+M vs M),
+                                -- close any vanilla CurrentWindow that opened on the same keypress.
+                                if modMask > 0 and not hadNativeWin then
+                                    ExecuteInGameThreadAfterFrames(1, function()
+                                        local curPC = Core.GetLocalPlayerController()
+                                        if not CloseBleedthroughVanillaWindow(curPC, entry) then
+                                            ExecuteInGameThreadAfterFrames(1, function()
+                                                CloseBleedthroughVanillaWindow(Core.GetLocalPlayerController(), entry)
+                                            end)
+                                        end
+                                    end)
+                                end
                             end
                         end)
                     end
                 end
-            end)
+            end
+            if modMask > 0 then
+                RegisterKeyBind(ue4ssKey, modList, onUe4ssKeyPress)
+            else
+                RegisterKeyBind(ue4ssKey, onUe4ssKeyPress)
+            end
         end
     elseif not bs.FallbackPollActive and parsed.keyName ~= "None" then
         bs.FallbackPollActive = true
