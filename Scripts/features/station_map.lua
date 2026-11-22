@@ -157,6 +157,126 @@ local ViewTransform = {
 local RenderedMachines = {}  -- list of { machine, x, y, z, yaw, cellsX, cellsY, halfW, halfH, cat, buildable, recipe, actorClsPath, displayName }
 local RenderedConveyors = {} -- subset of RenderedMachines where cat == "Conveyor"
 local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, halfH, isInput, isOutput, machineName }
+local RenderedMachineGrid = {} -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover)
+local RenderedPortGrid = {}    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
+local HOVER_CELL_CM = 400.0
+local LastIconCanvasVisible = nil
+
+local function GridBucketKey(gx, gy)
+    return gx .. "," .. gy
+end
+
+local function InsertMachineIntoGrid(recEntry)
+    local minX = math.floor((recEntry.x - recEntry.halfW) / HOVER_CELL_CM)
+    local maxX = math.floor((recEntry.x + recEntry.halfW) / HOVER_CELL_CM)
+    local minY = math.floor((recEntry.y - recEntry.halfH) / HOVER_CELL_CM)
+    local maxY = math.floor((recEntry.y + recEntry.halfH) / HOVER_CELL_CM)
+    local keys = {}
+    for gx = minX, maxX do
+        for gy = minY, maxY do
+            local k = GridBucketKey(gx, gy)
+            local b = RenderedMachineGrid[k]
+            if not b then b = {}; RenderedMachineGrid[k] = b end
+            b[#b + 1] = recEntry
+            keys[#keys + 1] = k
+        end
+    end
+    recEntry._gridKeys = keys
+end
+
+local function RemoveMachineFromGrid(recEntry)
+    if not recEntry or not recEntry._gridKeys then return end
+    for _, k in ipairs(recEntry._gridKeys) do
+        local b = RenderedMachineGrid[k]
+        if b then
+            for i = #b, 1, -1 do
+                if b[i] == recEntry then table.remove(b, i) end
+            end
+            if #b == 0 then RenderedMachineGrid[k] = nil end
+        end
+    end
+    recEntry._gridKeys = nil
+end
+
+local function InsertPortIntoGrid(pe)
+    local minX = math.floor((pe.x - pe.halfW) / HOVER_CELL_CM)
+    local maxX = math.floor((pe.x + pe.halfW) / HOVER_CELL_CM)
+    local minY = math.floor((pe.y - pe.halfH) / HOVER_CELL_CM)
+    local maxY = math.floor((pe.y + pe.halfH) / HOVER_CELL_CM)
+    local keys = {}
+    for gx = minX, maxX do
+        for gy = minY, maxY do
+            local k = GridBucketKey(gx, gy)
+            local b = RenderedPortGrid[k]
+            if not b then b = {}; RenderedPortGrid[k] = b end
+            b[#b + 1] = pe
+            keys[#keys + 1] = k
+        end
+    end
+    pe._gridKeys = keys
+end
+
+local function RemovePortFromGrid(pe)
+    if not pe or not pe._gridKeys then return end
+    for _, k in ipairs(pe._gridKeys) do
+        local b = RenderedPortGrid[k]
+        if b then
+            for i = #b, 1, -1 do
+                if b[i] == pe then table.remove(b, i) end
+            end
+            if #b == 0 then RenderedPortGrid[k] = nil end
+        end
+    end
+    pe._gridKeys = nil
+end
+
+local function FindHoveredPortAt(wx, wy)
+    local b = RenderedPortGrid[GridBucketKey(math.floor(wx / HOVER_CELL_CM), math.floor(wy / HOVER_CELL_CM))]
+    if not b then return nil end
+    for i = 1, #b do
+        local rp = b[i]
+        if math.abs(wx - rp.x) <= rp.halfW and math.abs(wy - rp.y) <= rp.halfH then
+            return rp
+        end
+    end
+    return nil
+end
+
+local function FindHoveredMachineAt(wx, wy)
+    local b = RenderedMachineGrid[GridBucketKey(math.floor(wx / HOVER_CELL_CM), math.floor(wy / HOVER_CELL_CM))]
+    if not b then return nil end
+    local bestD2 = math.huge
+    local best = nil
+    for i = 1, #b do
+        local rm = b[i]
+        if math.abs(wx - rm.x) <= rm.halfW and math.abs(wy - rm.y) <= rm.halfH then
+            local d2 = (wx - rm.x) ^ 2 + (wy - rm.y) ^ 2
+            if d2 < bestD2 then
+                bestD2 = d2
+                best = rm
+            end
+        end
+    end
+    return best
+end
+
+-- Hoisted FName key tables for per-frame Tick() (avoids ~18 FName allocations per frame)
+local MAP_KEYS = nil
+local function EnsureMapKeys()
+    if MAP_KEYS then return end
+    MAP_KEYS = {}
+    local names = {
+        LMB = "LeftMouseButton", RMB = "RightMouseButton", MMB = "MiddleMouseButton",
+        LShift = "LeftShift", RShift = "RightShift", Space = "SpaceBar",
+        W = "W", Up = "Up", S = "S", Down = "Down",
+        A = "A", Left = "Left", D = "D", Right = "Right",
+        Equals = "Equals", Add = "Add", Hyphen = "Hyphen", Subtract = "Subtract",
+        WheelUp = "MouseScrollUp", WheelDown = "MouseScrollDown", WheelAxis = "MouseWheelAxis",
+    }
+    for k, n in pairs(names) do
+        pcall(function() MAP_KEYS[k] = { KeyName = FName(n) } end)
+    end
+end
 local RenderedGridLines = {} -- { border, slot, isVertical, spanOther, isMajor4, isMajor8 }
 local LastGridTier = nil
 local LastGridZoomRatio = nil
@@ -331,6 +451,13 @@ local function ApplyViewTransform()
         end
     end
     UpdateGridAppearanceForZoom(zoomRatio)
+    if Core.IsValidObj(MapUI.IconCanvas) then
+        local showIcons = (CELL_CM * ViewTransform.scale) >= 12.0
+        if LastIconCanvasVisible ~= showIcons then
+            LastIconCanvasVisible = showIcons
+            pcall(function() MapUI.IconCanvas:SetVisibility(showIcons and 4 or 1) end)
+        end
+    end
     if OnViewportChangedStatic then OnViewportChangedStatic() end
     if OnViewportChangedMachines then OnViewportChangedMachines() end
 end
@@ -3264,8 +3391,11 @@ RefreshStationMapCanvas = function(machinesOnly)
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
+    RenderedMachineGrid = {}
+    RenderedPortGrid = {}
     RenderedMachineWidgets = {}
     LastHoveredPortIdx = nil
+    LastIconCanvasVisible = nil
     FloorIconButtons = {}
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -3522,8 +3652,73 @@ RefreshStationMapCanvas = function(machinesOnly)
         end
     end
 
-    -- Stream ONLY viewport-visible machines and their port badges within a 10ms/frame budget (load once, keep permanently)
+    -- Stream ONLY viewport-visible machines and their port badges, grouped into spatial UCanvasPanel chunks
+    -- so off-screen chunks are Collapsed (SetVisibility(1)) on pan/zoom to keep Slate render cost low.
     do
+        local CHUNK_CM = 1600.0
+        local machineChunks = {} -- "cx,cy" -> { canvas, minX, maxX, minY, maxY, visible }
+        local iconChunks = {}    -- "cx,cy" -> { canvas, minX, maxX, minY, maxY, visible }
+        local pendingByChunk = {} -- "cx,cy" -> { minX, maxX, minY, maxY, items = {}, unrendered = 0 }
+
+        local function getChunkCoords(wx, wy)
+            local cx = math.floor((wx or 0.0) / CHUNK_CM)
+            local cy = math.floor((wy or 0.0) / CHUNK_CM)
+            return cx, cy, cx .. "," .. cy
+        end
+
+        local function addPendingToChunk(pm)
+            local cx, cy, ck = getChunkCoords(pm.me.x, pm.me.y)
+            local bucket = pendingByChunk[ck]
+            if not bucket then
+                bucket = {
+                    minX = cx * CHUNK_CM - 300.0,
+                    maxX = (cx + 1) * CHUNK_CM + 300.0,
+                    minY = cy * CHUNK_CM - 300.0,
+                    maxY = (cy + 1) * CHUNK_CM + 300.0,
+                    items = {},
+                    unrendered = 0,
+                }
+                pendingByChunk[ck] = bucket
+            end
+            bucket.items[#bucket.items + 1] = pm
+            if not pm.rendered and not pm.removed then
+                bucket.unrendered = bucket.unrendered + 1
+            end
+            pm.chunkBucket = bucket
+        end
+
+        local function getOrCreateChunkCanvas(chunkMap, parentCanvas, wx, wy)
+            if not Core.IsValidObj(parentCanvas) then return parentCanvas end
+            local cx, cy, ck = getChunkCoords(wx, wy)
+            local entry = chunkMap[ck]
+            if entry and Core.IsValidObj(entry.canvas) then
+                return entry.canvas
+            end
+            local c = CreateRawFast(PATHS.CanvasPanelClass, outer)
+            if not Core.IsValidObj(c) then return parentCanvas end
+            pcall(function()
+                c:SetClipping(0)
+                c:SetVisibility(4) -- SelfHitTestInvisible
+                local sl = parentCanvas:AddChildToCanvas(c)
+                if Core.IsValidObj(sl) then
+                    sl:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.0, Y = 0.0 } })
+                    sl:SetAlignment({ X = 0.0, Y = 0.0 })
+                    sl:SetPosition({ X = 0.0, Y = 0.0 })
+                    sl:SetSize({ X = 1.0, Y = 1.0 })
+                end
+            end)
+            entry = {
+                canvas = c,
+                minX = cx * CHUNK_CM - 400.0,
+                maxX = (cx + 1) * CHUNK_CM + 400.0,
+                minY = cy * CHUNK_CM - 400.0,
+                maxY = (cy + 1) * CHUNK_CM + 400.0,
+                visible = true,
+            }
+            chunkMap[ck] = entry
+            return c
+        end
+
         local visibleMachineQueue = {}
         local mQueueIdx = 1
         local pIdx = 1
@@ -3532,6 +3727,7 @@ RefreshStationMapCanvas = function(machinesOnly)
         for _, pm in ipairs(pendingMachines) do
             if pm.me and Core.IsValidObj(pm.me.machine) then
                 knownPendingByAddr[pm.me.machine:GetAddress()] = pm
+                addPendingToChunk(pm)
             end
         end
 
@@ -3566,13 +3762,19 @@ RefreshStationMapCanvas = function(machinesOnly)
             FloorIconButtons[mAddr] = nil
             SelectedMachines[mAddr] = nil
             for i = #RenderedMachines, 1, -1 do
-                if RenderedMachines[i].addr == mAddr then table.remove(RenderedMachines, i) end
+                if RenderedMachines[i].addr == mAddr then
+                    RemoveMachineFromGrid(RenderedMachines[i])
+                    table.remove(RenderedMachines, i)
+                end
             end
             for i = #RenderedConveyors, 1, -1 do
                 if RenderedConveyors[i].addr == mAddr then table.remove(RenderedConveyors, i) end
             end
             for i = #RenderedPorts, 1, -1 do
-                if RenderedPorts[i].ownerAddr == mAddr then table.remove(RenderedPorts, i) end
+                if RenderedPorts[i].ownerAddr == mAddr then
+                    RemovePortFromGrid(RenderedPorts[i])
+                    table.remove(RenderedPorts, i)
+                end
             end
         end
 
@@ -3639,22 +3841,24 @@ RefreshStationMapCanvas = function(machinesOnly)
                 displayName = StationData.GetMachineDisplayName(m),
             }
             table.insert(RenderedMachines, recEntry)
+            InsertMachineIntoGrid(recEntry)
+            local mTargetCanvas = getOrCreateChunkCanvas(machineChunks, mCanvas, mwx, mwy)
             if cat == "Conveyor" then
                 table.insert(RenderedConveyors, recEntry)
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, "Conveyor", sprite, false, true, 10, false, mWidgets)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mTargetCanvas, mx, my, pxW, pxH, myaw, "Conveyor", sprite, false, true, 10, false, mWidgets)
             else
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, mCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay, mWidgets)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, mTargetCanvas, mx, my, pxW, pxH, myaw, cat, sprite, false, true, 10, hasBottomOverlay, mWidgets)
             end
 
             -- Underground belt enhancements + Splitter/Belt Balancer directional yellow chevrons
             local clsLow = clsKey and clsKey:lower() or ""
             if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-                AddSplitterOrBalancerChevrons(outer, mCanvas, mx, my, pxW, pxH, myaw, clsLow, 16, mWidgets)
+                AddSplitterOrBalancerChevrons(outer, mTargetCanvas, mx, my, pxW, pxH, myaw, clsLow, 16, mWidgets)
             end
             local uInfo = (clsLow:find("underground", 1, true) ~= nil) and StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform) or nil
             if uInfo then
                 local arrowCol = GetTierArrowColor(sprite and sprite.tier or 1)
-                local ch1 = RenderDirectionChevron(outer, mCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
+                local ch1 = RenderDirectionChevron(outer, mTargetCanvas, mx, my, math.min(pxW, pxH) * 0.60, myaw, arrowCol, 15)
                 if ch1 then table.insert(mWidgets, ch1) end
                 if uInfo.pairX and uInfo.pairY then
                     recEntry.pairX = uInfo.pairX
@@ -3756,7 +3960,8 @@ RefreshStationMapCanvas = function(machinesOnly)
                         end
                     end)
 
-                    local iconTarget = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
+                    local iconParent = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
+                    local iconTarget = getOrCreateChunkCanvas(iconChunks, iconParent, mwx, mwy)
                     local iSlot = iconTarget:AddChildToCanvas(ov)
                     SetCanvasSlot(iSlot, mx, badgeY, badgeW, badgeH, 0.5, 0.5, 40)
 
@@ -3800,7 +4005,8 @@ RefreshStationMapCanvas = function(machinesOnly)
                         }
                         seenMachinePorts[cellKey] = existing
                         table.insert(RenderedPorts, existing)
-                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy, outWidgets = mPortWidgets, track = mTrack })
+                        InsertPortIntoGrid(existing)
+                        table.insert(deferredPorts, { pmx = pmx, pmy = pmy, outWidgets = mPortWidgets, track = mTrack, targetCanvas = mTargetCanvas })
                     else
                         if p.isInput then existing.isInput = true end
                         if p.isOutput then existing.isOutput = true end
@@ -3826,7 +4032,8 @@ RefreshStationMapCanvas = function(machinesOnly)
                 local dp = deferredPorts[pIdx]
                 pIdx = pIdx + 1
                 if dp and dp.track and not dp.track.cancelled then
-                    RenderUnconnectedItemPort(outer, mCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22, dp.outWidgets)
+                    local pCanvas = Core.IsValidObj(dp.targetCanvas) and dp.targetCanvas or mCanvas
+                    RenderUnconnectedItemPort(outer, pCanvas, dp.pmx, dp.pmy, portBadgeBasePx, 22, dp.outWidgets)
                     pCount = pCount + 1
                 end
             end
@@ -3840,20 +4047,48 @@ RefreshStationMapCanvas = function(machinesOnly)
         OnViewportChangedMachines = function()
             if myMachineGen ~= MachineRenderGen then return end
             local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRect()
-            local changedVis = false
-            for _, pm in ipairs(pendingMachines) do
-                if not pm.removed then
-                    local me = pm.me
-                    local inView = (me.x >= vMinX and me.x <= vMaxX and me.y >= vMinY and me.y <= vMaxY)
-                    if not pm.rendered then
-                        if inView then
-                            pm.rendered = true
-                            pm.isCulled = false
-                            table.insert(visibleMachineQueue, me)
+
+            -- 1. Stream unrendered machines only from chunks overlapping the viewport
+            for _, bucket in pairs(pendingByChunk) do
+                if bucket.unrendered > 0
+                    and bucket.maxX >= vMinX and bucket.minX <= vMaxX
+                    and bucket.maxY >= vMinY and bucket.minY <= vMaxY
+                then
+                    for i = 1, #bucket.items do
+                        local pm = bucket.items[i]
+                        if not pm.removed and not pm.rendered then
+                            local me = pm.me
+                            if me.x >= vMinX and me.x <= vMaxX and me.y >= vMinY and me.y <= vMaxY then
+                                pm.rendered = true
+                                pm.isCulled = false
+                                bucket.unrendered = math.max(0, bucket.unrendered - 1)
+                                visibleMachineQueue[#visibleMachineQueue + 1] = me
+                            end
                         end
                     end
                 end
             end
+
+            -- 2. Viewport-cull spatial chunk UCanvasPanels (Collapse off-screen chunks in O(chunks))
+            for _, ch in pairs(machineChunks) do
+                if Core.IsValidObj(ch.canvas) then
+                    local inView = (ch.maxX >= vMinX and ch.minX <= vMaxX and ch.maxY >= vMinY and ch.minY <= vMaxY)
+                    if ch.visible ~= inView then
+                        ch.visible = inView
+                        pcall(function() ch.canvas:SetVisibility(inView and 4 or 1) end)
+                    end
+                end
+            end
+            for _, ch in pairs(iconChunks) do
+                if Core.IsValidObj(ch.canvas) then
+                    local inView = (ch.maxX >= vMinX and ch.minX <= vMaxX and ch.maxY >= vMinY and ch.minY <= vMaxY)
+                    if ch.visible ~= inView then
+                        ch.visible = inView
+                        pcall(function() ch.canvas:SetVisibility(inView and 4 or 1) end)
+                    end
+                end
+            end
+
             if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts) then
                 machinePumpRunning = true
                 ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
@@ -3887,6 +4122,9 @@ RefreshStationMapCanvas = function(machinesOnly)
             local removedCount = 0
             for addr, pm in pairs(knownPendingByAddr) do
                 if not liveByAddr[addr] then
+                    if not pm.rendered and not pm.removed and pm.chunkBucket then
+                        pm.chunkBucket.unrendered = math.max(0, pm.chunkBucket.unrendered - 1)
+                    end
                     pm.removed = true
                     knownPendingByAddr[addr] = nil
                     presentAddrs[addr] = nil
@@ -3903,6 +4141,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                     local pm = { me = me, rendered = false }
                     knownPendingByAddr[addr] = pm
                     table.insert(pendingMachines, pm)
+                    addPendingToChunk(pm)
                     addedCount = addedCount + 1
                 end
             end
@@ -4919,12 +5158,6 @@ local function IsAnyButtonHovered()
             if okH and h == true then return true end
         end
     end
-    for _, ib in pairs(FloorIconButtons) do
-        if Core.IsValidObj(ib.btn) and ib.btn.IsHovered then
-            local okH, h = pcall(function() return ib.btn:IsHovered() end)
-            if okH and h == true then return true end
-        end
-    end
     for _, panel in ipairs({ MapUI.FloorFrame, MapUI.ApplyPanel, MapUI.CloseBtnFrame, MapUI.CostPanel }) do
         if Core.IsValidObj(panel) and panel.IsHovered then
             local okH, h = pcall(function() return panel:IsHovered() end)
@@ -4934,9 +5167,23 @@ local function IsAnyButtonHovered()
     return false
 end
 
+local function IsHoveredOnMachineIconButton(mx, my)
+    if LastIconCanvasVisible == false or not mx or not my then return false end
+    local wx, wy = CanvasToWorld(mx, my)
+    local rm = FindHoveredMachineAt(wx, wy)
+    if not rm then return false end
+    local ib = FloorIconButtons[rm.addr]
+    if ib and Core.IsValidObj(ib.btn) and ib.btn.IsHovered then
+        local okH, h = pcall(function() return ib.btn:IsHovered() end)
+        if okH and h == true then return true end
+    end
+    return false
+end
+
 local function EnsureInputPoll()
     if InputPollActive then return end
     InputPollActive = true
+    EnsureMapKeys()
 
     local function Tick()
         if not IsMapOpen() or not MapUI then
@@ -5008,20 +5255,21 @@ local function EnsureInputPoll()
         local keyPanX, keyPanY = 0.0, 0.0
         local keyZoom = 0
         pcall(function()
-            lDown = pc:IsInputKeyDown({ KeyName = FName("LeftMouseButton") }) == true
-            rDown = pc:IsInputKeyDown({ KeyName = FName("RightMouseButton") }) == true
-            mDown = pc:IsInputKeyDown({ KeyName = FName("MiddleMouseButton") }) == true
-            shiftDown = (pc:IsInputKeyDown({ KeyName = FName("LeftShift") }) == true)
-                or (pc:IsInputKeyDown({ KeyName = FName("RightShift") }) == true)
-            spaceDown = pc:IsInputKeyDown({ KeyName = FName("SpaceBar") }) == true
+            local K = MAP_KEYS
+            lDown = K.LMB and (pc:IsInputKeyDown(K.LMB) == true) or false
+            rDown = K.RMB and (pc:IsInputKeyDown(K.RMB) == true) or false
+            mDown = K.MMB and (pc:IsInputKeyDown(K.MMB) == true) or false
+            shiftDown = (K.LShift and pc:IsInputKeyDown(K.LShift) == true)
+                or (K.RShift and pc:IsInputKeyDown(K.RShift) == true) or false
+            spaceDown = K.Space and (pc:IsInputKeyDown(K.Space) == true) or false
 
             if not WaitingForBuildMenuSelection then
-                if pc:IsInputKeyDown({ KeyName = FName("W") }) or pc:IsInputKeyDown({ KeyName = FName("Up") }) then keyPanY = keyPanY - 1.0 end
-                if pc:IsInputKeyDown({ KeyName = FName("S") }) or pc:IsInputKeyDown({ KeyName = FName("Down") }) then keyPanY = keyPanY + 1.0 end
-                if pc:IsInputKeyDown({ KeyName = FName("A") }) or pc:IsInputKeyDown({ KeyName = FName("Left") }) then keyPanX = keyPanX - 1.0 end
-                if pc:IsInputKeyDown({ KeyName = FName("D") }) or pc:IsInputKeyDown({ KeyName = FName("Right") }) then keyPanX = keyPanX + 1.0 end
-                if pc:WasInputKeyJustPressed({ KeyName = FName("Equals") }) or pc:WasInputKeyJustPressed({ KeyName = FName("Add") }) then keyZoom = 1 end
-                if pc:WasInputKeyJustPressed({ KeyName = FName("Hyphen") }) or pc:WasInputKeyJustPressed({ KeyName = FName("Subtract") }) then keyZoom = -1 end
+                if (K.W and pc:IsInputKeyDown(K.W)) or (K.Up and pc:IsInputKeyDown(K.Up)) then keyPanY = keyPanY - 1.0 end
+                if (K.S and pc:IsInputKeyDown(K.S)) or (K.Down and pc:IsInputKeyDown(K.Down)) then keyPanY = keyPanY + 1.0 end
+                if (K.A and pc:IsInputKeyDown(K.A)) or (K.Left and pc:IsInputKeyDown(K.Left)) then keyPanX = keyPanX - 1.0 end
+                if (K.D and pc:IsInputKeyDown(K.D)) or (K.Right and pc:IsInputKeyDown(K.Right)) then keyPanX = keyPanX + 1.0 end
+                if (K.Equals and pc:WasInputKeyJustPressed(K.Equals)) or (K.Add and pc:WasInputKeyJustPressed(K.Add)) then keyZoom = 1 end
+                if (K.Hyphen and pc:WasInputKeyJustPressed(K.Hyphen)) or (K.Subtract and pc:WasInputKeyJustPressed(K.Subtract)) then keyZoom = -1 end
             end
         end)
 
@@ -5039,7 +5287,7 @@ local function EnsureInputPoll()
 
         -- Handle Left Mouse Button transitions (Box Select / Click, or Space+LeftDrag to Pan)
         if lDown and not MouseState.wasLDown then
-            if insideMap and not WaitingForBuildMenuSelection and not IsAnyButtonHovered() then
+            if insideMap and not WaitingForBuildMenuSelection and not IsAnyButtonHovered() and not IsHoveredOnMachineIconButton(mx, my) then
                 MouseState.lDownInMap = true
                 MouseState.lDraggingBox = false
                 MouseState.lPanning = spaceDown
@@ -5116,10 +5364,11 @@ local function EnsureInputPoll()
             end
             if scrollDelta == 0 then
                 pcall(function()
-                    if pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") }) then scrollDelta = 1
-                    elseif pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollDown") }) then scrollDelta = -1
-                    elseif pc.GetInputAnalogKeyState then
-                        local wAxis = tonumber(pc:GetInputAnalogKeyState({ KeyName = FName("MouseWheelAxis") })) or 0.0
+                    local K = MAP_KEYS
+                    if K.WheelUp and pc:WasInputKeyJustPressed(K.WheelUp) then scrollDelta = 1
+                    elseif K.WheelDown and pc:WasInputKeyJustPressed(K.WheelDown) then scrollDelta = -1
+                    elseif K.WheelAxis and pc.GetInputAnalogKeyState then
+                        local wAxis = tonumber(pc:GetInputAnalogKeyState(K.WheelAxis)) or 0.0
                         if wAxis > 0.05 then scrollDelta = 1
                         elseif wAxis < -0.05 then scrollDelta = -1 end
                     end
@@ -5154,24 +5403,15 @@ local function EnsureInputPoll()
             local curMachineObj = nil
             if insideMap and not MouseState.rPanning and not uiHovered then
                 local wx, wy = CanvasToWorld(mx, my)
-                for _, rp in ipairs(RenderedPorts) do
-                    if math.abs(wx - rp.x) <= rp.halfW and math.abs(wy - rp.y) <= rp.halfH then
-                        curPort = rp.idx
-                        curPortObj = rp
-                        break
-                    end
-                end
-                if not curPort and #RenderedMachines > 0 then
-                    local bestD2 = math.huge
-                    for _, rm in ipairs(RenderedMachines) do
-                        if math.abs(wx - rm.x) <= rm.halfW and math.abs(wy - rm.y) <= rm.halfH then
-                            local d2 = (wx - rm.x) ^ 2 + (wy - rm.y) ^ 2
-                            if d2 < bestD2 then
-                                bestD2 = d2
-                                curMachine = rm.addr
-                                curMachineObj = rm
-                            end
-                        end
+                local hitPort = FindHoveredPortAt(wx, wy)
+                if hitPort then
+                    curPort = hitPort.idx
+                    curPortObj = hitPort
+                elseif #RenderedMachines > 0 then
+                    local hitMach = FindHoveredMachineAt(wx, wy)
+                    if hitMach then
+                        curMachine = hitMach.addr
+                        curMachineObj = hitMach
                     end
                 end
             end
@@ -5348,7 +5588,10 @@ local function DestroyStationMap()
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
+    RenderedMachineGrid = {}
+    RenderedPortGrid = {}
     RenderedGridLines = {}
+    LastIconCanvasVisible = nil
     LastGridTier = nil
     LastGridZoomRatio = nil
     LastHoveredPortIdx = nil
