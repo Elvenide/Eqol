@@ -413,7 +413,7 @@ local TELEM_MUTED  = { R = 0.6800, G = 0.7200, B = 0.7800, A = 0.90 }
 
 local BOOST_BAR_H  = 132.0
 local SHIELD_BAR_H = 144.0
-local WING_CARD_W  = 204.0
+local WING_CARD_W  = 220.0
 local WING_CARD_H  = 176.0
 local WING_CHAMFER = 14.0
 
@@ -966,7 +966,7 @@ local function EnsureShipLegend(pc)
                 pcall(function()
                     hpSlot:SetVerticalAlignment(2)
                     hpSlot:SetSize({ Value = 1.0, SizeRule = 1 })
-                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 18.0, Bottom = 0.0 })
+                    hpSlot:SetPadding({ Left = 0.0, Top = 0.0, Right = 28.0, Bottom = 0.0 })
                 end)
             end
         end
@@ -1272,9 +1272,9 @@ local TelemetryTrack = {
     LastLocY = nil,
     LastLocZ = nil,
     LastLocClock = nil,
-    FuelScaleToMJ = nil,
-    IntegratedFuelMJ = nil,
-    LastFuelTickClock = nil,
+    LastTotalFuelMJ = nil,
+    LastFuelClock = nil,
+    MeasuredBurnRateMJ = 0.0,
 }
 
 local function UpdateShipTelemetry(shipActor, shipObj, pc)
@@ -1291,9 +1291,9 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         TelemetryTrack.LastLocY = nil
         TelemetryTrack.LastLocZ = nil
         TelemetryTrack.LastLocClock = nil
-        TelemetryTrack.FuelScaleToMJ = nil
-        TelemetryTrack.IntegratedFuelMJ = nil
-        TelemetryTrack.LastFuelTickClock = nil
+        TelemetryTrack.LastTotalFuelMJ = nil
+        TelemetryTrack.LastFuelClock = nil
+        TelemetryTrack.MeasuredBurnRateMJ = 0.0
     end
 
     -- 1. Boost charge & active boosting state (BoostCharge counts down from ~180 to 0)
@@ -1390,49 +1390,52 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
     end
 
-    -- 3. Live fuel usage (always from live shipObj.FuelConsumptionRate * 0.3 MJ/s, since 3D cockpit freezes in 3P!)
-    --    and live total fuel available (GetTotalFuel auto-calibrated against initial cockpit Fuel readout,
-    --    with continuous live burn-rate integration fallback if GetTotalFuel is unavailable)
-    local rawFuelUse = nil
+    -- 3. Live total fuel available & live fuel usage directly from shipObj simulation state:
+    --    1 raw fuel unit = 0.01 MJ (10 kJ).
+    --    GetTotalFuel() = reserve fuel cells in inventory; GetRemainingFuel() = currently burning fuel cell buffer.
+    --    Summing both gives exact, continuously decreasing total fuel (matches vanilla cockpit 1:1).
     local rawTotalFuel = nil
+    local rawBurnBuf = nil
+    local rawFuelUse = nil
     pcall(function()
+        if shipObj.GetTotalFuel then rawTotalFuel = ReadNumericOrFixed(shipObj:GetTotalFuel()) end
+        if shipObj.GetRemainingFuel then rawBurnBuf = ReadNumericOrFixed(shipObj:GetRemainingFuel()) end
         rawFuelUse = ReadNumericOrFixed(shipObj.FuelConsumptionRate)
         if rawFuelUse == nil then rawFuelUse = ReadNumericOrFixed(shipObj.PowerConsumptionRate) end
-        if shipObj.GetTotalFuel then rawTotalFuel = ReadNumericOrFixed(shipObj:GetTotalFuel()) end
     end)
 
-    local fuelUseMJPerSec = rawFuelUse and (rawFuelUse * 0.3) or 0.0
+    local fuelAvailMJ = nil
+    if rawTotalFuel ~= nil or rawBurnBuf ~= nil then
+        fuelAvailMJ = ((rawTotalFuel or 0.0) + (rawBurnBuf or 0.0)) * 0.01
+    end
+
+    -- Measure live burn rate from actual total fuel delta as fallback when FuelConsumptionRate is 0/nil
+    if fuelAvailMJ ~= nil then
+        if TelemetryTrack.LastTotalFuelMJ ~= nil and TelemetryTrack.LastFuelClock ~= nil then
+            local dtF = now - TelemetryTrack.LastFuelClock
+            if dtF >= 0.25 then
+                local deltaMJ = TelemetryTrack.LastTotalFuelMJ - fuelAvailMJ
+                -- Ignore sudden positive jumps (refueling) or huge negative spikes
+                if deltaMJ >= 0.0 and deltaMJ < 5000.0 then
+                    local instRate = deltaMJ / dtF
+                    TelemetryTrack.MeasuredBurnRateMJ = TelemetryTrack.MeasuredBurnRateMJ * 0.4 + instRate * 0.6
+                elseif deltaMJ < -10.0 then
+                    TelemetryTrack.MeasuredBurnRateMJ = 0.0
+                end
+                TelemetryTrack.LastTotalFuelMJ = fuelAvailMJ
+                TelemetryTrack.LastFuelClock = now
+            end
+        else
+            TelemetryTrack.LastTotalFuelMJ = fuelAvailMJ
+            TelemetryTrack.LastFuelClock = now
+        end
+    end
+
+    local fuelUseMJPerSec = (rawFuelUse and rawFuelUse > 0.001) and (rawFuelUse * 0.3) or TelemetryTrack.MeasuredBurnRateMJ
     if Core.IsValidObj(ui.FuelUseTxt) then
         pcall(function()
             ui.FuelUseTxt:SetText(Core.MakeText("Using: " .. FormatEnergyValue(fuelUseMJPerSec, true)))
         end)
-    end
-
-    -- Auto-calibrate GetTotalFuel unit scale once against the fresh cockpit Fuel string on 3P entry
-    local fuelAvailMJ = nil
-    if TelemetryTrack.FuelScaleToMJ == nil and TelemetryTrack.IntegratedFuelMJ == nil then
-        local _, cockpitFuelStr = ReadCockpitFuelStrings(shipActor)
-        local cockpitMJ = ParseEnergyStringToMJ(cockpitFuelStr)
-        if cockpitMJ and cockpitMJ > 0.0 then
-            if rawTotalFuel and rawTotalFuel > 0.001 then
-                TelemetryTrack.FuelScaleToMJ = cockpitMJ / rawTotalFuel
-            else
-                TelemetryTrack.IntegratedFuelMJ = cockpitMJ
-                TelemetryTrack.LastFuelTickClock = now
-            end
-        end
-    end
-
-    if rawTotalFuel ~= nil then
-        local scale = TelemetryTrack.FuelScaleToMJ or 0.005
-        fuelAvailMJ = rawTotalFuel * scale
-    elseif TelemetryTrack.IntegratedFuelMJ ~= nil then
-        if TelemetryTrack.LastFuelTickClock then
-            local dtF = math.max(0.0, math.min(0.5, now - TelemetryTrack.LastFuelTickClock))
-            TelemetryTrack.IntegratedFuelMJ = math.max(0.0, TelemetryTrack.IntegratedFuelMJ - fuelUseMJPerSec * dtF)
-        end
-        TelemetryTrack.LastFuelTickClock = now
-        fuelAvailMJ = TelemetryTrack.IntegratedFuelMJ
     end
 
     if Core.IsValidObj(ui.FuelAvailTxt) then
@@ -1508,9 +1511,9 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
 
     if not TelemetryDiagLogged then
         TelemetryDiagLogged = true
-        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%.2f rawTotalFuel=%s scale=%s hull=%s/%s shields=%s/%s",
+        Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%.2f rawTotal=%s rawBuf=%s fuelMJ=%s hull=%s/%s shields=%s/%s",
             tostring(boostCharge), tostring(effMaxBoost), speedMs,
-            fuelUseMJPerSec, tostring(rawTotalFuel), tostring(TelemetryTrack.FuelScaleToMJ),
+            fuelUseMJPerSec, tostring(rawTotalFuel), tostring(rawBurnBuf), tostring(fuelAvailMJ),
             tostring(curHull), tostring(maxHull), tostring(curShields), tostring(maxShields)))
     end
 end
