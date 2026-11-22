@@ -49,21 +49,35 @@ jobs:
         env:
           OUTPUT: CHANGELOG_RELEASE.md
 
-      - name: Package Eqol mod zip
+      - name: Package Eqol mod zips
         if: steps.version.outputs.exists == 'false'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          STAGE="dist/Eqol"
-          mkdir -p "${STAGE}"
-          cp -r Scripts "${STAGE}/Scripts"
-          cp README.md "${STAGE}/README.md"
+
+          # 1. Direct UE4SS zip (Eqol/)
+          UE4SS_STAGE="dist-ue4ss/Eqol"
+          mkdir -p "${UE4SS_STAGE}"
+          cp -r Scripts "${UE4SS_STAGE}/Scripts"
+          cp README.md "${UE4SS_STAGE}/README.md"
           if [ -d docs ]; then
-            mkdir -p "${STAGE}/docs"
-            cp docs/*.md "${STAGE}/docs/" || true
+            mkdir -p "${UE4SS_STAGE}/docs"
+            cp docs/*.md "${UE4SS_STAGE}/docs/" || true
           fi
-          touch "${STAGE}/enabled.txt"
-          (cd dist && zip -r "../Eqol-v${VERSION}.zip" Eqol)
-          ls -lh "Eqol-v${VERSION}.zip"
+          touch "${UE4SS_STAGE}/enabled.txt"
+          (cd dist-ue4ss && zip -r "../Eqol-v${VERSION}-UE4SS.zip" Eqol)
+
+          # 2. MSCoreManager zip (Mods/Eqol/ + mscore.mod)
+          MSCORE_STAGE="dist-mscore/Mods/Eqol"
+          mkdir -p "${MSCORE_STAGE}"
+          cp -r "${UE4SS_STAGE}/." "${MSCORE_STAGE}/"
+          cat > "${MSCORE_STAGE}/mscore.mod" <<EOF
+          name=Eqol
+          repo=${{ github.repository }}
+          version=${VERSION}
+          EOF
+          (cd dist-mscore && zip -r "../Eqol-v${VERSION}-MSCoreManager.zip" Mods)
+
+          ls -lh "Eqol-v${VERSION}-MSCoreManager.zip" "Eqol-v${VERSION}-UE4SS.zip"
 
       - name: Build GitHub Release notes
         if: steps.version.outputs.exists == 'false'
@@ -72,7 +86,10 @@ jobs:
           {
             echo "## Eqol v${VERSION}"
             echo ""
-            echo "📖 **[Getting Started & Installation Guide](https://github.com/${{ github.repository }}/blob/main/docs/get-started.md)** (supports automated install via [MSCoreManager](https://github.com/xxalex3xx97/MSCore/releases/latest) or manual UE4SS setup)"
+            echo "📖 **[Getting Started & Installation Guide](https://github.com/${{ github.repository }}/blob/main/docs/get-started.md)**"
+            echo ""
+            echo "- **MSCoreManager**: \`Eqol-v${VERSION}-MSCoreManager.zip\` (\`Mods/Eqol/\` + \`mscore.mod\`)"
+            echo "- **Manual UE4SS**: \`Eqol-v${VERSION}-UE4SS.zip\` (\`Eqol/\`)"
             echo ""
             echo "## What's Changed"
             echo ""
@@ -90,5 +107,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Eqol v${{ steps.version.outputs.version }}
           body_path: RELEASE_NOTES.md
-          files: Eqol-v${{ steps.version.outputs.version }}.zip
+          files: |
+            Eqol-v${{ steps.version.outputs.version }}-MSCoreManager.zip
+            Eqol-v${{ steps.version.outputs.version }}-UE4SS.zip
           make_latest: true
