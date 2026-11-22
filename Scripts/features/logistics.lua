@@ -116,17 +116,16 @@ local function GetAssemblerRunState(m)
         end
     end
 
-    local isPaused = (bWorking == false)
     local isRunning = false
     if bWorking ~= nil then
         isRunning = bWorking and (status == nil or status == 0)
     elseif status ~= nil then
         isRunning = (status == 0)
     end
-    return isRunning, status, isPaused
+    return isRunning, status
 end
 
-local function CheckAssemblerInventories(m, isRunning, machineStatus, isPaused, inputs, outputs)
+local function CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
     local missingInputs = false
     local missingNames = {}
     local outputFull = false
@@ -215,8 +214,8 @@ local function CheckAssemblerInventories(m, isRunning, machineStatus, isPaused, 
         missingInputs = true
     end
 
-    -- If powered, unpaused, & valid config with all required inputs present, but stopped -> output is full
-    if not outputFull and not isPaused and not isRunning and machineStatus ~= 2 and machineStatus ~= 3 and not missingInputs then
+    -- If powered & valid config with all required inputs present, but stopped -> output is full
+    if not outputFull and not isRunning and machineStatus ~= 2 and machineStatus ~= 3 and not missingInputs then
         outputFull = true
     end
     if outputFull then
@@ -274,7 +273,7 @@ local function CollectStationLogisticsData(station, walkFrame)
                     if bm > 0.0001 then bonusMult = bm end
                 end)
 
-                local isRunning, machineStatus, isPaused = GetAssemblerRunState(m)
+                local isRunning, machineStatus = GetAssemblerRunState(m)
                 local craftSec = 1.0
                 local inputs = {}
                 local outputs = {}
@@ -319,14 +318,14 @@ local function CollectStationLogisticsData(station, walkFrame)
                         end)
                     end
 
-                    hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, isPaused, inputs, outputs)
+                    hasMissingInputs, missingNames, isOutputFull = CheckAssemblerInventories(m, isRunning, machineStatus, inputs, outputs)
 
                     -- Total Production reflects ONLY actual currently running output;
-                    -- stationProdRates also counts unpaused Output Full machines so backed-up producers don't report fake deficits.
+                    -- stationProdRates also counts Output Full machines so backed-up producers don't report fake deficits.
                     for _, outp in ipairs(outputs) do
                         local k = GetItemKey(outp.Item)
                         if k then
-                            if isRunning or (isOutputFull and not isPaused) then
+                            if isRunning or isOutputFull then
                                 stationProdRates[k] = (stationProdRates[k] or 0.0) + outp.Rate
                             end
                             if isRunning then
@@ -338,8 +337,8 @@ local function CollectStationLogisticsData(station, walkFrame)
                         end
                     end
 
-                    -- Demand counts running or input-starved machines (not paused, output-full, or unpowered)
-                    if (isRunning or hasMissingInputs) and not isPaused then
+                    -- Demand counts running or input-starved machines (not output-full, unpowered, or invalid config)
+                    if (isRunning or hasMissingInputs) and machineStatus ~= 2 and machineStatus ~= 3 then
                         for _, inp in ipairs(inputs) do
                             local k = GetItemKey(inp.Item)
                             if k then
@@ -355,7 +354,6 @@ local function CollectStationLogisticsData(station, walkFrame)
                     Name = StationData.GetMachineDisplayName(m),
                     HasRecipe = Core.IsValidObj(rec),
                     IsRunning = isRunning,
-                    IsPaused = isPaused,
                     MachineStatus = machineStatus,
                     HasMissingInputs = hasMissingInputs,
                     MissingInputNames = missingNames,
@@ -578,11 +576,6 @@ local function ComputeAssemblerStatus(entry, prodRates, consRates)
         statusLabel = "No Recipe"
         statusCol = STATUS_COLORS.Amber
         tooltipMsg = "Idle: no active recipe or output configured."
-    elseif entry.IsPaused then
-        statusCode = "A_PAU"
-        statusLabel = "Paused"
-        statusCol = STATUS_COLORS.Amber
-        tooltipMsg = "Paused: machine is manually turned off."
     elseif entry.MachineStatus == 2 then
         statusCode = "R_PWR"
         statusLabel = "No Power"

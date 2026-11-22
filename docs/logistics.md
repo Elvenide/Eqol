@@ -18,11 +18,11 @@ Inspect your station's total stored inventory and production/consumption through
 - **Production & Consumption Rate Monitor**:
   - Lists every production machine (assemblers, advanced assemblers, refineries, etc.) on the station in an icon-heavy layout.
   - Displays each ingredient's icon and consumption rate (**items/min**) alongside the output item's icon and production rate (**items/min**).
-  - **Machine Status Indicator** (4 status colors across 7 detailed states; hover over any machine row for the exact status tooltip):
-    - **Green**: Running normally (`Working`), with all ingredients supplied.
+  - **Machine Status Indicator** (4 status colors; hover over any machine row for the exact status tooltip):
+    - **Green**: Running normally (`Producing`), with all ingredients supplied.
     - **Blue**: Output buffer is full (`Output Full`).
-    - **Amber**: Idle or paused (`No Recipe`, `Paused`, or `Waiting`).
-    - **Red**: Blocked or bottlenecked (`No Power`, `Input Deficit` / missing ingredients).
+    - **Amber**: Idle (`No Recipe` or `Idle`).
+    - **Red**: Blocked or bottlenecked (`No Power`, `Invalid Config`, `Missing Inputs`, or `Input Deficit`).
 
 ## Configuration
 
