@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.VERSION = "0.1.77"
+Core.VERSION = "0.1.78"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
