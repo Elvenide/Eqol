@@ -1,11 +1,9 @@
 -- Eqol (Elvenide's Quality of Life) - Core Utilities & Feature Registry
 -- 100% client-side / save-safe: does not modify world saves, pak files, or serialized objects.
 
-local UEHelpers = require("UEHelpers")
-
 local Core = {}
 
-Core.VERSION = "0.1.70"
+Core.VERSION = "0.1.71"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -295,24 +293,18 @@ function Core.GetLocalPlayerController()
         CachedLocalPC = nil
     end
 
-    local ok, list = pcall(FindAllOf, "BP_PlayerController_C")
-    if ok and list then
-        for _, pc in ipairs(list) do
-            if Core.IsValidObj(pc) then
-                local okLocal, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
-                if okLocal and isLocal then
-                    CachedLocalPC = pc
-                    return pc
+    for _, clsName in ipairs({ "BP_PlayerController_C", "PlayerController" }) do
+        local ok, list = pcall(FindAllOf, clsName)
+        if ok and list then
+            for _, pc in ipairs(list) do
+                if Core.IsValidObj(pc) then
+                    local okLocal, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
+                    if okLocal and isLocal then
+                        CachedLocalPC = pc
+                        return pc
+                    end
                 end
             end
-        end
-    end
-    local fallback = UEHelpers.GetPlayerController()
-    if Core.IsValidObj(fallback) then
-        local okLocal, isLocal = pcall(function() return fallback:IsLocalPlayerController() end)
-        if okLocal and isLocal then
-            CachedLocalPC = fallback
-            return fallback
         end
     end
     return nil
@@ -604,8 +596,14 @@ function Core.SpawnActor(worldContext, classPath, loc, rot)
     if Core.IsValidObj(worldContext) and worldContext.GetWorld then
         pcall(function() world = worldContext:GetWorld() end)
     end
-    if not Core.IsValidObj(world) and UEHelpers and UEHelpers.GetWorld then
-        pcall(function() world = UEHelpers.GetWorld() end)
+    if not Core.IsValidObj(world) then
+        local pc = Core.GetLocalPlayerController()
+        if Core.IsValidObj(pc) and pc.GetWorld then
+            pcall(function() world = pc:GetWorld() end)
+        end
+    end
+    if not Core.IsValidObj(world) then
+        pcall(function() world = FindFirstOf("World") end)
     end
     if not Core.IsValidObj(world) then
         Core.Log("Core.SpawnActor: no valid UWorld")
