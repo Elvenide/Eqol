@@ -157,26 +157,32 @@ local ViewTransform = {
 local RenderedMachines = {}  -- list of { machine, x, y, z, yaw, cellsX, cellsY, halfW, halfH, cat, buildable, recipe, actorClsPath, displayName }
 local RenderedConveyors = {} -- subset of RenderedMachines where cat == "Conveyor"
 local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, halfH, isInput, isOutput, machineName }
-local RenderedMachineGrid = {} -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover)
-local RenderedPortGrid = {}    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
-local HOVER_CELL_CM = 400.0
-local LastIconCanvasVisible = nil
 
-local function GridBucketKey(gx, gy)
+-- Consolidated performance state & helpers (single local table to stay well under Lua's 200-local limit)
+local Perf = {
+    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover)
+    PortGrid = {},    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
+    HOVER_CELL_CM = 400.0,
+    LastIconCanvasVisible = nil,
+    MapKeys = nil,
+}
+
+function Perf.GridBucketKey(gx, gy)
     return gx .. "," .. gy
 end
 
-local function InsertMachineIntoGrid(recEntry)
-    local minX = math.floor((recEntry.x - recEntry.halfW) / HOVER_CELL_CM)
-    local maxX = math.floor((recEntry.x + recEntry.halfW) / HOVER_CELL_CM)
-    local minY = math.floor((recEntry.y - recEntry.halfH) / HOVER_CELL_CM)
-    local maxY = math.floor((recEntry.y + recEntry.halfH) / HOVER_CELL_CM)
+function Perf.InsertMachine(recEntry)
+    local cell = Perf.HOVER_CELL_CM
+    local minX = math.floor((recEntry.x - recEntry.halfW) / cell)
+    local maxX = math.floor((recEntry.x + recEntry.halfW) / cell)
+    local minY = math.floor((recEntry.y - recEntry.halfH) / cell)
+    local maxY = math.floor((recEntry.y + recEntry.halfH) / cell)
     local keys = {}
     for gx = minX, maxX do
         for gy = minY, maxY do
-            local k = GridBucketKey(gx, gy)
-            local b = RenderedMachineGrid[k]
-            if not b then b = {}; RenderedMachineGrid[k] = b end
+            local k = Perf.GridBucketKey(gx, gy)
+            local b = Perf.MachineGrid[k]
+            if not b then b = {}; Perf.MachineGrid[k] = b end
             b[#b + 1] = recEntry
             keys[#keys + 1] = k
         end
@@ -184,31 +190,32 @@ local function InsertMachineIntoGrid(recEntry)
     recEntry._gridKeys = keys
 end
 
-local function RemoveMachineFromGrid(recEntry)
+function Perf.RemoveMachine(recEntry)
     if not recEntry or not recEntry._gridKeys then return end
     for _, k in ipairs(recEntry._gridKeys) do
-        local b = RenderedMachineGrid[k]
+        local b = Perf.MachineGrid[k]
         if b then
             for i = #b, 1, -1 do
                 if b[i] == recEntry then table.remove(b, i) end
             end
-            if #b == 0 then RenderedMachineGrid[k] = nil end
+            if #b == 0 then Perf.MachineGrid[k] = nil end
         end
     end
     recEntry._gridKeys = nil
 end
 
-local function InsertPortIntoGrid(pe)
-    local minX = math.floor((pe.x - pe.halfW) / HOVER_CELL_CM)
-    local maxX = math.floor((pe.x + pe.halfW) / HOVER_CELL_CM)
-    local minY = math.floor((pe.y - pe.halfH) / HOVER_CELL_CM)
-    local maxY = math.floor((pe.y + pe.halfH) / HOVER_CELL_CM)
+function Perf.InsertPort(pe)
+    local cell = Perf.HOVER_CELL_CM
+    local minX = math.floor((pe.x - pe.halfW) / cell)
+    local maxX = math.floor((pe.x + pe.halfW) / cell)
+    local minY = math.floor((pe.y - pe.halfH) / cell)
+    local maxY = math.floor((pe.y + pe.halfH) / cell)
     local keys = {}
     for gx = minX, maxX do
         for gy = minY, maxY do
-            local k = GridBucketKey(gx, gy)
-            local b = RenderedPortGrid[k]
-            if not b then b = {}; RenderedPortGrid[k] = b end
+            local k = Perf.GridBucketKey(gx, gy)
+            local b = Perf.PortGrid[k]
+            if not b then b = {}; Perf.PortGrid[k] = b end
             b[#b + 1] = pe
             keys[#keys + 1] = k
         end
@@ -216,22 +223,23 @@ local function InsertPortIntoGrid(pe)
     pe._gridKeys = keys
 end
 
-local function RemovePortFromGrid(pe)
+function Perf.RemovePort(pe)
     if not pe or not pe._gridKeys then return end
     for _, k in ipairs(pe._gridKeys) do
-        local b = RenderedPortGrid[k]
+        local b = Perf.PortGrid[k]
         if b then
             for i = #b, 1, -1 do
                 if b[i] == pe then table.remove(b, i) end
             end
-            if #b == 0 then RenderedPortGrid[k] = nil end
+            if #b == 0 then Perf.PortGrid[k] = nil end
         end
     end
     pe._gridKeys = nil
 end
 
-local function FindHoveredPortAt(wx, wy)
-    local b = RenderedPortGrid[GridBucketKey(math.floor(wx / HOVER_CELL_CM), math.floor(wy / HOVER_CELL_CM))]
+function Perf.FindHoveredPortAt(wx, wy)
+    local cell = Perf.HOVER_CELL_CM
+    local b = Perf.PortGrid[Perf.GridBucketKey(math.floor(wx / cell), math.floor(wy / cell))]
     if not b then return nil end
     for i = 1, #b do
         local rp = b[i]
@@ -242,8 +250,9 @@ local function FindHoveredPortAt(wx, wy)
     return nil
 end
 
-local function FindHoveredMachineAt(wx, wy)
-    local b = RenderedMachineGrid[GridBucketKey(math.floor(wx / HOVER_CELL_CM), math.floor(wy / HOVER_CELL_CM))]
+function Perf.FindHoveredMachineAt(wx, wy)
+    local cell = Perf.HOVER_CELL_CM
+    local b = Perf.MachineGrid[Perf.GridBucketKey(math.floor(wx / cell), math.floor(wy / cell))]
     if not b then return nil end
     local bestD2 = math.huge
     local best = nil
@@ -260,11 +269,9 @@ local function FindHoveredMachineAt(wx, wy)
     return best
 end
 
--- Hoisted FName key tables for per-frame Tick() (avoids ~18 FName allocations per frame)
-local MAP_KEYS = nil
-local function EnsureMapKeys()
-    if MAP_KEYS then return end
-    MAP_KEYS = {}
+function Perf.EnsureMapKeys()
+    if Perf.MapKeys then return end
+    Perf.MapKeys = {}
     local names = {
         LMB = "LeftMouseButton", RMB = "RightMouseButton", MMB = "MiddleMouseButton",
         LShift = "LeftShift", RShift = "RightShift", Space = "SpaceBar",
@@ -274,7 +281,7 @@ local function EnsureMapKeys()
         WheelUp = "MouseScrollUp", WheelDown = "MouseScrollDown", WheelAxis = "MouseWheelAxis",
     }
     for k, n in pairs(names) do
-        pcall(function() MAP_KEYS[k] = { KeyName = FName(n) } end)
+        pcall(function() Perf.MapKeys[k] = { KeyName = FName(n) } end)
     end
 end
 local RenderedGridLines = {} -- { border, slot, isVertical, spanOther, isMajor4, isMajor8 }
@@ -453,8 +460,8 @@ local function ApplyViewTransform()
     UpdateGridAppearanceForZoom(zoomRatio)
     if Core.IsValidObj(MapUI.IconCanvas) then
         local showIcons = (CELL_CM * ViewTransform.scale) >= 12.0
-        if LastIconCanvasVisible ~= showIcons then
-            LastIconCanvasVisible = showIcons
+        if Perf.LastIconCanvasVisible ~= showIcons then
+            Perf.LastIconCanvasVisible = showIcons
             pcall(function() MapUI.IconCanvas:SetVisibility(showIcons and 4 or 1) end)
         end
     end
@@ -3391,11 +3398,11 @@ RefreshStationMapCanvas = function(machinesOnly)
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
-    RenderedMachineGrid = {}
-    RenderedPortGrid = {}
+    Perf.MachineGrid = {}
+    Perf.PortGrid = {}
     RenderedMachineWidgets = {}
     LastHoveredPortIdx = nil
-    LastIconCanvasVisible = nil
+    Perf.LastIconCanvasVisible = nil
     FloorIconButtons = {}
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -3763,7 +3770,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             SelectedMachines[mAddr] = nil
             for i = #RenderedMachines, 1, -1 do
                 if RenderedMachines[i].addr == mAddr then
-                    RemoveMachineFromGrid(RenderedMachines[i])
+                    Perf.RemoveMachine(RenderedMachines[i])
                     table.remove(RenderedMachines, i)
                 end
             end
@@ -3772,7 +3779,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
             for i = #RenderedPorts, 1, -1 do
                 if RenderedPorts[i].ownerAddr == mAddr then
-                    RemovePortFromGrid(RenderedPorts[i])
+                    Perf.RemovePort(RenderedPorts[i])
                     table.remove(RenderedPorts, i)
                 end
             end
@@ -3841,7 +3848,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 displayName = StationData.GetMachineDisplayName(m),
             }
             table.insert(RenderedMachines, recEntry)
-            InsertMachineIntoGrid(recEntry)
+            Perf.InsertMachine(recEntry)
             local mTargetCanvas = getOrCreateChunkCanvas(machineChunks, mCanvas, mwx, mwy)
             if cat == "Conveyor" then
                 table.insert(RenderedConveyors, recEntry)
@@ -4005,7 +4012,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                         }
                         seenMachinePorts[cellKey] = existing
                         table.insert(RenderedPorts, existing)
-                        InsertPortIntoGrid(existing)
+                        Perf.InsertPort(existing)
                         table.insert(deferredPorts, { pmx = pmx, pmy = pmy, outWidgets = mPortWidgets, track = mTrack, targetCanvas = mTargetCanvas })
                     else
                         if p.isInput then existing.isInput = true end
@@ -5167,10 +5174,10 @@ local function IsAnyButtonHovered()
     return false
 end
 
-local function IsHoveredOnMachineIconButton(mx, my)
-    if LastIconCanvasVisible == false or not mx or not my then return false end
+function Perf.IsHoveredOnMachineIconButton(mx, my)
+    if Perf.LastIconCanvasVisible == false or not mx or not my then return false end
     local wx, wy = CanvasToWorld(mx, my)
-    local rm = FindHoveredMachineAt(wx, wy)
+    local rm = Perf.FindHoveredMachineAt(wx, wy)
     if not rm then return false end
     local ib = FloorIconButtons[rm.addr]
     if ib and Core.IsValidObj(ib.btn) and ib.btn.IsHovered then
@@ -5183,7 +5190,7 @@ end
 local function EnsureInputPoll()
     if InputPollActive then return end
     InputPollActive = true
-    EnsureMapKeys()
+    Perf.EnsureMapKeys()
 
     local function Tick()
         if not IsMapOpen() or not MapUI then
@@ -5255,7 +5262,7 @@ local function EnsureInputPoll()
         local keyPanX, keyPanY = 0.0, 0.0
         local keyZoom = 0
         pcall(function()
-            local K = MAP_KEYS
+            local K = Perf.MapKeys
             lDown = K.LMB and (pc:IsInputKeyDown(K.LMB) == true) or false
             rDown = K.RMB and (pc:IsInputKeyDown(K.RMB) == true) or false
             mDown = K.MMB and (pc:IsInputKeyDown(K.MMB) == true) or false
@@ -5287,7 +5294,7 @@ local function EnsureInputPoll()
 
         -- Handle Left Mouse Button transitions (Box Select / Click, or Space+LeftDrag to Pan)
         if lDown and not MouseState.wasLDown then
-            if insideMap and not WaitingForBuildMenuSelection and not IsAnyButtonHovered() and not IsHoveredOnMachineIconButton(mx, my) then
+            if insideMap and not WaitingForBuildMenuSelection and not IsAnyButtonHovered() and not Perf.IsHoveredOnMachineIconButton(mx, my) then
                 MouseState.lDownInMap = true
                 MouseState.lDraggingBox = false
                 MouseState.lPanning = spaceDown
@@ -5364,7 +5371,7 @@ local function EnsureInputPoll()
             end
             if scrollDelta == 0 then
                 pcall(function()
-                    local K = MAP_KEYS
+                    local K = Perf.MapKeys
                     if K.WheelUp and pc:WasInputKeyJustPressed(K.WheelUp) then scrollDelta = 1
                     elseif K.WheelDown and pc:WasInputKeyJustPressed(K.WheelDown) then scrollDelta = -1
                     elseif K.WheelAxis and pc.GetInputAnalogKeyState then
@@ -5403,12 +5410,12 @@ local function EnsureInputPoll()
             local curMachineObj = nil
             if insideMap and not MouseState.rPanning and not uiHovered then
                 local wx, wy = CanvasToWorld(mx, my)
-                local hitPort = FindHoveredPortAt(wx, wy)
+                local hitPort = Perf.FindHoveredPortAt(wx, wy)
                 if hitPort then
                     curPort = hitPort.idx
                     curPortObj = hitPort
                 elseif #RenderedMachines > 0 then
-                    local hitMach = FindHoveredMachineAt(wx, wy)
+                    local hitMach = Perf.FindHoveredMachineAt(wx, wy)
                     if hitMach then
                         curMachine = hitMach.addr
                         curMachineObj = hitMach
@@ -5588,10 +5595,10 @@ local function DestroyStationMap()
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
-    RenderedMachineGrid = {}
-    RenderedPortGrid = {}
+    Perf.MachineGrid = {}
+    Perf.PortGrid = {}
     RenderedGridLines = {}
-    LastIconCanvasVisible = nil
+    Perf.LastIconCanvasVisible = nil
     LastGridTier = nil
     LastGridZoomRatio = nil
     LastHoveredPortIdx = nil
