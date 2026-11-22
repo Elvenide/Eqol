@@ -21,8 +21,8 @@ Choose either **MSCoreManager** (recommended) or **Manual UE4SS Installation** b
    - Run `MSCoreManager` and follow its prompts to automatically install and configure UE4SS for *Main Sequence*.
 2. **Install Eqol**:
    - Open **MSCoreManager** and click **Add mod...**.
-   - Paste in `https://github.com/Elvenide/Eqol` to install automatically from GitHub Releases (MSCoreManager uses the **`Eqol-v<version>-MSCoreManager.zip`** package, which includes `Mods/Eqol/` and `mscore.mod`).
-   - *(Alternatively, if installing from a local archive in MSCoreManager, download **`Eqol-v<version>-MSCoreManager.zip`** from [github.com/Elvenide/Eqol/releases](https://github.com/Elvenide/Eqol/releases).)*
+   - Paste in `https://github.com/Elvenide/Eqol` to install automatically from GitHub Releases (MSCoreManager uses `manifest.txt` and **`Eqol-v<version>.zip`**).
+   - *(Alternatively, if installing from a local archive in MSCoreManager, download **`Eqol-v<version>.zip`** from [github.com/Elvenide/Eqol/releases](https://github.com/Elvenide/Eqol/releases).)*
 3. **Launch Main Sequence**:
    - Eqol will automatically create/update `Eqol\config.json` with default settings on first launch.
    - Open **Settings → Eqol** at any time to toggle individual features on or off, or **Settings → Controls** to rebind Eqol hotkeys.
@@ -43,11 +43,12 @@ Choose either **MSCoreManager** (recommended) or **Manual UE4SS Installation** b
      MinorVersion = 7
      ```
 2. **Install Eqol**:
-   - Download **`Eqol-v<version>-UE4SS.zip`** from [github.com/Elvenide/Eqol/releases](https://github.com/Elvenide/Eqol/releases) (do **not** use the `-MSCoreManager.zip` archive for manual UE4SS installs).
-   - Extract the `Eqol` folder into:
+   - Download **`Eqol-v<version>.zip`** from [github.com/Elvenide/Eqol/releases](https://github.com/Elvenide/Eqol/releases).
+   - Open the zip, navigate into its `Mods\` folder, and copy the `Eqol` folder into:
      ```
      Main Sequence\Windows\MainSequence\Binaries\Win64\ue4ss\Mods\Eqol\
      ```
+     *(You can safely leave `mscore.mod` inside `Eqol\`—UE4SS ignores it.)*
    - Ensure `Eqol\enabled.txt` exists (an empty file is fine).
    - Open `ue4ss\Mods\mods.txt` and add `Eqol : 1` **above** `Keybinds : 1`:
      ```ini
