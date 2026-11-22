@@ -2,6 +2,9 @@
 
 Displays a compact numeric badge in the bottom-right corner of each bound hotbar slot showing how many of that machine you can currently build from your inventory.
 
+![Hotbar buildable count badges](images/hotbar-build-counts.png)
+*Bottom hotbar showing live buildable quantity badges in the corner of each bound machine slot.*
+
 ## Features
 
 - Automatically calculates the maximum buildable quantity for every bound slot on the bottom hotbar (`WBP_Hotbar_C`), checking both `ItemCost` and `ItemDetails.Recipe.Inputs`.

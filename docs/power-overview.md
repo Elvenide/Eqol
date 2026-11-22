@@ -2,6 +2,9 @@
 
 Quickly check your station's power grid from anywhere inside a space station and see power efficiency at a glance.
 
+![Power Overview window with summary progress bars](images/power-overview.png)
+*Power Overview opened via hotkey showing Production and Consumption summary bars and the color-coded Power Satisfaction readout.*
+
 ## Features
 
 - **Global Power Overview Hotkey (Default: `P`)**

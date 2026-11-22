@@ -2,6 +2,9 @@
 
 Eqol adds a native **Eqol** tab directly inside Main Sequence's **Settings** menu, letting you enable or disable individual Eqol features on the fly without editing files or restarting the game.
 
+![In-game Eqol Settings tab](images/eqol-settings.png)
+*The native Eqol tab inside the Settings menu showing per-feature enable/disable cards.*
+
 ## How to Open
 
 1. Press **Esc** (or open **Settings** from the Main Menu).

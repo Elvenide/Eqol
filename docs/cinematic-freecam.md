@@ -2,6 +2,9 @@
 
 Toggle built-in **Spectator Mode** and **Hide HUD** together with a single keypress for clean screenshots and cinematic camera movement.
 
+![Cinematic Freecam view inside a station](images/freecam-and-nametags.png)
+*Cinematic Freecam active inside a space station with the HUD hidden and free-flying Spectator Mode enabled.*
+
 ## Usage
 
 - Press **`C`** (default) at any time in-game to enable both Spectator Mode and Hide HUD.

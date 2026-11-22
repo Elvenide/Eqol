@@ -2,6 +2,9 @@
 
 Inspect your station's total stored inventory and production/consumption throughput at a glance.
 
+![Station Logistics UI screen](images/logistics-menu.png)
+*Logistics overview showing aggregated station storage, total production rates, and per-machine status indicators (`Producing`, `Output Full`, and `Missing Inputs`).*
+
 ## Opening Logistics
 
 - Press **`L`** (default) while on foot in a space station to toggle the **Logistics** window (press **`Escape`** or click **Close** to close it).

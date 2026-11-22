@@ -2,6 +2,9 @@
 
 Enhances *Main Sequence*'s existing bottom-right version label in-place to show your live FPS alongside both the Eqol and *Main Sequence* version numbers.
 
+![Bottom-right HUD version and FPS bar with menu keybind badges](images/hud-version-and-new-menus.png)
+*Bottom-right HUD showing the live FPS, Eqol version, and Main Sequence version below the station menu keybind indicators.*
+
 ## Format
 
 ```text

@@ -2,6 +2,9 @@
 
 Switch between 1st-person and dynamically scaled 3rd-person camera views while piloting any spaceship, complete with reactive boost camera and symmetrical HUD telemetry wings.
 
+![Ship 3rd-person camera view with telemetry wings](images/ship-camera.png)
+*3rd-person ship perspective with symmetrical speed/fuel and hull/shield telemetry wings and the contextual bottom-left keybind legend.*
+
 ## Usage
 
 - Press **`H`** (default) while piloting a ship to toggle between 1st-person and 3rd-person perspective.

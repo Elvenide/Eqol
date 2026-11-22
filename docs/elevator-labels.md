@@ -2,6 +2,9 @@
 
 See what items are currently routed through nearby item elevator ports without opening each port.
 
+![3D item elevator port icons](images/elevator-port-labels.png)
+*World-space item icons displayed above populated item elevator ports on the station floor.*
+
 ## Features
 
 - Displays a 3D world-space item icon (`WBP_Item` via `WidgetComponent`) directly on the blank gray panel above each populated conveyor port on `AElevator` / `UElevatorObject.ItemColumns`.

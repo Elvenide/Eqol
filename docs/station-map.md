@@ -29,3 +29,14 @@ View your entire space station floor-by-floor in a fullscreen 2D map with native
 - **Modification Cost, Build Validation & Apply Changes**:
   - A floating **Modification Cost** panel lists net required materials and refunds (highlighting missing items in red `#cd0046`), paired with a **Build Validation** panel when materials are missing.
   - Click **Apply Changes** to commit all staged builds/deletes/replacements natively via the game's build and disassemble commands (consuming/refunding normal inventory materials), or **Discard Changes** to cancel all pending edits.
+
+## Examples
+
+![Station Map with staged ghost placements and Build Validation](images/station-map-1.png)
+*Staged ghost placements on Floor 1 with the Modification Cost panel highlighting missing materials in red and Build Validation blocking Apply Changes until supplies are available.*
+
+![Station Map after applying staged builds](images/station-map-2.png)
+*Floor 1 immediately after clicking Apply Changes, showing all 14 newly built machines rendered live on the map.*
+
+![Station Map with machines marked for deletion and refunds](images/station-map-3.png)
+*13 machines marked for deletion in red, with the Modification Cost panel previewing the refunded materials before applying.*

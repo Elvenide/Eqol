@@ -2,6 +2,9 @@
 
 Adds a live search box to the Research / Technology screen and lets you reorder queued research items via drag-and-drop.
 
+![Research Tree search bar and drag-and-drop queue](images/research-enhancements.png)
+*Research screen showing a queued technology being dragged to reorder alongside the live search filter matching "cir".*
+
 ## Features
 
 - **Live Research Search**:

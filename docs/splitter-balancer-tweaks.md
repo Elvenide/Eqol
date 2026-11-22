@@ -2,6 +2,9 @@
 
 Makes factory floors easier to navigate by letting you walk directly over Splitters and Belt Balancers, and compacts Splitters, Belt Balancers, and Underground Belts to 2/3 height.
 
+![Walking through a compacted Belt Balancer](images/splitter-balancer-tweaks.png)
+*Player walking directly across a 2/3-height Belt Balancer on a factory conveyor line.*
+
 ## Features
 
 - **Walk-Through Splitters & Belt Balancers (Single-Player Only)**:
