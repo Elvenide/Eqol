@@ -28,3 +28,9 @@ Every feature in Eqol is designed to feel native to the base game—matching its
 - **[HUD Version & FPS Bar](docs/hud-version-bar.md)** — Enhances the bottom-right version label in-place with live FPS, Eqol version, and Main Sequence version.
 - **[Player Nametags](docs/player-nametags.md)** — Floating 3D world-space nametags above players with Online/Offline status indicators.
 - **[Player Join & Leave Alerts](docs/player-alerts.md)** — Native HUD alerts when players (including the host) join or leave the game.
+
+## Credits
+
+**Eqol** is created and maintained by Elvenide. This is an unofficial mod and I'm not affiliated with Main Sequence.
+
+> If you have questions or run into issues, Eqol has a dedicated post in `#modding-guides` within the [official Main Sequence Discord server](https://discord.com/invite/uy8w2pTcQE). Feel free to contact me in that channel on the server.

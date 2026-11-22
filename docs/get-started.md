@@ -30,6 +30,13 @@
   ```
 
 ### 2. Install Eqol
+
+#### Option A — MSCoreManager
+- If you installed **MSCoreManager** previously, open it
+- Click **Add mod...**
+- Paste in the following: `https://github.com/Elvenide/Eqol`
+
+#### Option B — Manual UE4SS Install
 - Download the latest release zip from [github.com/Elvenide/Eqol/releases](https://github.com/Elvenide/Eqol/releases).
 - Extract the `Eqol` folder into:
   ```
