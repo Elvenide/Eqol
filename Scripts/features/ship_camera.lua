@@ -306,11 +306,12 @@ end
 local function IsPilotingShipNow(pc)
     local curPC = Core.IsValidObj(pc) and pc or Core.GetLocalPlayerController()
     if not Core.IsValidObj(curPC) then return false end
-    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen(curPC) then return false end
     local ok, po = pcall(function() return curPC.PlayerObject end)
     if not ok or not Core.IsValidObj(po) then return false end
     local okShip, ship = pcall(function() return po.PilotedShip end)
-    return okShip and Core.IsValidObj(ship)
+    if not (okShip and Core.IsValidObj(ship)) then return false end
+    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen(curPC) then return false end
+    return true
 end
 
 local function ApplyShipCameraState(pc, logChange)
@@ -1139,7 +1140,8 @@ local function UpdateShipLegend(pc)
     local showAny   = showPersp or showZero or showZoom
 
     if not showAny then
-        if LegendUI and Core.IsValidObj(LegendUI.Root) then
+        if LegendUI and Core.IsValidObj(LegendUI.Root) and LegendUI.LastRootVis ~= 1 then
+            LegendUI.LastRootVis = 1
             pcall(function() LegendUI.Root:SetVisibility(1) end)
         end
         return
@@ -1169,7 +1171,10 @@ local function UpdateShipLegend(pc)
         if Core.IsValidObj(ui.ResetRow) then ui.ResetRow:SetVisibility(showZoom and 3 or 1) end
         if Core.IsValidObj(ui.LeftWing) then ui.LeftWing:SetVisibility(showZoom and 3 or 1) end
         if Core.IsValidObj(ui.RightWing) then ui.RightWing:SetVisibility(showZoom and 3 or 1) end
-        ui.Root:SetVisibility(4) -- SelfHitTestInvisible
+        if ui.LastRootVis ~= 4 then
+            ui.LastRootVis = 4
+            ui.Root:SetVisibility(4) -- SelfHitTestInvisible
+        end
     end)
 end
 
@@ -1491,20 +1496,22 @@ local function StartPilotLegendPoll()
             pcall(UpdateShipLegend)
             return
         end
-        local onMainMenu = Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
-        if onMainMenu then
-            if LegendUI and Core.IsValidObj(LegendUI.Root) then
-                pcall(function() LegendUI.Root:SetVisibility(1) end)
-            end
-            ExecuteInGameThreadWithDelay(2000, Tick)
-            return
-        end
+        -- Fast O(1) pilot check FIRST: zero FindAllOf / menu / subsystem queries while on foot or in menus!
         local pc = Core.GetLocalPlayerController()
-        if not Core.IsValidObj(pc) then
-            if LegendUI and Core.IsValidObj(LegendUI.Root) then
+        local hasPilotedShip = false
+        if Core.IsValidObj(pc) then
+            local okPO, po = pcall(function() return pc.PlayerObject end)
+            if okPO and Core.IsValidObj(po) then
+                local okShip, ship = pcall(function() return po.PilotedShip end)
+                hasPilotedShip = okShip and Core.IsValidObj(ship)
+            end
+        end
+        if not hasPilotedShip then
+            if LegendUI and Core.IsValidObj(LegendUI.Root) and LegendUI.LastRootVis ~= 1 then
+                LegendUI.LastRootVis = 1
                 pcall(function() LegendUI.Root:SetVisibility(1) end)
             end
-            ExecuteInGameThreadWithDelay(2000, Tick)
+            ExecuteInGameThreadWithDelay(Core.IsValidObj(pc) and 750 or 2000, Tick)
             return
         end
         pcall(UpdateShipLegend, pc)
