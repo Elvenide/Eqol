@@ -3226,6 +3226,41 @@ function StationData.GetAllPlayersInfo(localPC, forceRefresh)
         end
     end
 
+    -- Build replicated GameState.PlayerArray lookup (works on both host & MP clients; only contains connected players)
+    local onlinePawnAddrs = {}
+    local onlinePlayerNames = {}
+    if Core.IsValidObj(pc) then
+        pcall(function()
+            local w = pc:GetWorld()
+            local gs = Core.IsValidObj(w) and w.GameState or nil
+            if Core.IsValidObj(gs) and gs.PlayerArray then
+                StationData.ForEachArray(gs.PlayerArray, function(_, elem)
+                    local ps = Core.UnwrapArrayElem(elem)
+                    if not Core.IsValidObj(ps) then return end
+                    local pawn = nil
+                    pcall(function()
+                        pawn = ps.PawnPrivate
+                        if not Core.IsValidObj(pawn) and ps.GetPawn then
+                            pawn = ps:GetPawn()
+                        end
+                    end)
+                    if Core.IsValidObj(pawn) then
+                        onlinePawnAddrs[pawn:GetAddress()] = true
+                    end
+                    local psName = nil
+                    pcall(function()
+                        if ps.GetPlayerName then
+                            psName = ToLuaString(ps:GetPlayerName())
+                        end
+                    end)
+                    if psName and psName ~= "" then
+                        onlinePlayerNames[string.lower(psName)] = true
+                    end
+                end)
+            end
+        end)
+    end
+
     local okPO, poList = pcall(FindAllOf, "DMSPlayerObject")
     if not okPO or not poList then return players end
 
@@ -3283,7 +3318,7 @@ function StationData.GetAllPlayersInfo(localPC, forceRefresh)
                 name = isLocal and "You" or "Player"
             end
 
-            -- Resolve world position & actor (before final online check so live replicated actors count as online on MP clients)
+            -- Resolve world position & actor
             local actor = StationData.GetObjectActor(po)
             if not Core.IsValidObj(actor) and isLocal and Core.IsValidObj(pc) then
                 local okPawn, pawn = pcall(function() return pc.Pawn end)
@@ -3292,7 +3327,26 @@ function StationData.GetAllPlayersInfo(localPC, forceRefresh)
             if not Core.IsValidObj(actor) then
                 pcall(function() actor = po.Character or po.Pawn end)
             end
+            -- Offline players leave their character actor standing in the station, so actor presence
+            -- alone does NOT mean online. Check replicated PlayerState/Controller/GameState.PlayerArray instead.
             if not isOnline and Core.IsValidObj(actor) then
+                if onlinePawnAddrs[actor:GetAddress()] then
+                    isOnline = true
+                else
+                    local okPS, aPS = pcall(function() return actor.PlayerState end)
+                    if okPS and Core.IsValidObj(aPS) then
+                        isOnline = true
+                    else
+                        local okAC, aCtrl = pcall(function()
+                            return actor.GetController and actor:GetController() or actor.Controller
+                        end)
+                        if okAC and Core.IsValidObj(aCtrl) then
+                            isOnline = true
+                        end
+                    end
+                end
+            end
+            if not isOnline and name and name ~= "Player" and name ~= "You" and onlinePlayerNames[string.lower(name)] then
                 isOnline = true
             end
             local frame = nil

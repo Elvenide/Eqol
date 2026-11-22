@@ -513,6 +513,7 @@ end
 
 local function SetResearchSearchVisible(st, visible)
     if not st then return end
+    st.SearchVisible = (visible == true)
     local vis = visible and 0 or 1
     if Core.IsValidObj(st.SearchBox) then
         pcall(function() st.SearchBox:SetVisibility(vis) end)
@@ -526,11 +527,13 @@ local function EnsureAndFilterTree(tree, markFilterDirty)
     if not Core.IsValidObj(tree) then return end
     if not Core.IsFeatureEnabled("ResearchEnhancements") then
         local existing = InjectedTrees[tree:GetAddress()]
-        if existing then
+        if existing and existing.SearchVisible ~= false then
             ClearSearchInput(existing)
             existing.FilterDirty = false
-            existing.LastAppliedQuery = nil
-            ApplyResearchFilter(existing, "")
+            if existing.LastAppliedQuery ~= "" then
+                existing.LastAppliedQuery = nil
+                ApplyResearchFilter(existing, "")
+            end
             SetResearchSearchVisible(existing, false)
         end
         return
@@ -614,35 +617,158 @@ local function GetViewportMousePos(pc)
     return nil, nil
 end
 
-local function MeasureQueueSlotStep(queueBox)
-    local step = 64.0
-    if not Core.IsValidObj(queueBox) then return step end
+local function MeasureQueueGridLayout(tree, queueBox, count)
+    local stepX, stepY = 64.0, 64.0
+    local cols = math.max(1, count or 1)
+    if not Core.IsValidObj(queueBox) or (count or 0) < 1 then
+        return cols, stepX, stepY
+    end
+
     local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+    local innerSlotPadX, innerSlotPadY = 4.0, 4.0
+
+    pcall(function()
+        if queueBox.InnerSlotPadding then
+            local px = tonumber(queueBox.InnerSlotPadding.X)
+            local py = tonumber(queueBox.InnerSlotPadding.Y)
+            if px and px >= 0.0 and px <= 40.0 then innerSlotPadX = math.max(4.0, px) end
+            if py and py >= 0.0 and py <= 40.0 then innerSlotPadY = math.max(4.0, py) end
+        end
+    end)
+
     pcall(function()
         local ch = queueBox:GetChildAt(0)
         if Core.IsValidObj(ch) then
-            local w = nil
+            local w, h = nil, nil
             if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and ch.GetCachedGeometry then
-                local okS, sz = pcall(function()
-                    return slateLib:GetLocalSize(ch:GetCachedGeometry())
-                end)
+                local okS, sz = pcall(function() return slateLib:GetLocalSize(ch:GetCachedGeometry()) end)
                 if okS and sz ~= nil then
                     w = tonumber(sz.X)
+                    h = tonumber(sz.Y)
                 end
             end
-            if (not w or w < 10.0) and ch.GetDesiredSize then
+            if (not w or w < 10.0 or not h or h < 10.0) and ch.GetDesiredSize then
                 local okD, dsz = pcall(function() return ch:GetDesiredSize() end)
                 if okD and dsz ~= nil then
-                    w = tonumber(dsz.X)
+                    if not w or w < 10.0 then w = tonumber(dsz.X) end
+                    if not h or h < 10.0 then h = tonumber(dsz.Y) end
                 end
             end
-            if w and w >= 20.0 and w <= 240.0 then
-                -- RefreshResearchQueue applies 4.0 right margin on WrapBoxSlot
-                step = w + 4.0
-            end
+            if w and w >= 20.0 and w <= 300.0 then stepX = w + innerSlotPadX end
+            if h and h >= 20.0 and h <= 300.0 then stepY = h + innerSlotPadY end
         end
     end)
-    return step
+
+    local detectSrc = "fallback_count"
+    local boxW = 0.0
+
+    -- 1. Try measuring actual row wrap from child 0 vs subsequent children via LocalToAbsolute
+    local detectedCols = nil
+    if count > 1 and Core.IsValidObj(slateLib) and slateLib.LocalToAbsolute then
+        pcall(function()
+            local ch0 = queueBox:GetChildAt(0)
+            if not (Core.IsValidObj(ch0) and ch0.GetCachedGeometry) then return end
+            local p0 = slateLib:LocalToAbsolute(ch0:GetCachedGeometry(), { X = 0.0, Y = 0.0 })
+            local x0 = p0 and tonumber(p0.X) or nil
+            local y0 = p0 and tonumber(p0.Y) or nil
+            if not (x0 and y0) then return end
+
+            local dx1 = nil
+            for i = 1, count - 1 do
+                local chi = queueBox:GetChildAt(i)
+                if Core.IsValidObj(chi) and chi.GetCachedGeometry then
+                    local pi = slateLib:LocalToAbsolute(chi:GetCachedGeometry(), { X = 0.0, Y = 0.0 })
+                    local xi = pi and tonumber(pi.X) or nil
+                    local yi = pi and tonumber(pi.Y) or nil
+                    if xi and yi then
+                        if i == 1 and math.abs(yi - y0) < 10.0 and (xi - x0) > 20.0 then
+                            dx1 = xi - x0
+                        end
+                        if (yi - y0) > (stepY * 0.45) then
+                            detectedCols = i
+                            if dx1 and dx1 > 20.0 then
+                                local scale = dx1 / stepX
+                                if scale > 0.25 and scale < 4.0 then
+                                    stepY = (yi - y0) / scale
+                                end
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    if detectedCols and detectedCols >= 1 then
+        cols = detectedCols
+        detectSrc = "LocalToAbsolute"
+    else
+        -- 2. Walk queueBox and up to 4 ancestors (plus WBP_ResearchList) to find the sidebar container width
+        local function readWidgetWidth(wgt)
+            if not Core.IsValidObj(wgt) then return 0.0 end
+            local w = 0.0
+            pcall(function()
+                if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and wgt.GetCachedGeometry then
+                    local sz = slateLib:GetLocalSize(wgt:GetCachedGeometry())
+                    if sz and tonumber(sz.X) and tonumber(sz.X) > w then
+                        w = tonumber(sz.X)
+                    end
+                end
+                if w < stepX and wgt.bExplicitWrapSize == true and tonumber(wgt.ExplicitWrapSize) then
+                    w = tonumber(wgt.ExplicitWrapSize)
+                end
+                if w < stepX and tonumber(wgt.WrapSize) and tonumber(wgt.WrapSize) >= stepX then
+                    w = tonumber(wgt.WrapSize)
+                end
+                if w < stepX and wgt.GetDesiredSize then
+                    local dsz = wgt:GetDesiredSize()
+                    if dsz and tonumber(dsz.X) and tonumber(dsz.X) > w then
+                        w = tonumber(dsz.X)
+                    end
+                end
+            end)
+            return w
+        end
+
+        local cur = queueBox
+        for depth = 0, 4 do
+            if not Core.IsValidObj(cur) then break end
+            local w = readWidgetWidth(cur)
+            -- Ignore full-screen root panels (> 900px) and tiny unmeasured panels (< stepX)
+            if w >= stepX and w <= 900.0 then
+                boxW = w
+                detectSrc = "ancestor_" .. depth
+                break
+            end
+            local okP, par = pcall(function() return cur:GetParent() end)
+            cur = (okP and Core.IsValidObj(par)) and par or nil
+        end
+
+        if boxW < stepX and Core.IsValidObj(tree) then
+            pcall(function()
+                if Core.IsValidObj(tree.WBP_ResearchList) then
+                    local w = readWidgetWidth(tree.WBP_ResearchList)
+                    if w >= stepX and w <= 900.0 then
+                        boxW = w
+                        detectSrc = "ResearchList"
+                    end
+                end
+            end)
+        end
+
+        if boxW >= stepX then
+            cols = math.max(1, math.floor((boxW + innerSlotPadX + 2.0) / stepX))
+        else
+            -- Vanilla WBP_ResearchTree_2_C ResearchQueueContainer is 4 columns wide
+            cols = math.min(count, 4)
+            detectSrc = "default_4"
+        end
+    end
+
+    Core.Log(string.format("[ResearchEnhancements] Drag layout: count=%d cols=%d stepX=%.1f stepY=%.1f boxW=%.1f src=%s",
+        count, cols, stepX, stepY, boxW, detectSrc))
+    return cols, stepX, stepY
 end
 
 local function ResetQueueChildVisuals(queueBox)
@@ -1004,7 +1130,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
 
     DestroyDragGhost()
     local startX, startY = GetViewportMousePos(pc)
-    local slotStep = MeasureQueueSlotStep(queueBox)
+    local gridCols, slotStepX, slotStepY = MeasureQueueGridLayout(tree, queueBox, count)
     local snapshotTechs = CollectQueuedTechs(tree, queueBox)
 
     local dragState = {
@@ -1015,7 +1141,9 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
         StartIdx = startIdx,
         TargetIdx = startIdx,
         Count = count,
-        SlotStep = slotStep,
+        GridCols = gridCols,
+        SlotStep = slotStepX,
+        SlotStepY = slotStepY,
         IsDragging = false,
         StartX = startX,
         StartY = startY,
@@ -1079,11 +1207,24 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
         end
 
         if dragState.IsDragging then
-            local step = dragState.SlotStep or 64.0
-            local rawSlotDelta = (dx >= 0.0)
-                and math.floor((dx + step * 0.5) / step)
-                or math.ceil((dx - step * 0.5) / step)
-            local desiredIdx = Core.Clamp(dragState.StartIdx + rawSlotDelta, 1, dragState.Count)
+            local stepX = dragState.SlotStep or 64.0
+            local stepY = dragState.SlotStepY or stepX
+            local cols = math.max(1, dragState.GridCols or dragState.Count)
+            local startCol = (dragState.StartIdx - 1) % cols
+            local startRow = math.floor((dragState.StartIdx - 1) / cols)
+            local maxRow = math.floor((dragState.Count - 1) / cols)
+
+            local deltaCol = (dx >= 0.0)
+                and math.floor((dx + stepX * 0.5) / stepX)
+                or math.ceil((dx - stepX * 0.5) / stepX)
+            local deltaRow = (dy >= 0.0)
+                and math.floor((dy + stepY * 0.5) / stepY)
+                or math.ceil((dy - stepY * 0.5) / stepY)
+
+            local targetCol = Core.Clamp(startCol + deltaCol, 0, cols - 1)
+            local targetRow = Core.Clamp(startRow + deltaRow, 0, maxRow)
+            local desiredIdx = Core.Clamp(targetRow * cols + targetCol + 1, 1, dragState.Count)
+
             local validTargetIdx, isDesiredValid = ClampValidDropTarget(dragState.SnapshotTechs, dragState.StartIdx, desiredIdx)
             dragState.TargetIdx = validTargetIdx
 
@@ -1118,13 +1259,22 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
                                 ch:SetRenderScale({ X = 1.0, Y = 1.0 })
                             end
                             ch:SetRenderOpacity(1.0)
-                            local shiftX = 0.0
+                            local shiftX, shiftY = 0.0, 0.0
+                            local destIdx = nil
                             if dragState.StartIdx < validTargetIdx and slotIdx > dragState.StartIdx and slotIdx <= validTargetIdx then
-                                shiftX = -step
+                                destIdx = slotIdx - 1
                             elseif dragState.StartIdx > validTargetIdx and slotIdx >= validTargetIdx and slotIdx < dragState.StartIdx then
-                                shiftX = step
+                                destIdx = slotIdx + 1
                             end
-                            ch:SetRenderTranslation({ X = shiftX, Y = 0.0 })
+                            if destIdx then
+                                local srcC = (slotIdx - 1) % cols
+                                local srcR = math.floor((slotIdx - 1) / cols)
+                                local dstC = (destIdx - 1) % cols
+                                local dstR = math.floor((destIdx - 1) / cols)
+                                shiftX = (dstC - srcC) * stepX
+                                shiftY = (dstR - srcR) * stepY
+                            end
+                            ch:SetRenderTranslation({ X = shiftX, Y = shiftY })
                         end
                     end
                 end
@@ -1175,8 +1325,11 @@ end
 Feature.WatchWidgets = {
     WBP_ResearchTree_2_C = function(tree)
         Feature.RegisterHooks()
+        if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
         ExecuteInGameThreadWithDelay(60, function()
-            EnsureAndFilterTree(tree, true)
+            if Core.IsFeatureEnabled("ResearchEnhancements") then
+                EnsureAndFilterTree(tree, true)
+            end
         end)
     end,
 }
@@ -1195,10 +1348,13 @@ function Feature.RegisterHooks()
             "ResearchEnhancements_" .. fnName,
             PATHS.ResearchTreeClass .. ":" .. fnName,
             function(Context)
+                if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
                 local tree = Context:get()
                 if Core.IsValidObj(tree) then
                     ExecuteInGameThreadWithDelay(30, function()
-                        EnsureAndFilterTree(tree, recapture)
+                        if Core.IsFeatureEnabled("ResearchEnhancements") then
+                            EnsureAndFilterTree(tree, recapture)
+                        end
                     end)
                 end
             end
@@ -1209,9 +1365,11 @@ function Feature.RegisterHooks()
         "ResearchEnhancements_RefreshList",
         PATHS.ResearchListClass .. ":RefreshList",
         function(Context)
+            if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
             local rList = Context:get()
             if Core.IsValidObj(rList) then
                 ExecuteInGameThreadWithDelay(20, function()
+                    if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
                     local tree = ResolveTreeForList(rList)
                     if Core.IsValidObj(tree) then
                         local st = InjectedTrees[tree:GetAddress()]
@@ -1250,6 +1408,7 @@ function Feature.RegisterHooks()
         "ResearchEnhancements_OnTechButtonPressed",
         PATHS.ResearchTechnologyClass .. ":BndEvt__WBP_ResearchTechnology_Button_K2Node_ComponentBoundEvent_0_OnButtonPressedEvent__DelegateSignature",
         function(Context)
+            if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
             local widget = Context:get()
             if not Core.IsValidObj(widget) then return end
 
