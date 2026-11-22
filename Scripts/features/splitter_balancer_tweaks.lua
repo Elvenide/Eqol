@@ -161,7 +161,11 @@ local function FindAnchorForRange(minAddr, maxAddr, preferredEnv)
 
     -- Never fall back to FindAllOf("Object") or FindAllOf("ActorComponent"): enumerating all engine
     -- UObjects freezes the game thread and risks polluting core engine UClasses with custom properties.
-    for _, searchCls in ipairs({ "DMSObject", "StationObject" }) do
+    -- Check fast early-allocated singletons first, then game-specific classes spread across the heap.
+    for _, searchCls in ipairs({
+        "GameInstance", "LocalPlayer", "GameViewportClient", "PlayerController",
+        "World", "Level", "DMSObject", "StationObject", "MachineObject", "UserWidget",
+    }) do
         local ok, list = pcall(FindAllOf, searchCls)
         if ok and list then
             for i = 1, #list do

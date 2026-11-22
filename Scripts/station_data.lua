@@ -1307,7 +1307,10 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
                 if not anchor then
                     -- Never fall back to FindAllOf("Object") or FindAllOf("Actor"): enumerating all engine
                     -- UObjects freezes the game thread and risks polluting core engine UClasses with custom properties.
-                    for _, searchCls in ipairs({ "DMSObject", "StationObject" }) do
+                    for _, searchCls in ipairs({
+                        "GameInstance", "LocalPlayer", "GameViewportClient", "PlayerController",
+                        "World", "Level", "DMSObject", "StationObject", "MachineObject", "UserWidget",
+                    }) do
                         local okA, list = pcall(FindAllOf, searchCls)
                         if okA and list then
                             for _, obj in ipairs(list) do
