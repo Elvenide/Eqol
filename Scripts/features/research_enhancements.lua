@@ -513,6 +513,7 @@ end
 
 local function SetResearchSearchVisible(st, visible)
     if not st then return end
+    st.SearchVisible = (visible == true)
     local vis = visible and 0 or 1
     if Core.IsValidObj(st.SearchBox) then
         pcall(function() st.SearchBox:SetVisibility(vis) end)
@@ -526,11 +527,13 @@ local function EnsureAndFilterTree(tree, markFilterDirty)
     if not Core.IsValidObj(tree) then return end
     if not Core.IsFeatureEnabled("ResearchEnhancements") then
         local existing = InjectedTrees[tree:GetAddress()]
-        if existing then
+        if existing and existing.SearchVisible ~= false then
             ClearSearchInput(existing)
             existing.FilterDirty = false
-            existing.LastAppliedQuery = nil
-            ApplyResearchFilter(existing, "")
+            if existing.LastAppliedQuery ~= "" then
+                existing.LastAppliedQuery = nil
+                ApplyResearchFilter(existing, "")
+            end
             SetResearchSearchVisible(existing, false)
         end
         return
@@ -1175,8 +1178,11 @@ end
 Feature.WatchWidgets = {
     WBP_ResearchTree_2_C = function(tree)
         Feature.RegisterHooks()
+        if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
         ExecuteInGameThreadWithDelay(60, function()
-            EnsureAndFilterTree(tree, true)
+            if Core.IsFeatureEnabled("ResearchEnhancements") then
+                EnsureAndFilterTree(tree, true)
+            end
         end)
     end,
 }
@@ -1195,10 +1201,13 @@ function Feature.RegisterHooks()
             "ResearchEnhancements_" .. fnName,
             PATHS.ResearchTreeClass .. ":" .. fnName,
             function(Context)
+                if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
                 local tree = Context:get()
                 if Core.IsValidObj(tree) then
                     ExecuteInGameThreadWithDelay(30, function()
-                        EnsureAndFilterTree(tree, recapture)
+                        if Core.IsFeatureEnabled("ResearchEnhancements") then
+                            EnsureAndFilterTree(tree, recapture)
+                        end
                     end)
                 end
             end
@@ -1209,9 +1218,11 @@ function Feature.RegisterHooks()
         "ResearchEnhancements_RefreshList",
         PATHS.ResearchListClass .. ":RefreshList",
         function(Context)
+            if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
             local rList = Context:get()
             if Core.IsValidObj(rList) then
                 ExecuteInGameThreadWithDelay(20, function()
+                    if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
                     local tree = ResolveTreeForList(rList)
                     if Core.IsValidObj(tree) then
                         local st = InjectedTrees[tree:GetAddress()]
@@ -1250,6 +1261,7 @@ function Feature.RegisterHooks()
         "ResearchEnhancements_OnTechButtonPressed",
         PATHS.ResearchTechnologyClass .. ":BndEvt__WBP_ResearchTechnology_Button_K2Node_ComponentBoundEvent_0_OnButtonPressedEvent__DelegateSignature",
         function(Context)
+            if not Core.IsFeatureEnabled("ResearchEnhancements") then return end
             local widget = Context:get()
             if not Core.IsValidObj(widget) then return end
 
