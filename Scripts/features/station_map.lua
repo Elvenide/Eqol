@@ -102,6 +102,7 @@ local MachineRenderGen = 0
 local RenderedMachineWidgets = {} -- mAddr -> { widgets = {}, portKeys = {} }
 local PlayerMarkerWidgets = {}
 local SyncFloorMachinesIncremental = nil
+local RevalidatePendingChanges = nil
 local RefreshSingleMachineVisual = nil
 local RefreshPlayerMarkers = nil
 local BuildGridDivisor = 50.0
@@ -2455,9 +2456,6 @@ UpdateStatusBanner = function(textOverride)
             end
         end)
     end
-    if Core.IsValidObj(MapUI.StatusText) and textOverride then
-        pcall(function() MapUI.StatusText:SetText(Core.MakeText(textOverride)) end)
-    end
     local hasSelection = (selCount > 0)
     local isPasting = (InteractionMode == "Paste" and #Clipboard > 0)
         or (InteractionMode == "Place" and Core.IsValidObj(PendingBuildable))
@@ -2498,17 +2496,55 @@ local function SetWBPTextColor(w, col)
     end)
 end
 
-local function RefreshModificationCostPanel(summary)
+local CachedUserWidgetClasses = {}
+local CachedWblCDO = nil
+
+local function CreateUserWidgetFast(classPath, owner, pc)
+    if not Core.IsValidObj(owner) then return nil end
+    if not Core.IsValidObj(CachedWblCDO) then
+        CachedWblCDO = Core.GetCDO(Core.PATHS.WidgetBlueprintLibCDO)
+    end
+    local cls = CachedUserWidgetClasses[classPath]
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(classPath)
+        if Core.IsValidObj(cls) then
+            CachedUserWidgetClasses[classPath] = cls
+        end
+    end
+    if not (Core.IsValidObj(CachedWblCDO) and Core.IsValidObj(cls)) then return nil end
+    local ok, w = pcall(function() return CachedWblCDO:Create(owner, cls, pc) end)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
+
+local function BuildCostSummarySignature(summary)
+    if not summary or not summary.entries or #summary.entries == 0 then return "" end
+    local parts = { summary.isCreative and "C" or "S" }
+    for _, e in ipairs(summary.entries) do
+        local iAddr = Core.IsValidObj(e.item) and e.item:GetAddress() or 0
+        parts[#parts + 1] = string.format("%s:%d:%d:%d", tostring(iAddr), e.net or 0, e.have or 0, e.lacking and 1 or 0)
+    end
+    return table.concat(parts, "|")
+end
+
+local function RefreshModificationCostPanel(summary, freshPC)
     if not MapUI or not Core.IsValidObj(MapUI.CostPanel) or not Core.IsValidObj(MapUI.CostListVBox) then return end
     local entries = summary and summary.entries or {}
     if #entries == 0 then
+        MapUI.LastCostSig = ""
         pcall(function() MapUI.CostPanel:SetVisibility(1) end) -- Collapsed
         return
     end
 
+    local sig = BuildCostSummarySignature(summary)
+    if MapUI.LastCostSig == sig then
+        pcall(function() MapUI.CostPanel:SetVisibility(0) end)
+        return
+    end
+    MapUI.LastCostSig = sig
+
     pcall(function() MapUI.CostListVBox:ClearChildren() end)
     local outer = Core.GetWidgetOuter(MapUI.Window)
-    local pc = MapUI.PC
+    local pc = Core.IsValidObj(freshPC) and freshPC or Core.GetLocalPlayerController()
     local isCreative = summary.isCreative
 
     for idx, entry in ipairs(entries) do
@@ -2518,7 +2554,7 @@ local function RefreshModificationCostPanel(summary)
 
             -- Native item icon (24x24 WBP_Item_C)
             local iconSb = CreateRawFast(PATHS.SizeBoxClass, outer)
-            local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
+            local itemW = CreateUserWidgetFast(PATHS.WBPItemClass, MapUI.Window, pc)
             if Core.IsValidObj(iconSb) and Core.IsValidObj(itemW) then
                 pcall(function()
                     iconSb:SetWidthOverride(24.0)
@@ -2548,7 +2584,7 @@ local function RefreshModificationCostPanel(summary)
                 amtCol = entry.lacking and COST_TXT_LACKING or COST_TXT_OK
             end
 
-            local amtTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+            local amtTxt = CreateUserWidgetFast(PATHS.WBPTextClass, MapUI.Window, pc)
             if Core.IsValidObj(amtTxt) then
                 pcall(function()
                     amtTxt:SetVisibility(3)
@@ -2566,7 +2602,7 @@ local function RefreshModificationCostPanel(summary)
             end
 
             -- Item display name (red #cd0046 when lacking so missing materials stand out clearly)
-            local nameTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+            local nameTxt = CreateUserWidgetFast(PATHS.WBPTextClass, MapUI.Window, pc)
             if Core.IsValidObj(nameTxt) then
                 pcall(function()
                     nameTxt:SetVisibility(3)
@@ -2604,7 +2640,7 @@ UpdateActionBar = function()
     local hasMissing = (pendingN > 0) and (matSummary.hasMissing == true)
     local canApply = (pendingN > 0) and (not ApplyInProgress) and (not hasMissing)
 
-    RefreshModificationCostPanel(matSummary)
+    RefreshModificationCostPanel(matSummary, pc)
 
     if Core.IsValidObj(MapUI.ValidationBox) then
         pcall(function()
@@ -3875,6 +3911,9 @@ RefreshStationMapCanvas = function(machinesOnly)
 
             if removedCount > 0 then RefreshSelectionLayer() end
             if addedCount > 0 and OnViewportChangedMachines then OnViewportChangedMachines() end
+            if (removedCount > 0 or addedCount > 0) and RevalidatePendingChanges then
+                RevalidatePendingChanges(false)
+            end
         end
 
         RefreshSingleMachineVisual = function(mAddr)
@@ -4563,7 +4602,6 @@ local function HandleMapLeftClick(mx, my, isShift)
             actorClsPath = clsKey,
             sprite = clsKey and MachineSpriteCache[clsKey] or nil,
         })
-        UpdateActionBar()
         RefreshSelectionLayer()
         return
     end
@@ -4650,12 +4688,9 @@ local function HandleMapLeftClick(mx, my, isShift)
             UpdateStatusBanner(skippedBlocked > 0 and "Cannot overwrite existing incompatible machines here" or "Paste inside a station module")
             return
         end
-        local okMat = CheckMaterialsForPendingList(pc, staged)
-        if not okMat then
-            UpdateStatusBanner("Insufficient materials to paste group")
-            return
-        end
-        -- Select the newly pasted ghost group so pressing X immediately undoes a misplaced paste
+        -- Allow freely staging pasted ghosts (matching Ship/Station Designer behavior;
+        -- Modification Cost + Build Validation gate Apply Changes).
+        -- Select the newly pasted ghost group so pressing X immediately undoes a misplaced paste.
         SelectedMachines = {}
         SelectedGhosts = {}
         for _, g in ipairs(staged) do
@@ -4664,7 +4699,6 @@ local function HandleMapLeftClick(mx, my, isShift)
                 SelectedGhosts[g.ghostId] = g
             end
         end
-        UpdateActionBar()
         RefreshSelectionLayer()
         if skippedBlocked > 0 then
             UpdateStatusBanner(string.format("Pasted %d machine(s) (%d skipped - blocked)", #staged, skippedBlocked))
@@ -5065,7 +5099,8 @@ local function EnsureInputPoll()
         end
 
         -- Mouse Wheel (via ScrollBox offset delta + key/axis fallback) & +/- Keyboard Zoom
-        if not WaitingForBuildMenuSelection then
+        local uiHovered = IsAnyButtonHovered()
+        if not WaitingForBuildMenuSelection and not uiHovered then
             local scrollDelta = keyZoom
             if scrollDelta == 0 and MapUI and Core.IsValidObj(MapUI.WheelScrollBox) and MapUI.WheelScrollBox.GetScrollOffset then
                 pcall(function()
@@ -5095,6 +5130,15 @@ local function EnsureInputPoll()
         MouseState.wasLDown = lDown
         MouseState.wasRDown = rDown
 
+        -- Throttled live refresh of player markers (~1.0s) so remote MP players update while map stays open
+        if RefreshPlayerMarkers then
+            local nowMarker = os.clock()
+            if (nowMarker - (MapUI.LastPlayerMarkerClock or 0.0)) >= 1.0 then
+                MapUI.LastPlayerMarkerClock = nowMarker
+                RefreshPlayerMarkers()
+            end
+        end
+
         -- Only rebuild screen-space overlay when cursor actually moved (never churn when stationary during box-select)
         if MouseState.lDraggingBox or InteractionMode ~= "Select" then
             if cursorMoved then
@@ -5105,7 +5149,7 @@ local function EnsureInputPoll()
             local curPortObj = nil
             local curMachine = nil
             local curMachineObj = nil
-            if insideMap and not MouseState.rPanning then
+            if insideMap and not MouseState.rPanning and not uiHovered then
                 local wx, wy = CanvasToWorld(mx, my)
                 for _, rp in ipairs(RenderedPorts) do
                     if math.abs(wx - rp.x) <= rp.halfW and math.abs(wy - rp.y) <= rp.halfH then
@@ -5145,8 +5189,98 @@ end
 -- Window Open / Close & Toolbar Actions
 --------------------------------------------------------------------------------
 
+-- Revalidates session-persisted PendingGhosts and PendingDeletes against live machines on CurrentFloors:
+-- - Prunes PendingDeletes whose machines were already disassembled.
+-- - Re-evaluates each staged ghost using the exact Smart Replace / overlap rules (EvaluatePasteGhostOverlap):
+--   updates isReplace/replaceTargets for valid overwrites, and removes ghosts that now overlap incompatible machines.
+-- - Refreshes Modification Cost, Build Validation, and Apply Changes while keeping performance O(1) when empty.
+RevalidatePendingChanges = function(forceRefreshUI)
+    if #PendingGhosts == 0 and next(PendingDeletes) == nil then
+        if forceRefreshUI then
+            UpdateActionBar()
+            UpdateStatusBanner()
+        end
+        return false
+    end
+
+    local liveMachineAddrs = {}
+    for _, fl in ipairs(CurrentFloors) do
+        if fl and fl.machines then
+            for _, me in ipairs(fl.machines) do
+                if Core.IsValidObj(me.machine) then
+                    liveMachineAddrs[me.machine:GetAddress()] = true
+                end
+            end
+        end
+    end
+
+    local changed = false
+
+    -- 1. Prune invalidated PendingDeletes
+    for addr, dm in pairs(PendingDeletes) do
+        if not dm or not Core.IsValidObj(dm.machine) or not liveMachineAddrs[addr] then
+            PendingDeletes[addr] = nil
+            changed = true
+        end
+    end
+
+    -- 2. Revalidate PendingGhosts against live floor machines using Smart Replace rules
+    if #PendingGhosts > 0 then
+        local keptGhosts = {}
+        for _, g in ipairs(PendingGhosts) do
+            local fl = CurrentFloors[g.floorIdx] or CurrentFloors[SelectedFloorIdx]
+            if fl and Core.IsValidObj(g.buildable) then
+                local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(
+                    g, g.x, g.y, g.pairX, g.pairY, g.yaw or 0.0, fl
+                )
+                if not allowed then
+                    if g.ghostId then
+                        SelectedGhosts[g.ghostId] = nil
+                    end
+                    changed = true
+                else
+                    local oldTargetN = g.replaceTargets and #g.replaceTargets or 0
+                    local newTargetN = replaceTargets and #replaceTargets or 0
+                    if (g.isReplace == true) ~= (isReplace == true) or oldTargetN ~= newTargetN then
+                        changed = true
+                    elseif oldTargetN > 0 then
+                        for i = 1, oldTargetN do
+                            local oa = g.replaceTargets[i] and g.replaceTargets[i].addr or nil
+                            local na = replaceTargets[i] and replaceTargets[i].addr or nil
+                            if oa ~= na then
+                                changed = true
+                                break
+                            end
+                        end
+                    end
+                    g.isReplace = isReplace
+                    g.replaceTargets = replaceTargets
+                    keptGhosts[#keptGhosts + 1] = g
+                end
+            else
+                keptGhosts[#keptGhosts + 1] = g
+            end
+        end
+        PendingGhosts = keptGhosts
+    end
+
+    if changed then
+        RefreshSelectionLayer()
+        UpdateStatusBanner()
+    elseif forceRefreshUI then
+        UpdateActionBar()
+        UpdateStatusBanner()
+    end
+    return changed
+end
+
 local function SetStationMapCursorMode(pc, win, active)
     if not Core.IsValidObj(pc) then return end
+    if not active and Core.IsAnyWidgetClassVisible("WBP_MainMenu_C") then
+        -- Main Menu Cursor Preservation (learning.md §8): never hide cursor on the title screen
+        SavedCharInputEnabled = nil
+        return
+    end
     pcall(function()
         pc.bShowMouseCursor = active
         if active then
@@ -5245,8 +5379,28 @@ CloseStationMap = function()
     WaitingForBuildMenuSelection = false
     MouseState.lDownInMap = false
     MouseState.lDraggingBox = false
+    MouseState.lPanning = false
     MouseState.rDownInMap = false
     MouseState.rPanning = false
+    if MapUI and MapUI.CloseBtnWasHovered then
+        MapUI.CloseBtnWasHovered = false
+        pcall(function()
+            if Core.IsValidObj(MapUI.CloseBtnFrame) then
+                MapUI.CloseBtnFrame:SetBrushColor({ R = 0.92, G = 0.94, B = 0.96, A = 0.95 })
+            end
+            if Core.IsValidObj(MapUI.CloseBtnWidget) and MapUI.CloseBtnWidget.SetBackgroundColour then
+                MapUI.CloseBtnWidget:SetBackgroundColour({ R = 0.06, G = 0.07, B = 0.09, A = 0.92 })
+            end
+            if Core.IsValidObj(MapUI.CloseBtnText) and Core.IsValidObj(MapUI.CloseBtnText.TextBlock)
+                and MapUI.CloseBtnText.TextBlock.SetColorAndOpacity
+            then
+                MapUI.CloseBtnText.TextBlock:SetColorAndOpacity({
+                    SpecifiedColor = { R = 0.98, G = 0.98, B = 1.00, A = 1.00 },
+                    ColorUseRule = 0,
+                })
+            end
+        end)
+    end
     if Core.IsValidObj(ActiveMapWin) then
         pcall(function() ActiveMapWin:SetVisibility(1) end) -- Collapsed (keeps UMG tree cached for instant re-open)
     end
@@ -5261,7 +5415,6 @@ local MouseIconSearched = {}
 local function FindMouseIconTexture(side)
     if Core.IsValidObj(CachedMouseIconTex[side]) then return CachedMouseIconTex[side] end
     if MouseIconSearched[side] then return nil end
-    MouseIconSearched[side] = true
 
     local isLeft = (side == "LMB")
     local candidatePaths = isLeft and {
@@ -5281,8 +5434,9 @@ local function FindMouseIconTexture(side)
         end
     end
 
-    local token = isLeft and "lmb" or "rmb"
-    local dirWord = isLeft and "left" or "right"
+    -- Combined single-pass scan for both LMB and RMB icons so we never scan all Texture2Ds twice
+    MouseIconSearched["LMB"] = true
+    MouseIconSearched["RMB"] = true
     local okAll, texList = pcall(FindAllOf, "Texture2D")
     if okAll and texList then
         for _, tex in ipairs(texList) do
@@ -5290,18 +5444,25 @@ local function FindMouseIconTexture(side)
                 local okN, fullName = pcall(function() return tex:GetFullName() end)
                 if okN and type(fullName) == "string" then
                     local low = fullName:lower()
-                    if low:find(token, 1, true)
-                        or (low:find("mouse", 1, true) and low:find(dirWord, 1, true))
+                    if not Core.IsValidObj(CachedMouseIconTex["LMB"])
+                        and (low:find("lmb", 1, true) or (low:find("mouse", 1, true) and low:find("left", 1, true)))
                     then
-                        CachedMouseIconTex[side] = tex
-                        Core.Log(string.format("[StationMap] Found %s icon texture: %s", side, fullName))
-                        return tex
+                        CachedMouseIconTex["LMB"] = tex
+                        Core.Log("[StationMap] Found LMB icon texture: " .. fullName)
+                    elseif not Core.IsValidObj(CachedMouseIconTex["RMB"])
+                        and (low:find("rmb", 1, true) or (low:find("mouse", 1, true) and low:find("right", 1, true)))
+                    then
+                        CachedMouseIconTex["RMB"] = tex
+                        Core.Log("[StationMap] Found RMB icon texture: " .. fullName)
+                    end
+                    if Core.IsValidObj(CachedMouseIconTex["LMB"]) and Core.IsValidObj(CachedMouseIconTex["RMB"]) then
+                        break
                     end
                 end
             end
         end
     end
-    return nil
+    return Core.IsValidObj(CachedMouseIconTex[side]) and CachedMouseIconTex[side] or nil
 end
 
 local function OpenStationMap()
@@ -5345,6 +5506,7 @@ local function OpenStationMap()
         MouseState.wasRDown = false
         MouseState.lDownInMap = false
         MouseState.lDraggingBox = false
+        MouseState.lPanning = false
         MouseState.rDownInMap = false
         MouseState.rPanning = false
         EnsureInputPoll()
@@ -5352,6 +5514,7 @@ local function OpenStationMap()
         if RefreshPlayerMarkers then
             RefreshPlayerMarkers()
         end
+        RevalidatePendingChanges(true)
         ExecuteInGameThreadAfterFrames(2, function()
             if IsMapOpen() and SyncFloorMachinesIncremental then
                 SyncFloorMachinesIncremental()
@@ -5428,7 +5591,6 @@ local function OpenStationMap()
     local iconPanZoom = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local iconCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
     local overlayCanvas = Core.CreateRawWidget(PATHS.CanvasPanelClass, outer)
-    local statusText = Core.CreateUserWidget(PATHS.WBPTextClass, win, pc)
 
     if not (Core.IsValidObj(mapBg) and Core.IsValidObj(mapOverlay) and Core.IsValidObj(bgPanZoom)
         and Core.IsValidObj(mapCanvas) and Core.IsValidObj(selectionCanvas)
@@ -6172,7 +6334,6 @@ local function OpenStationMap()
         DelPillText = delPillText,
         ModePillWrap = modePillWrap,
         ModePillText = modePillText,
-        StatusText = statusText,
     }
 
     local px, py, pz = 0.0, 0.0, 0.0
@@ -6355,12 +6516,16 @@ end
 
 function Feature.OnClientRestart()
     ApplyInProgress = false
+    CachedMouseIconTex = {}
+    MouseIconSearched = {}
     local curWorld = GetCurrentWorldAddr()
     if curWorld == nil or curWorld ~= LastWorldAddr then
         LastWorldAddr = curWorld
         PrewarmScheduledForWorld = nil
         if Core.IsValidObj(ActiveMapWin) then DestroyStationMap() end
         ResetSpriteCache()
+        CachedUserWidgetClasses = {}
+        CachedWblCDO = nil
         PendingGhosts = {}
         Clipboard = {}
     end
@@ -6368,10 +6533,14 @@ end
 
 function Feature.OnMapLoad()
     ApplyInProgress = false
+    CachedMouseIconTex = {}
+    MouseIconSearched = {}
     LastWorldAddr = GetCurrentWorldAddr()
     PrewarmScheduledForWorld = nil
     if Core.IsValidObj(ActiveMapWin) then DestroyStationMap() end
     ResetSpriteCache()
+    CachedUserWidgetClasses = {}
+    CachedWblCDO = nil
     PendingGhosts = {}
     Clipboard = {}
 end
@@ -6383,10 +6552,27 @@ function Feature.PruneCaches()
         end
     end
     if ActiveMapWin and not Core.IsValidObj(ActiveMapWin) then
+        local wasVisible = MapWinVisible
+        for _, entry in pairs(FloorIconButtons) do
+            if type(entry) == "table" and entry.btn then
+                Core.UnregisterWBPButtonClick(entry.btn)
+            else
+                Core.UnregisterWBPButtonClick(entry)
+            end
+        end
+        UnregisterButtonList(FloorRailButtons)
+        UnregisterButtonList(TrackedButtons)
+        FloorIconButtons = {}
+        FloorRailButtons = {}
+        TrackedButtons = {}
+        PlayerMarkerWidgets = {}
         ActiveMapWin = nil
         MapWinVisible = false
         MapWinInViewport = false
         MapUI = nil
+        if wasVisible then
+            SetStationMapCursorMode(Core.GetLocalPlayerController(), nil, false)
+        end
     end
 end
 

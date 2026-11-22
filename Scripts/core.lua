@@ -5,7 +5,7 @@ local UEHelpers = require("UEHelpers")
 
 local Core = {}
 
-Core.VERSION = "0.1.55"
+Core.VERSION = "0.1.56"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -84,6 +84,7 @@ function Core.UnwrapStruct(val)
 end
 
 function Core.Clamp(val, lo, hi)
+    if type(val) ~= "number" or val ~= val then return lo end
     if val < lo then return lo end
     if val > hi then return hi end
     return val
@@ -414,6 +415,50 @@ function Core.IsAnyWidgetClassVisible(shortClassName)
             if okInVp and inVp and okVis and vis then
                 return true
             end
+        end
+    end
+    return false
+end
+
+-- Returns true if any blocking UI menu, modal popup, chat, keybind selector, or native CurrentWindow is open.
+function Core.IsAnyBlockingMenuOpen(pc)
+    if Core.IsSelectingAnyRegisteredKeybind and Core.IsSelectingAnyRegisteredKeybind() then
+        return true
+    end
+    if Core.IsAnyTextInputFocused and Core.IsAnyTextInputFocused() then
+        return true
+    end
+    for _, clsName in ipairs({
+        "WBP_SettingsMenu_C",
+        "WBP_PauseMenu_C",
+        "WBP_MainMenu_C",
+        "WBP_ConfirmationPopup_C",
+        "WBP_Confirmation_Popup_C",
+        "WBP_RenamePopup_C",
+        "WBP_ElevatorConfig_C",
+    }) do
+        if Core.IsAnyWidgetClassVisible(clsName) then
+            return true
+        end
+    end
+    local chatBucket = GetTrackedWidgetsOfClass("WBP_Chat_C")
+    if chatBucket then
+        for addr, chat in pairs(chatBucket) do
+            if not Core.IsValidObj(chat) then
+                chatBucket[addr] = nil
+            else
+                local okOpen, isOpen = pcall(function() return chat.IsOpen == true end)
+                if okOpen and isOpen then
+                    return true
+                end
+            end
+        end
+    end
+    local curPC = Core.IsValidObj(pc) and pc or Core.GetLocalPlayerController()
+    if Core.IsValidObj(curPC) then
+        local widgetSub = Core.GetWorldSubsystem(curPC, Core.PATHS.WidgetSubsystemClass)
+        if Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow) then
+            return true
         end
     end
     return false

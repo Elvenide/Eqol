@@ -128,6 +128,8 @@ local function FindShipCameraComponents(shipActor, pc)
     return springArm, cam
 end
 
+local CachedStaticMeshCompCls = nil
+
 local function MeasureShipRadiusCm(shipActor)
     local radius = 1400.0
     if not Core.IsValidObj(shipActor) then return radius end
@@ -153,7 +155,10 @@ local function MeasureShipRadiusCm(shipActor)
     -- 2. Fallback: scan StaticMeshComponents' local bounds if GetActorBounds returned zero/small
     if not gotBounds and shipActor.K2_GetComponentsByClass then
         pcall(function()
-            local smCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            if not Core.IsValidObj(CachedStaticMeshCompCls) then
+                CachedStaticMeshCompCls = Core.FindOrLoadClass("/Script/Engine.StaticMeshComponent")
+            end
+            local smCls = CachedStaticMeshCompCls
             if not Core.IsValidObj(smCls) then return end
             local arr = shipActor:K2_GetComponentsByClass(smCls)
             if not arr then return end
@@ -188,7 +193,9 @@ local function SnapshotOriginalCamera(shipActor, shipObj, springArm, cam)
     if not Core.IsValidObj(shipActor) then return nil end
     local addr = shipActor:GetAddress()
     local saved = SavedOriginalCamera[addr]
-    if saved then return saved end
+    if saved and (Core.IsValidObj(saved.SpringArm) or Core.IsValidObj(saved.Cam)) then
+        return saved
+    end
 
     saved = {
         ShipActor = shipActor,
@@ -254,10 +261,10 @@ end
 
 local function GetPilotedShipActor(pc)
     if not Core.IsValidObj(pc) then return nil, nil end
-    local playerObj = pc.PlayerObject
-    if not Core.IsValidObj(playerObj) then return nil, nil end
-    local shipObj = playerObj.PilotedShip
-    if not Core.IsValidObj(shipObj) then return nil, nil end
+    local okPO, playerObj = pcall(function() return pc.PlayerObject end)
+    if not okPO or not Core.IsValidObj(playerObj) then return nil, nil end
+    local okShip, shipObj = pcall(function() return playerObj.PilotedShip end)
+    if not okShip or not Core.IsValidObj(shipObj) then return nil, nil end
 
     local shipActor = nil
     for _, fn in ipairs({ "GetActor", "GetSpawnedActor" }) do
@@ -296,12 +303,14 @@ local function GetPilotedShipActor(pc)
     return shipActor, shipObj
 end
 
-local function IsPilotingShipNow()
-    local pc = Core.GetLocalPlayerController()
-    if not Core.IsValidObj(pc) then return false end
-    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen() then return false end
-    local ok, po = pcall(function() return pc.PlayerObject end)
-    return ok and Core.IsValidObj(po) and Core.IsValidObj(po.PilotedShip)
+local function IsPilotingShipNow(pc)
+    local curPC = Core.IsValidObj(pc) and pc or Core.GetLocalPlayerController()
+    if not Core.IsValidObj(curPC) then return false end
+    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen(curPC) then return false end
+    local ok, po = pcall(function() return curPC.PlayerObject end)
+    if not ok or not Core.IsValidObj(po) then return false end
+    local okShip, ship = pcall(function() return po.PilotedShip end)
+    return okShip and Core.IsValidObj(ship)
 end
 
 local function ApplyShipCameraState(pc, logChange)
@@ -312,6 +321,7 @@ local function ApplyShipCameraState(pc, logChange)
     if ActiveShipAddr and ActiveShipAddr ~= newAddr and SavedOriginalCamera[ActiveShipAddr] then
         -- Restore the previous ship's original camera snapshot on direct Ship A -> Ship B switch
         RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
+        SavedOriginalCamera[ActiveShipAddr] = nil
     end
 
     local springArm, cam = FindShipCameraComponents(shipActor, pc)
@@ -329,9 +339,14 @@ local function ApplyShipCameraState(pc, logChange)
     local upHeight = shipRadius * 0.48 * effectiveZoom
 
     if logChange then
+        local actorClsName = "nil"
+        pcall(function()
+            if Core.IsValidObj(shipActor) then
+                actorClsName = shipActor:GetClass():GetFName():ToString()
+            end
+        end)
         Core.Log(string.format("[ShipCamera] Apply 3P=%s zoom=%.2fx radius=%.0f back=%.0f up=%.0f actor=%s",
-            tostring(IsThirdPerson), ZoomMultiplier, shipRadius, backDist, upHeight,
-            Core.IsValidObj(shipActor) and shipActor:GetClass():GetFName():ToString() or "nil"))
+            tostring(IsThirdPerson), ZoomMultiplier, shipRadius, backDist, upHeight, actorClsName))
     end
 
     if Core.IsValidObj(springArm) then
@@ -408,7 +423,6 @@ local TELEM_SHIELD = { R = 0.1200, G = 0.6200, B = 0.9800, A = 0.96 }
 local TELEM_DIM    = { R = 0.2600, G = 0.2800, B = 0.3200, A = 0.85 }
 local TELEM_EMPTY  = { R = 0.0300, G = 0.0350, B = 0.0450, A = 0.78 }
 local TELEM_PANEL  = { R = 0.0150, G = 0.0180, B = 0.0240, A = 0.76 }
-local TELEM_WHITE  = { R = 0.9400, G = 0.9500, B = 0.9800, A = 1.00 }
 local TELEM_MUTED  = { R = 0.6800, G = 0.7200, B = 0.7800, A = 0.90 }
 
 local BOOST_BAR_H  = 132.0
@@ -418,14 +432,19 @@ local WING_CARD_H  = 176.0
 local WING_CHAMFER = 14.0
 
 local function ReadNumericOrFixed(val)
-    if type(val) == "number" then return val end
-    if val ~= nil then
+    local num = nil
+    if type(val) == "number" then
+        num = val
+    elseif val ~= nil then
         local okV, raw = pcall(function() return val.Value end)
         if okV and type(raw) == "number" then
-            return raw / 65536.0
+            num = raw / 65536.0
         end
     end
-    return nil
+    if type(num) ~= "number" or num ~= num or math.abs(num) == math.huge then
+        return nil
+    end
+    return num
 end
 
 local function IsShipActivelyBoosting(shipObj, pc)
@@ -462,7 +481,7 @@ local function SetWBPTextCol(w, col)
 end
 
 local function FormatEnergyValue(val, isRate)
-    if type(val) ~= "number" then return "--" end
+    if type(val) ~= "number" or val ~= val or math.abs(val) == math.huge then return "--" end
     local absV = math.abs(val)
     local suffix = isRate and "/s" or ""
     if absV >= 1000.0 then
@@ -528,6 +547,21 @@ local function FindMMBIconTexture()
     return nil
 end
 
+local CachedUmgClasses = {}
+
+local function CreateRawFast(classPath, outer)
+    local cls = CachedUmgClasses[classPath]
+    if not Core.IsValidObj(cls) then
+        cls = Core.FindOrLoadClass(classPath)
+        if Core.IsValidObj(cls) then
+            CachedUmgClasses[classPath] = cls
+        end
+    end
+    if not (Core.IsValidObj(cls) and Core.IsValidObj(outer)) then return nil end
+    local ok, w = pcall(StaticConstructObject, cls, outer)
+    return (ok and Core.IsValidObj(w)) and w or nil
+end
+
 local function DestroyShipLegend()
     if LegendUI and Core.IsValidObj(LegendUI.Root) then
         pcall(function() LegendUI.Root:RemoveFromParent() end)
@@ -547,8 +581,8 @@ local function EnsureShipLegend(pc)
     end
 
     local outer = rootWin.WidgetTree
-    local rootOverlay = Core.CreateRawWidget("/Script/UMG.Overlay", outer)
-    local vbox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+    local rootOverlay = CreateRawFast("/Script/UMG.Overlay", outer)
+    local vbox = CreateRawFast("/Script/UMG.VerticalBox", outer)
     if not (Core.IsValidObj(rootOverlay) and Core.IsValidObj(vbox)) then
         return nil
     end
@@ -578,17 +612,17 @@ local function EnsureShipLegend(pc)
     end
 
     local function makeRow(idx, keyText, iconTex, labelText)
-        local row = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+        local row = CreateRawFast("/Script/UMG.HorizontalBox", outer)
         if not Core.IsValidObj(row) then return nil, nil end
         pcall(function() row:SetVisibility(1) end) -- Start Collapsed
 
-        local capBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local capBg = CreateRawFast("/Script/UMG.Border", outer)
         local keyTxtWidget = nil
         if Core.IsValidObj(capBg) then
             local builtIcon = false
             if Core.IsValidObj(iconTex) then
-                local sb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-                local img = Core.CreateRawWidget("/Script/UMG.Image", outer)
+                local sb = CreateRawFast("/Script/UMG.SizeBox", outer)
+                local img = CreateRawFast("/Script/UMG.Image", outer)
                 if Core.IsValidObj(sb) and Core.IsValidObj(img) then
                     applyBadgeStyle(capBg, { Left = 4.0, Top = 3.0, Right = 4.0, Bottom = 3.0 })
                     pcall(function()
@@ -668,12 +702,12 @@ local function EnsureShipLegend(pc)
         end)
     end
 
-    -- Helper to build a chamfered wing card (192x176) with 45-deg angled corners on chamferSide ("right" or "left")
+    -- Helper to build a chamfered wing card (220x176) with 45-deg angled corners on chamferSide ("right" or "left")
     -- and identical 2px TELEM_GOLD top/bottom borders + angled corner bevels matching the vanilla HUD brackets.
     local function createChamferedWingCard(chamferSide)
-        local sb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-        local ov = Core.CreateRawWidget("/Script/UMG.Overlay", outer)
-        local bgCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
+        local sb = CreateRawFast("/Script/UMG.SizeBox", outer)
+        local ov = CreateRawFast("/Script/UMG.Overlay", outer)
+        local bgCanvas = CreateRawFast("/Script/UMG.CanvasPanel", outer)
         if not (Core.IsValidObj(sb) and Core.IsValidObj(ov) and Core.IsValidObj(bgCanvas)) then
             return nil, nil
         end
@@ -684,7 +718,7 @@ local function EnsureShipLegend(pc)
         local isRight = (chamferSide == "right")
 
         local function addRect(x, y, w, h, col, z, angleDeg)
-            local b = Core.CreateRawWidget("/Script/UMG.Border", outer)
+            local b = CreateRawFast("/Script/UMG.Border", outer)
             if not Core.IsValidObj(b) then return end
             pcall(function()
                 b:SetBrushColor(col)
@@ -712,14 +746,15 @@ local function EnsureShipLegend(pc)
             bgCanvas:SetClipping(1)
         end)
 
-        -- 1. Chamfered dark background fill: middle full-width body + 1px stair-stepped 45-deg top/bottom chamfers
+        -- 1. Chamfered dark background fill: middle full-width body + 2px stair-stepped 45-deg top/bottom chamfers (halves Slate UBorder count)
         addRect(0.0, C, W, H - 2.0 * C, TELEM_PANEL, 0)
-        for step = 0, math.floor(C) - 1 do
-            local inset = C - step
+        for step = 0, math.floor(C) - 1, 2 do
+            local sliceH = math.min(2.0, C - step)
+            local inset = C - step - (sliceH * 0.5)
             local rowW = W - inset
             local rowX = isRight and 0.0 or inset
-            addRect(rowX, step, rowW, 1.0, TELEM_PANEL, 0)
-            addRect(rowX, H - 1.0 - step, rowW, 1.0, TELEM_PANEL, 0)
+            addRect(rowX, step, rowW, sliceH, TELEM_PANEL, 0)
+            addRect(rowX, H - step - sliceH, rowW, sliceH, TELEM_PANEL, 0)
         end
 
         -- 2. Identical 2px TELEM_GOLD top & bottom borders + matching 45-deg diagonal corner bevels
@@ -730,7 +765,7 @@ local function EnsureShipLegend(pc)
 
         local diagLen = math.sqrt(C * C * 2.0) + 1.0
         local function addDiag(cx, cy, angleDeg)
-            local b = Core.CreateRawWidget("/Script/UMG.Border", outer)
+            local b = CreateRawFast("/Script/UMG.Border", outer)
             if not Core.IsValidObj(b) then return end
             pcall(function()
                 b:SetBrushColor(TELEM_GOLD)
@@ -766,9 +801,9 @@ local function EnsureShipLegend(pc)
         return sb, ov
     end
 
-    -- Left-Center 3rd-Person Telemetry Card (unified 192x176 card with right corners chamfered)
+    -- Left-Center 3rd-Person Telemetry Card (unified 220x176 card with right corners chamfered)
     local leftWing, leftOv = createChamferedWingCard("right")
-    local leftInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+    local leftInnerH = CreateRawFast("/Script/UMG.HorizontalBox", outer)
     local boostFillSlot = nil
     local boostFillBorder = nil
     local boostLabelTxt = nil
@@ -780,11 +815,11 @@ local function EnsureShipLegend(pc)
         pcall(function() leftInnerH:SetVisibility(3) end)
 
         -- Left column inside card: Vertical smooth boost progress bar + BOOST micro-label
-        local boostColVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
-        local boostTrackSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-        local boostTrackBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
-        local boostCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
-        boostFillBorder = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local boostColVBox = CreateRawFast("/Script/UMG.VerticalBox", outer)
+        local boostTrackSb = CreateRawFast("/Script/UMG.SizeBox", outer)
+        local boostTrackBg = CreateRawFast("/Script/UMG.Border", outer)
+        local boostCanvas = CreateRawFast("/Script/UMG.CanvasPanel", outer)
+        boostFillBorder = CreateRawFast("/Script/UMG.Border", outer)
 
         if Core.IsValidObj(boostColVBox) and Core.IsValidObj(boostTrackSb) and Core.IsValidObj(boostTrackBg)
             and Core.IsValidObj(boostCanvas) and Core.IsValidObj(boostFillBorder)
@@ -836,7 +871,7 @@ local function EnsureShipLegend(pc)
         end
 
         -- Right column inside card: Speed, movement direction & fuel readouts
-        local infoInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local infoInnerV = CreateRawFast("/Script/UMG.VerticalBox", outer)
         if Core.IsValidObj(infoInnerV) then
             pcall(function() infoInnerV:SetVisibility(3) end)
 
@@ -917,7 +952,7 @@ local function EnsureShipLegend(pc)
 
     -- Right-Center 3rd-Person Hull & Shield Card (identical unified 204x176 card with left corners chamfered)
     local rightWing, rightOv = createChamferedWingCard("left")
-    local rightInnerH = Core.CreateRawWidget("/Script/UMG.HorizontalBox", outer)
+    local rightInnerH = CreateRawFast("/Script/UMG.HorizontalBox", outer)
     local hullValTxt = nil
     local hullTitleTxt = nil
     local hullSegs = {} -- [1]=bottom, [2]=middle, [3]=top
@@ -928,7 +963,7 @@ local function EnsureShipLegend(pc)
         pcall(function() rightInnerH:SetVisibility(3) end)
 
         -- Left column inside card: HULL label & numeric integrity readout
-        local hullInnerV = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local hullInnerV = CreateRawFast("/Script/UMG.VerticalBox", outer)
         if Core.IsValidObj(hullInnerV) then
             pcall(function() hullInnerV:SetVisibility(3) end)
 
@@ -972,12 +1007,12 @@ local function EnsureShipLegend(pc)
         end
 
         -- Middle-right column inside card: 3 distinct separated vertical hull rectangles (top=[3], mid=[2], bot=[1])
-        local segsVBox = Core.CreateRawWidget("/Script/UMG.VerticalBox", outer)
+        local segsVBox = CreateRawFast("/Script/UMG.VerticalBox", outer)
         if Core.IsValidObj(segsVBox) then
             pcall(function() segsVBox:SetVisibility(3) end)
             for segIdx = 3, 1, -1 do
-                local segSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-                local segBdr = Core.CreateRawWidget("/Script/UMG.Border", outer)
+                local segSb = CreateRawFast("/Script/UMG.SizeBox", outer)
+                local segBdr = CreateRawFast("/Script/UMG.Border", outer)
                 if Core.IsValidObj(segSb) and Core.IsValidObj(segBdr) then
                     pcall(function()
                         segSb:SetWidthOverride(12.0)
@@ -1002,10 +1037,10 @@ local function EnsureShipLegend(pc)
         end
 
         -- Far-right column inside card: Smooth vertical shield progress bar (same style as boost bar)
-        local shieldTrackSb = Core.CreateRawWidget("/Script/UMG.SizeBox", outer)
-        local shieldTrackBg = Core.CreateRawWidget("/Script/UMG.Border", outer)
-        local shieldCanvas = Core.CreateRawWidget("/Script/UMG.CanvasPanel", outer)
-        shieldFillBorder = Core.CreateRawWidget("/Script/UMG.Border", outer)
+        local shieldTrackSb = CreateRawFast("/Script/UMG.SizeBox", outer)
+        local shieldTrackBg = CreateRawFast("/Script/UMG.Border", outer)
+        local shieldCanvas = CreateRawFast("/Script/UMG.CanvasPanel", outer)
+        shieldFillBorder = CreateRawFast("/Script/UMG.Border", outer)
         if Core.IsValidObj(shieldTrackSb) and Core.IsValidObj(shieldTrackBg)
             and Core.IsValidObj(shieldCanvas) and Core.IsValidObj(shieldFillBorder)
         then
@@ -1092,9 +1127,9 @@ local function EnsureShipLegend(pc)
     return LegendUI
 end
 
-local function UpdateShipLegend()
-    local pc = Core.GetLocalPlayerController()
-    local piloting = IsPilotingShipNow()
+local function UpdateShipLegend(pc)
+    local curPC = Core.IsValidObj(pc) and pc or Core.GetLocalPlayerController()
+    local piloting = IsPilotingShipNow(curPC)
 
     local perspKeyStr = Core.IsFeatureEnabled("ShipCamera") and FormatKeyLabel(Core.Config.ShipPerspectiveKey, "H") or nil
     local zeroKeyStr  = Core.IsFeatureEnabled("ShipZeroThrottle") and FormatKeyLabel(Core.Config.ShipZeroThrottleKey, "Zero") or nil
@@ -1110,12 +1145,15 @@ local function UpdateShipLegend()
         return
     end
 
-    local ui = EnsureShipLegend(pc)
+    local ui = EnsureShipLegend(curPC)
     if not ui or not Core.IsValidObj(ui.Root) then return end
 
     pcall(function()
         if ui.Root.IsInViewport and not ui.Root:IsInViewport() then
             ui.Root:AddToViewport(20)
+            if ui.Root.SetAnchorsInViewport then
+                ui.Root:SetAnchorsInViewport({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 1.0, Y = 1.0 } })
+            end
         end
         if showPersp and ui.LastPerspKey ~= perspKeyStr and Core.IsValidObj(ui.PerspKeyTxt) then
             ui.LastPerspKey = perspKeyStr
@@ -1135,139 +1173,10 @@ local function UpdateShipLegend()
     end)
 end
 
-local CachedWidgetCompCls = nil
-local CockpitTextCache = {
-    ShipActorAddr = nil,
-    UsingTB = nil,
-    FuelTB = nil,
-    Scanned = false,
-}
-
-local function ReadCockpitFuelStrings(shipActor)
-    if not Core.IsValidObj(shipActor) then return nil, nil end
-    local addr = shipActor:GetAddress()
-    if CockpitTextCache.ShipActorAddr ~= addr then
-        CockpitTextCache.ShipActorAddr = addr
-        CockpitTextCache.UsingTB = nil
-        CockpitTextCache.FuelTB = nil
-        CockpitTextCache.Scanned = false
-    end
-
-    if not CockpitTextCache.Scanned then
-        CockpitTextCache.Scanned = true
-        if not Core.IsValidObj(CachedWidgetCompCls) then
-            CachedWidgetCompCls = Core.FindOrLoadClass("/Script/UMG.WidgetComponent")
-        end
-        if Core.IsValidObj(CachedWidgetCompCls) and shipActor.K2_GetComponentsByClass then
-            pcall(function()
-                local comps = shipActor:K2_GetComponentsByClass(CachedWidgetCompCls)
-                if not comps then return end
-                local len = comps.GetArrayNum and comps:GetArrayNum() or #comps
-                for i = 1, len do
-                    local wc = Core.UnwrapArrayElem(comps[i])
-                    if Core.IsValidObj(wc) and wc.GetUserWidgetObject then
-                        local uw = wc:GetUserWidgetObject()
-                        if Core.IsValidObj(uw) then
-                            local cls = uw:GetClass()
-                            if Core.IsValidObj(cls) and cls.ForEachProperty then
-                                cls:ForEachProperty(function(prop)
-                                    local okN, pName = pcall(function() return prop:GetFName():ToString() end)
-                                    if not okN or type(pName) ~= "string" then return end
-                                    local okV, val = pcall(function() return uw[pName] end)
-                                    if not okV or not Core.IsValidObj(val) then return end
-                                    local tb = nil
-                                    if val.GetText then
-                                        tb = val
-                                    elseif Core.IsValidObj(val.TextBlock) and val.TextBlock.GetText then
-                                        tb = val.TextBlock
-                                    end
-                                    if Core.IsValidObj(tb) then
-                                        local okT, tObj = pcall(function() return tb:GetText() end)
-                                        local s = (okT and tObj and tObj.ToString) and tObj:ToString() or (type(tObj) == "string" and tObj or "")
-                                        if s:find("Using:", 1, true) then
-                                            CockpitTextCache.UsingTB = tb
-                                        elseif s:find("Fuel", 1, true) then
-                                            CockpitTextCache.FuelTB = tb
-                                        end
-                                    end
-                                end)
-                            end
-                        end
-                    end
-                end
-            end)
-            if not (Core.IsValidObj(CockpitTextCache.UsingTB) and Core.IsValidObj(CockpitTextCache.FuelTB)) then
-                -- Fallback one-time TextBlock scan (cockpit display often lives on a child actor / sub-widget)
-                local okAll, tbs = pcall(FindAllOf, "TextBlock")
-                if okAll and tbs then
-                    local ownUsingTB = LegendUI and Core.IsValidObj(LegendUI.FuelUseTxt) and LegendUI.FuelUseTxt.TextBlock or nil
-                    local ownFuelTB  = LegendUI and Core.IsValidObj(LegendUI.FuelAvailTxt) and LegendUI.FuelAvailTxt.TextBlock or nil
-                    local ownUsingAddr = Core.IsValidObj(ownUsingTB) and ownUsingTB:GetAddress() or nil
-                    local ownFuelAddr  = Core.IsValidObj(ownFuelTB) and ownFuelTB:GetAddress() or nil
-                    for _, tb in ipairs(tbs) do
-                        if Core.IsValidObj(tb) and tb.GetText then
-                            local tbAddr = tb:GetAddress()
-                            if tbAddr ~= ownUsingAddr and tbAddr ~= ownFuelAddr then
-                                local okT, tObj = pcall(function() return tb:GetText() end)
-                                local s = (okT and tObj and tObj.ToString) and tObj:ToString() or (type(tObj) == "string" and tObj or "")
-                                if not Core.IsValidObj(CockpitTextCache.UsingTB) and s:find("Using:", 1, true) and not s:find("--", 1, true) then
-                                    CockpitTextCache.UsingTB = tb
-                                elseif not Core.IsValidObj(CockpitTextCache.FuelTB) and (s:find("Fuel::", 1, true) or s:find("Fuel: ", 1, true)) and not s:find("--", 1, true) then
-                                    CockpitTextCache.FuelTB = tb
-                                end
-                                if Core.IsValidObj(CockpitTextCache.UsingTB) and Core.IsValidObj(CockpitTextCache.FuelTB) then
-                                    break
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-
-            if Core.IsValidObj(CockpitTextCache.UsingTB) or Core.IsValidObj(CockpitTextCache.FuelTB) then
-                Core.Log(string.format("[ShipCamera] Bound live cockpit fuel TextBlocks (using=%s fuel=%s)",
-                    tostring(Core.IsValidObj(CockpitTextCache.UsingTB)), tostring(Core.IsValidObj(CockpitTextCache.FuelTB))))
-            end
-        end
-    end
-
-    local usingStr, fuelStr = nil, nil
-    if Core.IsValidObj(CockpitTextCache.UsingTB) then
-        pcall(function()
-            local t = CockpitTextCache.UsingTB:GetText()
-            local s = (t and t.ToString) and t:ToString() or (type(t) == "string" and t or nil)
-            if s and s ~= "" then
-                usingStr = s:gsub(" / sec", "/s"):gsub("::", ":")
-            end
-        end)
-    end
-    if Core.IsValidObj(CockpitTextCache.FuelTB) then
-        pcall(function()
-            local t = CockpitTextCache.FuelTB:GetText()
-            local s = (t and t.ToString) and t:ToString() or (type(t) == "string" and t or nil)
-            if s and s ~= "" then
-                fuelStr = s:gsub("::", ":")
-            end
-        end)
-    end
-    return usingStr, fuelStr
-end
-
-local function ParseEnergyStringToMJ(str)
-    if type(str) ~= "string" then return nil end
-    local numStr, unit = str:match("([%d%.]+)%s*([kKMG]?[jJ])")
-    local num = tonumber(numStr)
-    if not num or not unit then return nil end
-    local u = unit:upper()
-    if u == "GJ" then return num * 1000.0 end
-    if u == "MJ" then return num end
-    if u == "KJ" then return num / 1000.0 end
-    return num / 1000000.0
-end
-
 local TelemetryTrack = {
     ShipAddr = nil,
-    SeenMaxBoost = 180.0,
+    SeenMaxBoost = 0.0,
+    SeenMaxShields = 0.0,
     LastLocX = nil,
     LastLocY = nil,
     LastLocZ = nil,
@@ -1277,26 +1186,74 @@ local TelemetryTrack = {
     MeasuredBurnRateMJ = 0.0,
 }
 
+local function ResetTelemetryTrack()
+    TelemetryTrack.ShipAddr = nil
+    TelemetryTrack.SeenMaxBoost = 0.0
+    TelemetryTrack.SeenMaxShields = 0.0
+    TelemetryTrack.LastLocX = nil
+    TelemetryTrack.LastLocY = nil
+    TelemetryTrack.LastLocZ = nil
+    TelemetryTrack.LastLocClock = nil
+    TelemetryTrack.LastTotalFuelMJ = nil
+    TelemetryTrack.LastFuelClock = nil
+    TelemetryTrack.MeasuredBurnRateMJ = 0.0
+    if LegendUI then
+        LegendUI.Cache = {}
+    end
+end
+
+local function SetCachedText(ui, key, widget, str, col)
+    if not Core.IsValidObj(widget) then return end
+    local cache = ui.Cache
+    if not cache then cache = {}; ui.Cache = cache end
+    if cache[key .. "_txt"] ~= str then
+        cache[key .. "_txt"] = str
+        pcall(function() widget:SetText(Core.MakeText(str)) end)
+    end
+    if col and cache[key .. "_col"] ~= col then
+        cache[key .. "_col"] = col
+        SetWBPTextCol(widget, col)
+    end
+end
+
+local function SetCachedBrushColor(ui, key, widget, col)
+    if not Core.IsValidObj(widget) or not col then return end
+    local cache = ui.Cache
+    if not cache then cache = {}; ui.Cache = cache end
+    if cache[key] ~= col then
+        cache[key] = col
+        pcall(function() widget:SetBrushColor(col) end)
+    end
+end
+
+local function SetCachedBarHeight(ui, key, slot, hPx)
+    if not Core.IsValidObj(slot) then return end
+    local q = math.floor(math.max(0.0, hPx) * 2.0 + 0.5) * 0.5
+    local cache = ui.Cache
+    if not cache then cache = {}; ui.Cache = cache end
+    if cache[key] ~= q then
+        cache[key] = q
+        pcall(function() slot:SetSize({ X = 0.0, Y = q }) end)
+    end
+end
+
 local function UpdateShipTelemetry(shipActor, shipObj, pc)
     if not (IsThirdPerson and LegendUI and Core.IsValidObj(LegendUI.LeftWing) and Core.IsValidObj(shipObj)) then
         return
     end
     local ui = LegendUI
+    if not ui.Cache then ui.Cache = {} end
     local now = os.clock()
     local shipAddr = shipObj:GetAddress()
     if TelemetryTrack.ShipAddr ~= shipAddr then
+        ResetTelemetryTrack()
         TelemetryTrack.ShipAddr = shipAddr
-        TelemetryTrack.SeenMaxBoost = 180.0
-        TelemetryTrack.LastLocX = nil
-        TelemetryTrack.LastLocY = nil
-        TelemetryTrack.LastLocZ = nil
-        TelemetryTrack.LastLocClock = nil
-        TelemetryTrack.LastTotalFuelMJ = nil
-        TelemetryTrack.LastFuelClock = nil
-        TelemetryTrack.MeasuredBurnRateMJ = 0.0
+        SetCachedText(ui, "hull", ui.HullValTxt, "--/--", TELEM_GOLD)
+        SetCachedText(ui, "fuelAvail", ui.FuelAvailTxt, "Fuel: --", TELEM_GOLD)
+        SetCachedText(ui, "fuelUse", ui.FuelUseTxt, "Using: 0 kJ/s", nil)
     end
 
-    -- 1. Boost charge & active boosting state (BoostCharge counts down from ~180 to 0)
+    -- 1. Boost charge & active boosting state
     local boostCharge = nil
     local maxBoost = nil
     local isBoosting = IsShipActivelyBoosting(shipObj, pc)
@@ -1307,20 +1264,19 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
     if boostCharge and boostCharge > TelemetryTrack.SeenMaxBoost then
         TelemetryTrack.SeenMaxBoost = boostCharge
     end
-    local effMaxBoost = (maxBoost and maxBoost > 0.001) and maxBoost or TelemetryTrack.SeenMaxBoost
+    local effMaxBoost = (maxBoost and maxBoost > 0.001) and maxBoost
+        or ((TelemetryTrack.SeenMaxBoost > 0.001) and TelemetryTrack.SeenMaxBoost or 180.0)
     local boostPct = 0.0
     if boostCharge and effMaxBoost and effMaxBoost > 0.001 then
         boostPct = Core.Clamp(boostCharge / effMaxBoost, 0.0, 1.0)
     end
-    if Core.IsValidObj(ui.BoostFillSlot) then
-        pcall(function() ui.BoostFillSlot:SetSize({ X = 0.0, Y = math.max(0.0, BOOST_BAR_H * boostPct) }) end)
-    end
-    if Core.IsValidObj(ui.BoostFillBorder) then
-        local bCol = isBoosting and TELEM_BOOST or (boostPct > 0.05 and TELEM_GOLD or TELEM_DIM)
-        pcall(function() ui.BoostFillBorder:SetBrushColor(bCol) end)
-    end
-    if Core.IsValidObj(ui.BoostLabelTxt) then
-        SetWBPTextCol(ui.BoostLabelTxt, isBoosting and TELEM_BOOST or TELEM_MUTED)
+    SetCachedBarHeight(ui, "boostH", ui.BoostFillSlot, BOOST_BAR_H * boostPct)
+    local bCol = isBoosting and TELEM_BOOST or (boostPct > 0.05 and TELEM_GOLD or TELEM_DIM)
+    SetCachedBrushColor(ui, "boostCol", ui.BoostFillBorder, bCol)
+    local boostLblCol = isBoosting and TELEM_BOOST or TELEM_MUTED
+    if ui.Cache.boostLblCol ~= boostLblCol and Core.IsValidObj(ui.BoostLabelTxt) then
+        ui.Cache.boostLblCol = boostLblCol
+        SetWBPTextCol(ui.BoostLabelTxt, boostLblCol)
     end
 
     -- 2. Live speed & movement direction (shipObj:GetVelocity() -> shipObj.Velocity -> actor location delta fallback)
@@ -1357,18 +1313,20 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
             local loc = shipActor:K2_GetActorLocation()
             if loc then
                 local lx, ly, lz = tonumber(loc.X) or 0, tonumber(loc.Y) or 0, tonumber(loc.Z) or 0
-                if TelemetryTrack.LastLocClock and (now - TelemetryTrack.LastLocClock) > 0.02 then
+                if TelemetryTrack.LastLocClock then
                     local dt = now - TelemetryTrack.LastLocClock
-                    local vx = (lx - TelemetryTrack.LastLocX) / dt / 100.0 -- cm/s -> m/s
-                    local vy = (ly - TelemetryTrack.LastLocY) / dt / 100.0
-                    local vz = (lz - TelemetryTrack.LastLocZ) / dt / 100.0
-                    local dSpeed = math.sqrt(vx * vx + vy * vy + vz * vz)
-                    if dSpeed < 50000.0 then -- ignore teleports/chunk origin shifts
-                        speedMs = dSpeed
-                        if shipActor.GetActorForwardVector then
-                            local fwd = shipActor:GetActorForwardVector()
-                            if fwd then
-                                forwardDot = vx * (tonumber(fwd.X) or 0) + vy * (tonumber(fwd.Y) or 0) + vz * (tonumber(fwd.Z) or 0)
+                    if dt > 0.02 and dt <= 1.0 then
+                        local vx = (lx - TelemetryTrack.LastLocX) / dt / 100.0 -- cm/s -> m/s
+                        local vy = (ly - TelemetryTrack.LastLocY) / dt / 100.0
+                        local vz = (lz - TelemetryTrack.LastLocZ) / dt / 100.0
+                        local dSpeed = math.sqrt(vx * vx + vy * vy + vz * vz)
+                        if dSpeed < 50000.0 then -- ignore teleports/chunk origin shifts
+                            speedMs = dSpeed
+                            if shipActor.GetActorForwardVector then
+                                local fwd = shipActor:GetActorForwardVector()
+                                if fwd then
+                                    forwardDot = vx * (tonumber(fwd.X) or 0) + vy * (tonumber(fwd.Y) or 0) + vz * (tonumber(fwd.Z) or 0)
+                                end
                             end
                         end
                     end
@@ -1384,11 +1342,9 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
     if speedMs >= 0.5 then
         dirPrefix = (forwardDot < -0.5) and "▼ " or "▲ "
     end
-    if Core.IsValidObj(ui.SpeedTxt) then
-        local spStr = string.format("%s%.0f m/s", dirPrefix, speedMs)
-        pcall(function() ui.SpeedTxt:SetText(Core.MakeText(spStr)) end)
-        SetWBPTextCol(ui.SpeedTxt, isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD))
-    end
+    local spStr = string.format("%s%.0f m/s", dirPrefix, speedMs)
+    local spCol = isBoosting and TELEM_BOOST or ((forwardDot < -0.5 and speedMs >= 0.5) and TELEM_ORANGE or TELEM_GOLD)
+    SetCachedText(ui, "speed", ui.SpeedTxt, spStr, spCol)
 
     -- 3. Live total fuel available & live fuel usage directly from shipObj simulation state:
     --    1 raw fuel unit = 0.01 MJ (10 kJ).
@@ -1413,14 +1369,26 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
     if fuelAvailMJ ~= nil then
         if TelemetryTrack.LastTotalFuelMJ ~= nil and TelemetryTrack.LastFuelClock ~= nil then
             local dtF = now - TelemetryTrack.LastFuelClock
-            if dtF >= 0.25 then
+            if dtF > 2.0 then
+                -- Stale timestamp (e.g. pause or 3P re-entry): re-seed cleanly without computing a delta
+                TelemetryTrack.LastTotalFuelMJ = fuelAvailMJ
+                TelemetryTrack.LastFuelClock = now
+                TelemetryTrack.MeasuredBurnRateMJ = 0.0
+            elseif dtF >= 0.25 then
                 local deltaMJ = TelemetryTrack.LastTotalFuelMJ - fuelAvailMJ
-                -- Ignore sudden positive jumps (refueling) or huge negative spikes
-                if deltaMJ >= 0.0 and deltaMJ < 5000.0 then
-                    local instRate = deltaMJ / dtF
-                    TelemetryTrack.MeasuredBurnRateMJ = TelemetryTrack.MeasuredBurnRateMJ * 0.4 + instRate * 0.6
-                elseif deltaMJ < -10.0 then
+                if deltaMJ <= 0.0 then
+                    -- Idle or refueled: snap cleanly to 0 instead of lingering EMA decay
                     TelemetryTrack.MeasuredBurnRateMJ = 0.0
+                else
+                    local instRate = deltaMJ / dtF
+                    -- Reject implausible spikes (e.g. removing fuel cells from inventory)
+                    if instRate < 500.0 then
+                        if instRate < 0.001 then
+                            TelemetryTrack.MeasuredBurnRateMJ = 0.0
+                        else
+                            TelemetryTrack.MeasuredBurnRateMJ = TelemetryTrack.MeasuredBurnRateMJ * 0.4 + instRate * 0.6
+                        end
+                    end
                 end
                 TelemetryTrack.LastTotalFuelMJ = fuelAvailMJ
                 TelemetryTrack.LastFuelClock = now
@@ -1432,18 +1400,11 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
     end
 
     local fuelUseMJPerSec = (rawFuelUse and rawFuelUse > 0.001) and (rawFuelUse * 0.3) or TelemetryTrack.MeasuredBurnRateMJ
-    if Core.IsValidObj(ui.FuelUseTxt) then
-        pcall(function()
-            ui.FuelUseTxt:SetText(Core.MakeText("Using: " .. FormatEnergyValue(fuelUseMJPerSec, true)))
-        end)
-    end
+    SetCachedText(ui, "fuelUse", ui.FuelUseTxt, "Using: " .. FormatEnergyValue(fuelUseMJPerSec, true), nil)
 
-    if Core.IsValidObj(ui.FuelAvailTxt) then
-        local aStr = fuelAvailMJ and ("Fuel: " .. FormatEnergyValue(fuelAvailMJ, false)) or "Fuel: --"
-        pcall(function() ui.FuelAvailTxt:SetText(Core.MakeText(aStr)) end)
-        local lowFuel = (fuelAvailMJ ~= nil and fuelAvailMJ <= 0.1)
-        SetWBPTextCol(ui.FuelAvailTxt, lowFuel and TELEM_RED or TELEM_GOLD)
-    end
+    local aStr = fuelAvailMJ and ("Fuel: " .. FormatEnergyValue(fuelAvailMJ, false)) or "Fuel: --"
+    local lowFuel = (fuelAvailMJ ~= nil and fuelAvailMJ <= 0.1)
+    SetCachedText(ui, "fuelAvail", ui.FuelAvailTxt, aStr, lowFuel and TELEM_RED or TELEM_GOLD)
 
     -- 4. Hull integrity (GetCurrentHull / GetTotalHull) & 3-segment vertical bar
     local curHull = nil
@@ -1460,14 +1421,11 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         local pct = Core.Clamp(curHull / maxH, 0.0, 1.0)
         local isDestroyed = (curHull <= 0.001)
 
-        if Core.IsValidObj(ui.HullValTxt) then
-            pcall(function()
-                ui.HullValTxt:SetText(Core.MakeText(string.format("%.0f/%.0f", math.max(0, curHull), maxH)))
-            end)
-            SetWBPTextCol(ui.HullValTxt, isDestroyed and TELEM_RED or TELEM_GOLD)
-        end
-        if Core.IsValidObj(ui.HullTitleTxt) then
-            SetWBPTextCol(ui.HullTitleTxt, isDestroyed and TELEM_RED or TELEM_MUTED)
+        SetCachedText(ui, "hull", ui.HullValTxt, string.format("%.0f/%.0f", math.max(0, curHull), maxH), isDestroyed and TELEM_RED or TELEM_GOLD)
+        local hullTitleCol = isDestroyed and TELEM_RED or TELEM_MUTED
+        if ui.Cache.hullTitleCol ~= hullTitleCol and Core.IsValidObj(ui.HullTitleTxt) then
+            ui.Cache.hullTitleCol = hullTitleCol
+            SetWBPTextCol(ui.HullTitleTxt, hullTitleCol)
         end
 
         local segColors = { TELEM_EMPTY, TELEM_EMPTY, TELEM_EMPTY }
@@ -1481,8 +1439,8 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
             segColors = { TELEM_RED, TELEM_EMPTY, TELEM_EMPTY }
         end
         for i = 1, 3 do
-            if ui.HullSegs and Core.IsValidObj(ui.HullSegs[i]) then
-                pcall(function() ui.HullSegs[i]:SetBrushColor(segColors[i]) end)
+            if ui.HullSegs and ui.HullSegs[i] then
+                SetCachedBrushColor(ui, "hullSeg" .. i, ui.HullSegs[i], segColors[i])
             end
         end
     end
@@ -1496,33 +1454,60 @@ local function UpdateShipTelemetry(shipActor, shipObj, pc)
         if shipObj.GetMaxShields then maxShields = ReadNumericOrFixed(shipObj:GetMaxShields()) end
         if maxShields == nil then maxShields = ReadNumericOrFixed(shipObj.MaxShields) end
     end)
+    if curShields and curShields > TelemetryTrack.SeenMaxShields then
+        TelemetryTrack.SeenMaxShields = curShields
+    end
+    local effMaxShields = (maxShields and maxShields > 0.001) and maxShields or TelemetryTrack.SeenMaxShields
     local shieldPct = 0.0
-    if curShields and maxShields and maxShields > 0.001 then
-        shieldPct = Core.Clamp(curShields / maxShields, 0.0, 1.0)
+    if curShields and effMaxShields and effMaxShields > 0.001 then
+        shieldPct = Core.Clamp(curShields / effMaxShields, 0.0, 1.0)
     end
-    if Core.IsValidObj(ui.ShieldFillSlot) then
-        pcall(function() ui.ShieldFillSlot:SetSize({ X = 0.0, Y = math.max(0.0, SHIELD_BAR_H * shieldPct) }) end)
-    end
-    if Core.IsValidObj(ui.ShieldFillBorder) then
-        pcall(function()
-            ui.ShieldFillBorder:SetBrushColor((shieldPct > 0.005) and TELEM_SHIELD or TELEM_DIM)
-        end)
-    end
+    SetCachedBarHeight(ui, "shieldH", ui.ShieldFillSlot, SHIELD_BAR_H * shieldPct)
+    SetCachedBrushColor(ui, "shieldCol", ui.ShieldFillBorder, (shieldPct > 0.005) and TELEM_SHIELD or TELEM_DIM)
 
     if not TelemetryDiagLogged then
         TelemetryDiagLogged = true
         Core.Log(string.format("[ShipCamera] TelemetryDiag boost=%s/%s speed=%.1f fuelUse=%.2f rawTotal=%s rawBuf=%s fuelMJ=%s hull=%s/%s shields=%s/%s",
             tostring(boostCharge), tostring(effMaxBoost), speedMs,
             fuelUseMJPerSec, tostring(rawTotalFuel), tostring(rawBurnBuf), tostring(fuelAvailMJ),
-            tostring(curHull), tostring(maxHull), tostring(curShields), tostring(maxShields)))
+            tostring(curHull), tostring(maxHull), tostring(curShields), tostring(effMaxShields)))
     end
 end
 
+local PilotLegendPollGen = 0
+
 local function StartPilotLegendPoll()
     if PilotLegendPollActive then return end
+    if not (Core.IsFeatureEnabled("ShipCamera") or Core.IsFeatureEnabled("ShipZeroThrottle")) then
+        return
+    end
     PilotLegendPollActive = true
+    PilotLegendPollGen = PilotLegendPollGen + 1
+    local myGen = PilotLegendPollGen
     local function Tick()
-        pcall(UpdateShipLegend)
+        if myGen ~= PilotLegendPollGen then return end
+        if not (Core.IsFeatureEnabled("ShipCamera") or Core.IsFeatureEnabled("ShipZeroThrottle")) then
+            PilotLegendPollActive = false
+            pcall(UpdateShipLegend)
+            return
+        end
+        local onMainMenu = Core.IsAnyWidgetClassVisible("WBP_MainMenu_C")
+        if onMainMenu then
+            if LegendUI and Core.IsValidObj(LegendUI.Root) then
+                pcall(function() LegendUI.Root:SetVisibility(1) end)
+            end
+            ExecuteInGameThreadWithDelay(2000, Tick)
+            return
+        end
+        local pc = Core.GetLocalPlayerController()
+        if not Core.IsValidObj(pc) then
+            if LegendUI and Core.IsValidObj(LegendUI.Root) then
+                pcall(function() LegendUI.Root:SetVisibility(1) end)
+            end
+            ExecuteInGameThreadWithDelay(2000, Tick)
+            return
+        end
+        pcall(UpdateShipLegend, pc)
         ExecuteInGameThreadWithDelay(250, Tick)
     end
     ExecuteInGameThreadWithDelay(500, Tick)
@@ -1540,21 +1525,27 @@ local function StartScrollPoll()
     local lastTelemClock = 0.0
     EnsureScrollKeyTables()
 
-    local function Tick()
+    local function TickBody()
         if myGen ~= ScrollPollGen or not IsThirdPerson then
             if myGen == ScrollPollGen then
                 ScrollPollActive = false
             end
-            return
+            return false
         end
 
         local pc = Core.GetLocalPlayerController()
         if not Core.IsValidObj(pc) then
+            if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
+                RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
+                SavedOriginalCamera[ActiveShipAddr] = nil
+            end
+            ActiveShipAddr = nil
             IsThirdPerson = false
             BoostBlend = 0.0
             ScrollPollActive = false
+            ResetTelemetryTrack()
             UpdateShipLegend()
-            return
+            return false
         end
 
         local shipActor, shipObj = GetPilotedShipActor(pc)
@@ -1562,20 +1553,24 @@ local function StartScrollPoll()
             -- Player exited the pilot seat: restore original 1st-person camera and stop polling
             if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
                 RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
+                SavedOriginalCamera[ActiveShipAddr] = nil
             end
             ActiveShipAddr = nil
             IsThirdPerson = false
             BoostBlend = 0.0
             ScrollPollActive = false
-            UpdateShipLegend()
-            return
+            ResetTelemetryTrack()
+            UpdateShipLegend(pc)
+            return false
         end
 
         local now = os.clock()
         local dt = math.max(0.001, math.min(0.05, now - lastClock))
         lastClock = now
 
-        local blocking = (Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen()) == true
+        local showCursor = false
+        pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
+        local blocking = showCursor or ((Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen(pc)) == true)
         local needsApply = false
 
         if not blocking then
@@ -1641,7 +1636,16 @@ local function StartScrollPoll()
             pcall(UpdateShipTelemetry, shipActor, shipObj, pc)
         end
 
-        ExecuteInGameThreadAfterFrames(1, Tick)
+        return true
+    end
+
+    local function Tick()
+        local ok, keepGoing = pcall(TickBody)
+        if ok and keepGoing then
+            ExecuteInGameThreadAfterFrames(1, Tick)
+        elseif myGen == ScrollPollGen then
+            ScrollPollActive = false
+        end
     end
 
     ExecuteInGameThreadAfterFrames(1, Tick)
@@ -1657,17 +1661,25 @@ local function ToggleShipPerspective()
     IsThirdPerson = not IsThirdPerson
     if not IsThirdPerson then
         BoostBlend = 0.0
-    end
-    ApplyShipCameraState(pc, true)
-    UpdateShipLegend()
-    if IsThirdPerson then
+        ApplyShipCameraState(pc, true)
+        -- Clear snapshot on return to 1P so subsequent FOV/Designer changes are never overwritten
+        if ActiveShipAddr then
+            SavedOriginalCamera[ActiveShipAddr] = nil
+            ActiveShipAddr = nil
+        end
+        ResetTelemetryTrack()
+        UpdateShipLegend(pc)
+    else
+        ResetTelemetryTrack()
+        ApplyShipCameraState(pc, true)
+        UpdateShipLegend(pc)
         pcall(UpdateShipTelemetry, shipActor, shipObj, pc)
         StartScrollPoll()
     end
 end
 
 local function ResetCameraState()
-    if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
+    if IsThirdPerson and ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
         RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
     end
     IsThirdPerson = false
@@ -1676,10 +1688,18 @@ local function ResetCameraState()
     ScrollPollGen = ScrollPollGen + 1
     ActiveShipAddr = nil
     SavedOriginalCamera = {}
+    CachedMMBIconTex = nil
+    MMBIconSearched = false
+    CachedUmgClasses = {}
+    ResetTelemetryTrack()
     DestroyShipLegend()
 end
 
 function Feature.Init()
+    Core.RefreshShipLegend = function()
+        pcall(UpdateShipLegend)
+        StartPilotLegendPoll()
+    end
     Core.RegisterConfigurableKeybind({
         ConfigKey   = "ShipPerspectiveKey",
         DefaultKey  = "H",
@@ -1694,23 +1714,30 @@ end
 
 function Feature.OnToggle(enabled)
     if not enabled then
-        if ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
+        if IsThirdPerson and ActiveShipAddr and SavedOriginalCamera[ActiveShipAddr] then
             RestoreShipCameraSnapshot(SavedOriginalCamera[ActiveShipAddr])
+            SavedOriginalCamera[ActiveShipAddr] = nil
         end
+        ActiveShipAddr = nil
         IsThirdPerson = false
         BoostBlend = 0.0
         ScrollPollActive = false
         ScrollPollGen = ScrollPollGen + 1
+        ResetTelemetryTrack()
+    else
+        StartPilotLegendPoll()
     end
     UpdateShipLegend()
 end
 
 function Feature.OnClientRestart()
     ResetCameraState()
+    StartPilotLegendPoll()
 end
 
 function Feature.OnMapLoad()
     ResetCameraState()
+    StartPilotLegendPoll()
 end
 
 function Feature.PruneCaches()

@@ -24,23 +24,44 @@ local function ReadShipThrottle(shipObj)
     if not Core.IsValidObj(shipObj) then return nil end
     local ok, val = pcall(function() return shipObj.Throttle end)
     if not ok or val == nil then return nil end
+    local num = nil
     if type(val) == "number" then
-        return val
+        num = val
+    else
+        -- Handle fixed-point PFloat/PNum struct if applicable
+        local okV, rawV = pcall(function() return val.Value end)
+        if okV and type(rawV) == "number" then
+            num = rawV / 65536.0
+        end
     end
-    -- Handle fixed-point PFloat/PNum struct if applicable
-    local okV, rawV = pcall(function() return val.Value end)
-    if okV and type(rawV) == "number" then
-        return rawV / 65536.0
+    if type(num) ~= "number" or num ~= num or math.abs(num) == math.huge then
+        return nil
     end
-    return nil
+    return num
+end
+
+local function GetPilotedShipSafe(pc)
+    if not Core.IsValidObj(pc) then return nil end
+    local ok, ship = pcall(function()
+        local po = pc.PlayerObject
+        return Core.IsValidObj(po) and po.PilotedShip or nil
+    end)
+    return (ok and Core.IsValidObj(ship)) and ship or nil
 end
 
 local function IsPilotingShipNow()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return false end
-    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen() then return false end
-    local ok, po = pcall(function() return pc.PlayerObject end)
-    return ok and Core.IsValidObj(po) and Core.IsValidObj(po.PilotedShip)
+    if Core.IsAnyBlockingMenuOpen and Core.IsAnyBlockingMenuOpen(pc) then return false end
+    return Core.IsValidObj(GetPilotedShipSafe(pc))
+end
+
+local function CancelZeroThrottle()
+    ZeroToken = ZeroToken + 1
+    local pc = Core.GetLocalPlayerController()
+    if Core.IsValidObj(pc) then
+        pcall(function() pc:SetThrottleInput(0.0) end)
+    end
 end
 
 local function ZeroShipThrottle()
@@ -48,12 +69,11 @@ local function ZeroShipThrottle()
     local pc = Core.GetLocalPlayerController()
     if not Core.IsValidObj(pc) then return end
 
-    local playerObj = pc.PlayerObject
-    if not Core.IsValidObj(playerObj) or not Core.IsValidObj(playerObj.PilotedShip) then
+    local shipObj = GetPilotedShipSafe(pc)
+    if not Core.IsValidObj(shipObj) then
         return
     end
 
-    local shipObj = playerObj.PilotedShip
     local startThrottle = ReadShipThrottle(shipObj)
     Core.Log(string.format("[ShipZeroThrottle] Triggered: curThrottle=%s", tostring(startThrottle)))
 
@@ -74,8 +94,12 @@ local function ZeroShipThrottle()
         local curPC = Core.GetLocalPlayerController()
         if not Core.IsValidObj(curPC) then return end
 
-        local po = curPC.PlayerObject
-        local curShip = Core.IsValidObj(po) and po.PilotedShip or nil
+        if not Core.IsFeatureEnabled("ShipZeroThrottle") then
+            pcall(function() curPC:SetThrottleInput(0.0) end)
+            return
+        end
+
+        local curShip = GetPilotedShipSafe(curPC)
         if not Core.IsValidObj(curShip) then
             pcall(function() curPC:SetThrottleInput(0.0) end)
             return
@@ -88,7 +112,10 @@ local function ZeroShipThrottle()
                 manualOverride = true
             end
         end)
-        if manualOverride then return end
+        if manualOverride then
+            pcall(function() curPC:SetThrottleInput(0.0) end)
+            return
+        end
 
         local cur = ReadShipThrottle(curShip)
         if cur == nil or math.abs(cur) < 0.0001 or (startSign > 0 and cur <= 0) or (startSign < 0 and cur >= 0) or os.clock() >= deadline then
@@ -97,12 +124,31 @@ local function ZeroShipThrottle()
             return
         end
 
-        local inputDir = (cur > 0) and -1.0 or 1.0
+        -- Scale axis proportionally near zero to minimize overshoot on high-RTT multiplayer clients
+        local mag = (math.abs(cur) < 0.15) and math.max(0.25, math.abs(cur) / 0.15) or 1.0
+        local inputDir = (cur > 0) and -mag or mag
         pcall(function() curPC:SetThrottleInput(inputDir) end)
         ExecuteInGameThreadAfterFrames(1, Step)
     end
 
     Step()
+end
+
+function Feature.OnToggle(enabled)
+    if not enabled then
+        CancelZeroThrottle()
+    end
+    if type(Core.RefreshShipLegend) == "function" then
+        pcall(Core.RefreshShipLegend)
+    end
+end
+
+function Feature.OnMapLoad()
+    CancelZeroThrottle()
+end
+
+function Feature.OnClientRestart()
+    CancelZeroThrottle()
 end
 
 function Feature.Init()
@@ -113,6 +159,11 @@ function Feature.Init()
         Label       = "Ship Zero Throttle",
         CanTrigger  = IsPilotingShipNow,
         OnPress     = ZeroShipThrottle,
+        OnChanged   = function()
+            if type(Core.RefreshShipLegend) == "function" then
+                pcall(Core.RefreshShipLegend)
+            end
+        end,
     })
 end
 

@@ -169,7 +169,11 @@ pc:AddInputCommand(receiverMachineId, inputCommandObj)
 ## 8. HUD, Cursor & Input Patterns
 
 - **Custom Cursor Hotspot**:
-  - *Main Sequence*'s custom white arrow cursor has its platform/Slate mouse coordinate (`AbsoluteToLocal(geom, GetMousePositionOnPlatform())`) aligned near the **bottom-left** of the cursor graphic. Shifting `ly = ly - 15.0` (with `0px` X offset) aligns hover tooltips, clicks, and box-select with the exact **top-left tip**.
+  - Inside `WBP_WindowBase_C` framed windows, *Main Sequence*'s custom white arrow cursor had its Slate coordinate aligned ~`15px` below the tip (`ly = ly - 15.0`); inside a plain fullscreen `/Script/UMG.UserWidget` root (`SetAnchorsInViewport({0,0},{1,1})`), `AbsoluteToLocal` aligns directly with the cursor tip without a Y-offset.
+- **Ship Piloting, Camera & Telemetry Internals (`ship_camera.lua`, `ship_zero_throttle.lua`)**:
+  - Active piloted ship is at `pc.PlayerObject.PilotedShip` (always guard `pc.PlayerObject` and `po.PilotedShip` in `pcall`).
+  - `shipObj:SetViewedExternally(bool)` toggles external ship rendering for 3rd-person camera; throttle can be stepped natively via `pc:SetThrottleInput(axis)`.
+  - Verified live telemetry properties/methods on `shipObj`: `bBoosting` (`bool`), `BoostCharge` / `MaxBoostCharge`, `GetVelocity()` / `Velocity`, `GetTotalFuel()` (reserve cells) + `GetRemainingFuel()` (active burning cell buffer) where **1 raw fuel unit = `0.01 MJ` (`10 kJ`)**, `FuelConsumptionRate`, `GetCurrentHull()` / `GetTotalHull()`, `GetShields()` / `GetMaxShields()`.
 - **Single-Frame Mouse Scroll Polling**:
   - `pc:WasInputKeyJustPressed({ KeyName = FName("MouseScrollUp") })` is only true for a **single game frame**. Polling it with `ExecuteInGameThreadWithDelay(16, ...)` skips frames and feels insensitive. Always poll scroll input with `ExecuteInGameThreadAfterFrames(1, ...)` and also check `pc:GetInputAnalogKeyState({ KeyName = FName("MouseWheelAxis") })`.
   - Any active builder on `pc.Builder` (`ConveyorBuilder`, `MachineBuilder`, `UndergroundBeltBuilder`, etc.) exposing `:AddRotation(delta)` can be rotated in O(1) without `FindAllOf`.

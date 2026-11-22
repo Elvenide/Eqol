@@ -1208,10 +1208,15 @@ end
 --------------------------------------------------------------------------------
 
 local CachedHudIconTextures = {}
+local HudIconScanCooldown = {} -- kind -> os.clock() of last missed FindAllOf("Texture2D") scan
 
 local function FindHudIconTexture(kind, hud)
     if Core.IsValidObj(CachedHudIconTextures[kind]) then
         return CachedHudIconTextures[kind]
+    end
+    local now = os.clock()
+    if HudIconScanCooldown[kind] and (now - HudIconScanCooldown[kind]) < 8.0 then
+        return nil
     end
 
     local pathsByKind = {
@@ -1325,6 +1330,9 @@ local function FindHudIconTexture(kind, hud)
 
     if Core.IsValidObj(tex) then
         CachedHudIconTextures[kind] = tex
+        HudIconScanCooldown[kind] = nil
+    else
+        HudIconScanCooldown[kind] = now
     end
     return tex
 end
@@ -1653,6 +1661,7 @@ function Feature.OnMapLoad()
     DestroyLogisticsWindow()
     CachedWidgetClasses = {}
     CachedHudIconTextures = {}
+    HudIconScanCooldown = {}
     CachedWblCDO = nil
 end
 
