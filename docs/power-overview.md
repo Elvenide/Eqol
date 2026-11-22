@@ -8,7 +8,7 @@ Quickly check your station's power grid from anywhere inside a space station and
 ## Features
 
 - **Global Power Overview Hotkey (Default: `P`)**
-  - Press `P` while on foot in a space station to open the Power Overview window immediately—no need to walk up to a machine first.
+  - Press `P` while on foot in a space station to open the Power Overview window immediately -- no need to walk up to a machine first.
   - Press `P` again while the Power Overview is open to close it.
   - A **Power (`P`)** keybind indicator appears in the top-right HUD while on foot in a space station and updates automatically if you rebind the key.
 - **Summary Header Progress Bars**

@@ -13,5 +13,9 @@ FPS: <fps> | Eqol v<eqol version> | MS v<main sequence version>
 
 ## Details
 
-- Edits the vanilla bottom-right version `TextBlock` in-place (preserving its exact font, size, color, and styling) and enables auto-sizing so the text never clips.
+- Edits the vanilla bottom-right version text in-place with frames per second and Eqol version information.
 - Updates FPS twice per second (`0.5s` window) with minimal overhead.
+
+## Notes
+
+- If you have a question or find a bug in Eqol, it's helpful for me to know the Eqol and Main Sequence versions that are shown in this text label.

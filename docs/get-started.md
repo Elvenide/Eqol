@@ -14,11 +14,11 @@
 
 ### 1. Install UE4SS (if you haven't already)
 
-#### Option A — Automated Install (Recommended): MSCoreManager
+#### Option A -- Automated Install (Recommended): MSCoreManager
 - Download the latest **MSCoreManager** executable by **xxalex3xx97** from [github.com/xxalex3xx97/MSCore/releases/latest](https://github.com/xxalex3xx97/MSCore/releases/latest).
 - Run `MSCoreManager` and follow its prompts to automatically install and configure UE4SS for *Main Sequence*.
 
-#### Option B — Manual UE4SS Install
+#### Option B -- Manual UE4SS Install
 - Download the latest UE4SS release (`UE4SS_v4.0.0.zip` or newer) from the [RE-UE4SS Releases page](https://github.com/UE4SS-RE/RE-UE4SS/releases).
 - Extract the contents into your game's `Win64` folder:
   ```
@@ -34,12 +34,12 @@
 
 ### 2. Install Eqol
 
-#### Option A — MSCoreManager
+#### Option A -- MSCoreManager
 - If you installed **MSCoreManager** previously, open it
 - Click **Add mod...**
 - Paste in the following: `https://github.com/Elvenide/Eqol`
 
-#### Option B — Manual UE4SS Install
+#### Option B -- Manual UE4SS Install
 - Download the latest release zip from [github.com/Elvenide/Eqol/releases](https://github.com/Elvenide/Eqol/releases).
 - Extract the `Eqol` folder into:
   ```

@@ -7,9 +7,16 @@ Displays a compact numeric badge in the bottom-right corner of each bound hotbar
 
 ## Features
 
-- Automatically calculates the maximum buildable quantity for every bound slot on the bottom hotbar (`WBP_Hotbar_C`), checking both `ItemCost` and `ItemDetails.Recipe.Inputs`.
+- Automatically calculates the maximum buildable quantity for every bound slot on the bottom hotbar.
 - **Color Coding**:
   - **White**: You have materials for at least 1 unit (large counts abbreviate cleanly, e.g., `1.2k`, `15k`).
   - **Red (`0`)**: You are missing one or more required materials.
-  - **`∞`**: Shown automatically while in Creative Mode.
+- In Creative Mode, all slots show **`∞`**.
 - Refreshes every `0.5s` and collapses cleanly on unbound/empty hotbar slots.
+
+## Notes
+
+- In case you aren't aware, in Main Sequence you bind machines to your hotbar by:
+  - Pressing `B` while in your station
+  - Hovering your mouse over a machine
+  - Pressing a number key (`0`-`9`)
