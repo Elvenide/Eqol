@@ -58,6 +58,7 @@ jobs:
           mkdir -p "${STAGE}"
           cp -r Scripts "${STAGE}/Scripts"
           cp README.md "${STAGE}/README.md"
+          cp LICENSE "${STAGE}/LICENSE"
           if [ -d docs ]; then
             mkdir -p "${STAGE}/docs"
             cp docs/*.md "${STAGE}/docs/" || true
