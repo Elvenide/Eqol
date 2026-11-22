@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.VERSION = "0.1.79"
+Core.VERSION = "0.1.81"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -1035,8 +1035,99 @@ local UE_TO_UE4SS_KEY = {
 }
 
 local SharedKeyHandlers = {}    -- ue4ssKey -> true
+local SyncingKeybindRows = {}   -- rowAddr -> true (prevents re-entrant OnKeySelected crash)
 local SharedRemapHooksDone = false
 local InitialSettingsMenuScanDone = false
+local MOD_KEYS = nil
+
+local function EnsureModKeys()
+    if MOD_KEYS then return end
+    MOD_KEYS = {}
+    for k, n in pairs({
+        LShift = "LeftShift", RShift = "RightShift",
+        LCtrl  = "LeftControl", RCtrl = "RightControl",
+        LAlt   = "LeftAlt", RAlt = "RightAlt",
+        LCmd   = "LeftCommand", RCmd = "RightCommand",
+    }) do
+        pcall(function() MOD_KEYS[k] = { KeyName = FName(n) } end)
+    end
+end
+
+local function FormatKeyChord(keyName, bCtrl, bAlt, bShift, bCmd)
+    if not keyName or keyName == "" or keyName == "None" then
+        return "None"
+    end
+    local parts = {}
+    if bCtrl then parts[#parts + 1] = "Ctrl" end
+    if bAlt then parts[#parts + 1] = "Alt" end
+    if bShift then parts[#parts + 1] = "Shift" end
+    if bCmd then parts[#parts + 1] = "Cmd" end
+    parts[#parts + 1] = keyName
+    return table.concat(parts, "+")
+end
+
+local function ParseKeyChord(spec)
+    local bCtrl, bAlt, bShift, bCmd = false, false, false, false
+    local keyName = "None"
+    if type(spec) == "string" and spec ~= "" and spec ~= "None" then
+        for token in spec:gmatch("[^+]+") do
+            local trimmed = token:match("^%s*(.-)%s*$")
+            local low = string.lower(trimmed)
+            if low == "ctrl" or low == "control" then
+                bCtrl = true
+            elseif low == "alt" then
+                bAlt = true
+            elseif low == "shift" then
+                bShift = true
+            elseif low == "cmd" or low == "command" then
+                bCmd = true
+            elseif trimmed ~= "" then
+                keyName = trimmed
+            end
+        end
+    end
+    if keyName == "" or keyName == "None" then
+        bCtrl, bAlt, bShift, bCmd = false, false, false, false
+        keyName = "None"
+    end
+    return {
+        keyName = keyName,
+        bCtrl = bCtrl,
+        bAlt = bAlt,
+        bShift = bShift,
+        bCmd = bCmd,
+        canonical = FormatKeyChord(keyName, bCtrl, bAlt, bShift, bCmd),
+    }
+end
+
+local function ModifiersMatch(pc, parsed)
+    if not parsed or parsed.keyName == "None" then return false end
+    if not Core.IsValidObj(pc) or not pc.IsInputKeyDown then
+        return not (parsed.bCtrl or parsed.bAlt or parsed.bShift or parsed.bCmd)
+    end
+    EnsureModKeys()
+    local M = MOD_KEYS
+    local shiftDown, ctrlDown, altDown, cmdDown = false, false, false, false
+    pcall(function()
+        shiftDown = (M.LShift and pc:IsInputKeyDown(M.LShift) == true)
+            or (M.RShift and pc:IsInputKeyDown(M.RShift) == true) or false
+        ctrlDown = (M.LCtrl and pc:IsInputKeyDown(M.LCtrl) == true)
+            or (M.RCtrl and pc:IsInputKeyDown(M.RCtrl) == true) or false
+        altDown = (M.LAlt and pc:IsInputKeyDown(M.LAlt) == true)
+            or (M.RAlt and pc:IsInputKeyDown(M.RAlt) == true) or false
+        cmdDown = (M.LCmd and pc:IsInputKeyDown(M.LCmd) == true)
+            or (M.RCmd and pc:IsInputKeyDown(M.RCmd) == true) or false
+    end)
+    local k = parsed.keyName
+    local isShiftKey = (k == "LeftShift" or k == "RightShift")
+    local isCtrlKey  = (k == "LeftControl" or k == "RightControl")
+    local isAltKey   = (k == "LeftAlt" or k == "RightAlt")
+    local isCmdKey   = (k == "LeftCommand" or k == "RightCommand")
+    return (isCtrlKey or ctrlDown == parsed.bCtrl)
+        and (isAltKey or altDown == parsed.bAlt)
+        and (isShiftKey or shiftDown == parsed.bShift)
+        and (isCmdKey or cmdDown == parsed.bCmd)
+end
 
 local function ResolveUE4SSKey(keyName)
     if not keyName or keyName == "" or keyName == "None" or not Key then return nil end
@@ -1045,14 +1136,14 @@ local function ResolveUE4SSKey(keyName)
     return Key[upper]
 end
 
-local function MakeInputChord(keyName)
-    local resolvedName = (keyName and keyName ~= "") and keyName or "None"
+local function MakeInputChord(chordSpec)
+    local parsed = ParseKeyChord(chordSpec)
     return {
-        Key = { KeyName = FName(resolvedName) },
-        bShift = false,
-        bCtrl = false,
-        bAlt = false,
-        bCmd = false,
+        Key = { KeyName = FName(parsed.keyName) },
+        bShift = parsed.bShift,
+        bCtrl = parsed.bCtrl,
+        bAlt = parsed.bAlt,
+        bCmd = parsed.bCmd,
     }
 end
 
@@ -1082,7 +1173,10 @@ local function SyncKeybindRow(bs, row)
         pcall(function() row.WBP_SettingEntryBody:SetText(lbl) end)
     end
     if Core.IsValidObj(row.InputKeySelector) then
+        local rowAddr = row:GetAddress()
+        SyncingKeybindRows[rowAddr] = true
         pcall(function() row.InputKeySelector:SetSelectedKey(MakeInputChord(Core.Config[bs.ConfigKey])) end)
+        SyncingKeybindRows[rowAddr] = nil
     end
 end
 
@@ -1167,47 +1261,118 @@ local function CanTriggerRegisteredKeybind(bs)
     return Core.IsGameplayInputAllowed(bs)
 end
 
-local function ApplyKeybindState(bs, keyName, shouldSave)
-    local normalized = (keyName and keyName ~= "") and keyName or "None"
+local function BuildUE4SSModifierList(parsed)
+    local mods = {}
+    local mask = 0
+    if parsed and ModifierKey then
+        if parsed.bCtrl and ModifierKey.CONTROL then
+            mods[#mods + 1] = ModifierKey.CONTROL
+            mask = mask + 1
+        end
+        if parsed.bAlt and ModifierKey.ALT then
+            mods[#mods + 1] = ModifierKey.ALT
+            mask = mask + 2
+        end
+        if parsed.bShift and ModifierKey.SHIFT then
+            mods[#mods + 1] = ModifierKey.SHIFT
+            mask = mask + 4
+        end
+    end
+    return mods, mask
+end
+
+local function CloseBleedthroughVanillaWindow(pc, entry)
+    if not Core.IsValidObj(pc) then return false end
+    local widgetSub = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+    if not (Core.IsValidObj(widgetSub) and Core.IsValidObj(widgetSub.CurrentWindow)) then
+        return false
+    end
+    if entry and entry.AllowNativeWindowClass then
+        local cls = Core.FindOrLoadClass(entry.AllowNativeWindowClass)
+        if Core.IsValidObj(cls) then
+            local okIsA, isA = pcall(function() return widgetSub.CurrentWindow:IsA(cls) end)
+            if okIsA and isA == true then
+                return false
+            end
+        end
+    end
+    if widgetSub.CloseCurrentWindow then
+        pcall(function() widgetSub:CloseCurrentWindow() end)
+        return true
+    end
+    return false
+end
+
+local function ApplyKeybindState(bs, chordSpec, shouldSave)
+    local parsed = ParseKeyChord(chordSpec)
+    local normalized = parsed.canonical
     Core.Config[bs.ConfigKey] = normalized
     if shouldSave then Core.WriteConfig() end
     if type(bs.OnChanged) == "function" then
         pcall(bs.OnChanged, normalized)
     end
 
-    local ue4ssKey = ResolveUE4SSKey(normalized)
+    local ue4ssKey = ResolveUE4SSKey(parsed.keyName)
+    local modList, modMask = BuildUE4SSModifierList(parsed)
+    bs.ParsedChord = parsed
     bs.ActiveUe4ssKey = ue4ssKey
+    bs.ActiveModMask = modMask
     bs.FallbackWasDown = false
 
     if ue4ssKey ~= nil then
-        if not SharedKeyHandlers[ue4ssKey] then
-            SharedKeyHandlers[ue4ssKey] = true
-            RegisterKeyBind(ue4ssKey, function()
+        local handlerKey = tostring(ue4ssKey) .. ":" .. tostring(modMask)
+        if not SharedKeyHandlers[handlerKey] then
+            SharedKeyHandlers[handlerKey] = true
+            local function onUe4ssKeyPress()
                 for _, entry in pairs(RegisteredKeybinds) do
-                    if entry.ActiveUe4ssKey == ue4ssKey then
+                    if entry.ActiveUe4ssKey == ue4ssKey and entry.ActiveModMask == modMask then
                         ExecuteInGameThread(function()
+                            local pc = Core.GetLocalPlayerController()
+                            if not ModifiersMatch(pc, entry.ParsedChord) then return end
+                            local hadNativeWin = false
+                            if modMask > 0 and Core.IsValidObj(pc) then
+                                local ws = Core.GetWorldSubsystem(pc, Core.PATHS.WidgetSubsystemClass)
+                                hadNativeWin = Core.IsValidObj(ws) and Core.IsValidObj(ws.CurrentWindow)
+                            end
                             if CanTriggerRegisteredKeybind(entry) then
                                 entry.OnPress()
+                                -- If a modified chord shares a base key with a vanilla keybind (e.g. Shift+M vs M),
+                                -- close any vanilla CurrentWindow that opened on the same keypress.
+                                if modMask > 0 and not hadNativeWin then
+                                    ExecuteInGameThreadAfterFrames(1, function()
+                                        local curPC = Core.GetLocalPlayerController()
+                                        if not CloseBleedthroughVanillaWindow(curPC, entry) then
+                                            ExecuteInGameThreadAfterFrames(1, function()
+                                                CloseBleedthroughVanillaWindow(Core.GetLocalPlayerController(), entry)
+                                            end)
+                                        end
+                                    end)
+                                end
                             end
                         end)
                     end
                 end
-            end)
+            end
+            if modMask > 0 then
+                RegisterKeyBind(ue4ssKey, modList, onUe4ssKeyPress)
+            else
+                RegisterKeyBind(ue4ssKey, onUe4ssKeyPress)
+            end
         end
-    elseif not bs.FallbackPollActive and normalized ~= "None" then
+    elseif not bs.FallbackPollActive and parsed.keyName ~= "None" then
         bs.FallbackPollActive = true
         local function PollTick()
-            local cur = Core.Config[bs.ConfigKey]
-            if bs.ActiveUe4ssKey ~= nil or cur == "None" or cur == "" then
+            local curParsed = bs.ParsedChord
+            if bs.ActiveUe4ssKey ~= nil or not curParsed or curParsed.keyName == "None" then
                 bs.FallbackPollActive = false
                 return
             end
             local pc = Core.GetLocalPlayerController()
             if Core.IsValidObj(pc) then
-                local okD, down = pcall(function() return pc:IsInputKeyDown({ KeyName = FName(cur) }) end)
+                local okD, down = pcall(function() return pc:IsInputKeyDown({ KeyName = FName(curParsed.keyName) }) end)
                 if okD and down and not bs.FallbackWasDown then
                     bs.FallbackWasDown = true
-                    if CanTriggerRegisteredKeybind(bs) then
+                    if ModifiersMatch(pc, curParsed) and CanTriggerRegisteredKeybind(bs) then
                         bs.OnPress()
                     end
                 elseif not okD or not down then
@@ -1361,18 +1526,28 @@ function Core.EnsureKeybindHooks()
         function(Context, SelectedKeyParam)
             local row = Context:get()
             if not Core.IsValidObj(row) then return end
+            if SyncingKeybindRows[row:GetAddress()] then return end
             local okN, mName = pcall(function() return row.MappingName:ToString() end)
             local bs = okN and RegisteredKeybinds[mName] or nil
             if not bs then return end
 
-            local okKey, keyName = pcall(function()
+            local okChord, chordStr = pcall(function()
                 local chord = (type(SelectedKeyParam.get) == "function") and SelectedKeyParam:get() or SelectedKeyParam
-                return chord.Key.KeyName:ToString()
+                local kName = chord and chord.Key and chord.Key.KeyName and chord.Key.KeyName:ToString() or ""
+                if kName == "" or kName == "None" then return nil end
+                local bCtrl  = (chord.bCtrl == true)
+                local bAlt   = (chord.bAlt == true)
+                local bShift = (chord.bShift == true)
+                local bCmd   = (chord.bCmd == true)
+                return FormatKeyChord(kName, bCtrl, bAlt, bShift, bCmd)
             end)
-            if okKey and keyName and keyName ~= "" and keyName ~= "None" then
-                ApplyKeybindState(bs, keyName, true)
+            if okChord and chordStr and chordStr ~= "" and chordStr ~= "None" then
+                -- Defer off the Slate OnKeySelected callback stack; calling SetSelectedKey synchronously
+                -- inside OnKeySelected causes re-entrant recursion / Slate crashes on modifier chords (e.g. Shift+M).
+                ExecuteInGameThreadWithDelay(10, function()
+                    ApplyKeybindState(bs, chordStr, true)
+                end)
             end
-            SyncKeybindRow(bs, row)
         end
     )
     Core.TryRegisterHook(
@@ -1384,8 +1559,10 @@ function Core.EnsureKeybindHooks()
             local okN, mName = pcall(function() return row.MappingName:ToString() end)
             local bs = okN and RegisteredKeybinds[mName] or nil
             if not bs then return end
-            ApplyKeybindState(bs, bs.DefaultKey, true)
-            SyncKeybindRow(bs, row)
+            ExecuteInGameThreadWithDelay(10, function()
+                ApplyKeybindState(bs, bs.DefaultKey, true)
+                if Core.IsValidObj(row) then SyncKeybindRow(bs, row) end
+            end)
         end
     )
     Core.TryRegisterHook(
@@ -1397,8 +1574,10 @@ function Core.EnsureKeybindHooks()
             local okN, mName = pcall(function() return row.MappingName:ToString() end)
             local bs = okN and RegisteredKeybinds[mName] or nil
             if not bs then return end
-            ApplyKeybindState(bs, "None", true)
-            SyncKeybindRow(bs, row)
+            ExecuteInGameThreadWithDelay(10, function()
+                ApplyKeybindState(bs, "None", true)
+                if Core.IsValidObj(row) then SyncKeybindRow(bs, row) end
+            end)
         end
     )
     Core.TryRegisterHook(
