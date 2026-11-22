@@ -617,35 +617,110 @@ local function GetViewportMousePos(pc)
     return nil, nil
 end
 
-local function MeasureQueueSlotStep(queueBox)
-    local step = 64.0
-    if not Core.IsValidObj(queueBox) then return step end
+local function MeasureQueueSlotLayout(queueBox, count)
+    local stepX, stepY = 64.0, 64.0
+    local slotCenters = {}
+    if not Core.IsValidObj(queueBox) or (count or 0) < 1 then
+        return slotCenters, stepX, stepY
+    end
+
     local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+    local queueGeom = nil
     pcall(function()
-        local ch = queueBox:GetChildAt(0)
-        if Core.IsValidObj(ch) then
-            local w = nil
-            if Core.IsValidObj(slateLib) and slateLib.GetLocalSize and ch.GetCachedGeometry then
-                local okS, sz = pcall(function()
-                    return slateLib:GetLocalSize(ch:GetCachedGeometry())
-                end)
-                if okS and sz ~= nil then
-                    w = tonumber(sz.X)
+        if queueBox.GetCachedGeometry then
+            queueGeom = queueBox:GetCachedGeometry()
+        end
+    end)
+
+    -- 1. Measure actual 2D local centers of every child inside queueBox (handles multi-row UWrapBox natively)
+    local allMeasured = true
+    if Core.IsValidObj(slateLib) and queueGeom and slateLib.LocalToAbsolute and slateLib.AbsoluteToLocal and slateLib.GetLocalSize then
+        for i = 0, count - 1 do
+            local cx, cy = nil, nil
+            pcall(function()
+                local ch = queueBox:GetChildAt(i)
+                if Core.IsValidObj(ch) and ch.GetCachedGeometry then
+                    local chGeom = ch:GetCachedGeometry()
+                    local sz = slateLib:GetLocalSize(chGeom)
+                    local w = sz and tonumber(sz.X) or nil
+                    local h = sz and tonumber(sz.Y) or nil
+                    if w and w >= 20.0 and w <= 240.0 and i == 0 then stepX = w + 4.0 end
+                    if h and h >= 20.0 and h <= 240.0 and i == 0 then stepY = h + 4.0 end
+                    if w and h and w >= 10.0 and h >= 10.0 then
+                        local absC = slateLib:LocalToAbsolute(chGeom, { X = w * 0.5, Y = h * 0.5 })
+                        local locC = absC and slateLib:AbsoluteToLocal(queueGeom, absC) or nil
+                        if locC then
+                            local lx, ly = tonumber(locC.X), tonumber(locC.Y)
+                            if lx and ly then cx, cy = lx, ly end
+                        end
+                    end
+                end
+            end)
+            if cx and cy then
+                slotCenters[i + 1] = { x = cx, y = cy }
+            else
+                allMeasured = false
+                break
+            end
+        end
+    else
+        allMeasured = false
+    end
+
+    -- 2. Fallback: reconstruct 2D WrapBox grid centers from container width & tile dimensions
+    if not allMeasured then
+        slotCenters = {}
+        local queueW = 0.0
+        pcall(function()
+            local ch = queueBox:GetChildAt(0)
+            if Core.IsValidObj(ch) and ch.GetDesiredSize then
+                local dsz = ch:GetDesiredSize()
+                if dsz then
+                    local dw, dh = tonumber(dsz.X), tonumber(dsz.Y)
+                    if dw and dw >= 20.0 and dw <= 240.0 then stepX = dw + 4.0 end
+                    if dh and dh >= 20.0 and dh <= 240.0 then stepY = dh + 4.0 end
                 end
             end
-            if (not w or w < 10.0) and ch.GetDesiredSize then
-                local okD, dsz = pcall(function() return ch:GetDesiredSize() end)
-                if okD and dsz ~= nil then
-                    w = tonumber(dsz.X)
-                end
+            if Core.IsValidObj(slateLib) and queueGeom and slateLib.GetLocalSize then
+                local qsz = slateLib:GetLocalSize(queueGeom)
+                if qsz and tonumber(qsz.X) then queueW = tonumber(qsz.X) end
             end
-            if w and w >= 20.0 and w <= 240.0 then
-                -- RefreshResearchQueue applies 4.0 right margin on WrapBoxSlot
-                step = w + 4.0
+        end)
+        local cols = (queueW >= stepX) and math.max(1, math.floor((queueW + 4.0) / stepX)) or count
+        for i = 1, count do
+            local col = (i - 1) % cols
+            local row = math.floor((i - 1) / cols)
+            slotCenters[i] = {
+                x = col * stepX + stepX * 0.5,
+                y = row * stepY + stepY * 0.5,
+            }
+        end
+    end
+
+    return slotCenters, stepX, stepY
+end
+
+local function GetQueueLocalMousePos(queueBox)
+    if not Core.IsValidObj(queueBox) or not queueBox.GetCachedGeometry then return nil, nil end
+    local layoutLib = Core.GetCDO(PATHS.WidgetLayoutLibCDO)
+    local slateLib = Core.GetCDO(PATHS.SlateLibCDO)
+    if not (Core.IsValidObj(layoutLib) and Core.IsValidObj(slateLib)
+        and layoutLib.GetMousePositionOnPlatform and slateLib.AbsoluteToLocal)
+    then
+        return nil, nil
+    end
+    local lx, ly = nil, nil
+    pcall(function()
+        local ap = layoutLib:GetMousePositionOnPlatform()
+        if ap then
+            local loc = slateLib:AbsoluteToLocal(queueBox:GetCachedGeometry(), ap)
+            if loc then
+                local tx, ty = tonumber(loc.X), tonumber(loc.Y)
+                if tx and ty then lx, ly = tx, ty end
             end
         end
     end)
-    return step
+    return lx, ly
 end
 
 local function ResetQueueChildVisuals(queueBox)
@@ -1007,7 +1082,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
 
     DestroyDragGhost()
     local startX, startY = GetViewportMousePos(pc)
-    local slotStep = MeasureQueueSlotStep(queueBox)
+    local slotCenters, slotStepX, slotStepY = MeasureQueueSlotLayout(queueBox, count)
     local snapshotTechs = CollectQueuedTechs(tree, queueBox)
 
     local dragState = {
@@ -1018,7 +1093,9 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
         StartIdx = startIdx,
         TargetIdx = startIdx,
         Count = count,
-        SlotStep = slotStep,
+        SlotCenters = slotCenters,
+        SlotStep = slotStepX,
+        SlotStepY = slotStepY,
         IsDragging = false,
         StartX = startX,
         StartY = startY,
@@ -1082,11 +1159,48 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
         end
 
         if dragState.IsDragging then
-            local step = dragState.SlotStep or 64.0
-            local rawSlotDelta = (dx >= 0.0)
-                and math.floor((dx + step * 0.5) / step)
-                or math.ceil((dx - step * 0.5) / step)
-            local desiredIdx = Core.Clamp(dragState.StartIdx + rawSlotDelta, 1, dragState.Count)
+            local centers = dragState.SlotCenters
+            local desiredIdx = dragState.StartIdx
+            local qmx, qmy = GetQueueLocalMousePos(dragState.QueueBox)
+            if qmx and qmy and centers and #centers >= dragState.Count then
+                local bestD2 = math.huge
+                for sIdx = 1, dragState.Count do
+                    local sc = centers[sIdx]
+                    if sc then
+                        local ddx = qmx - sc.x
+                        local ddy = qmy - sc.y
+                        local d2 = ddx * ddx + ddy * ddy
+                        if d2 < bestD2 then
+                            bestD2 = d2
+                            desiredIdx = sIdx
+                        end
+                    end
+                end
+            elseif centers and centers[dragState.StartIdx] then
+                -- Fallback using viewport delta from start slot center
+                local refC = centers[dragState.StartIdx]
+                local estX = refC.x + dx
+                local estY = refC.y + dy
+                local bestD2 = math.huge
+                for sIdx = 1, dragState.Count do
+                    local sc = centers[sIdx]
+                    if sc then
+                        local ddx = estX - sc.x
+                        local ddy = estY - sc.y
+                        local d2 = ddx * ddx + ddy * ddy
+                        if d2 < bestD2 then
+                            bestD2 = d2
+                            desiredIdx = sIdx
+                        end
+                    end
+                end
+            else
+                local step = dragState.SlotStep or 64.0
+                local rawSlotDelta = (dx >= 0.0)
+                    and math.floor((dx + step * 0.5) / step)
+                    or math.ceil((dx - step * 0.5) / step)
+                desiredIdx = Core.Clamp(dragState.StartIdx + rawSlotDelta, 1, dragState.Count)
+            end
             local validTargetIdx, isDesiredValid = ClampValidDropTarget(dragState.SnapshotTechs, dragState.StartIdx, desiredIdx)
             dragState.TargetIdx = validTargetIdx
 
@@ -1105,6 +1219,7 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
 
             pcall(function()
                 local qCount = dragState.QueueBox:GetChildrenCount()
+                local step = dragState.SlotStep or 64.0
                 for i = 0, qCount - 1 do
                     local slotIdx = i + 1
                     local ch = dragState.QueueBox:GetChildAt(i)
@@ -1121,13 +1236,22 @@ local function StartQueueDrag(tree, queueBox, dragWidget, startIdx, count)
                                 ch:SetRenderScale({ X = 1.0, Y = 1.0 })
                             end
                             ch:SetRenderOpacity(1.0)
-                            local shiftX = 0.0
+                            local shiftX, shiftY = 0.0, 0.0
+                            local destIdx = nil
                             if dragState.StartIdx < validTargetIdx and slotIdx > dragState.StartIdx and slotIdx <= validTargetIdx then
-                                shiftX = -step
+                                destIdx = slotIdx - 1
                             elseif dragState.StartIdx > validTargetIdx and slotIdx >= validTargetIdx and slotIdx < dragState.StartIdx then
-                                shiftX = step
+                                destIdx = slotIdx + 1
                             end
-                            ch:SetRenderTranslation({ X = shiftX, Y = 0.0 })
+                            if destIdx then
+                                if centers and centers[destIdx] and centers[slotIdx] then
+                                    shiftX = centers[destIdx].x - centers[slotIdx].x
+                                    shiftY = centers[destIdx].y - centers[slotIdx].y
+                                else
+                                    shiftX = (destIdx < slotIdx) and -step or step
+                                end
+                            end
+                            ch:SetRenderTranslation({ X = shiftX, Y = shiftY })
                         end
                     end
                 end
