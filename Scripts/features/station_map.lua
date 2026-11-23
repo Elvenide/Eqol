@@ -3352,16 +3352,88 @@ RefreshDynamicOverlay = function(preHoveredPort, preHoveredMachine, hasPreHover)
     LastHadDynamicOverlay = (MouseState.lDraggingBox or InteractionMode ~= "Select" or hoveredMachine ~= nil or hoveredPort ~= nil)
 end
 
-local function RefreshSelectionLayer()
+local function RefreshSelectionLayer(selectionOnly)
     if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
-    Perf.SelRenderGen = (Perf.SelRenderGen or 0) + 1
-    local mySelGen = Perf.SelRenderGen
-    ClearCanvasChildren(MapUI.SelectionCanvas)
-
     local floor = CurrentFloors[SelectedFloorIdx]
     if not floor then return end
     local outer = Core.GetWidgetOuter(MapUI.Window)
     local pc = MapUI.PC
+
+    -- Fast path: update ONLY real-machine selection highlights without touching stamped PendingGhosts/PendingDeletes
+    if selectionOnly then
+        Perf.SelOnlyGen = (Perf.SelOnlyGen or 0) + 1
+        local mySelOnlyGen = Perf.SelOnlyGen
+        if Perf.SelHighlightWidgets then
+            for _, w in ipairs(Perf.SelHighlightWidgets) do
+                if Core.IsValidObj(w) then pcall(function() w:RemoveFromParent() end) end
+            end
+        end
+        Perf.SelHighlightWidgets = {}
+
+        local selList = {}
+        for _, rm in ipairs(RenderedMachines) do
+            if SelectedMachines[rm.addr] ~= nil then
+                selList[#selList + 1] = rm
+            end
+        end
+        local compactSel = (#selList > 30)
+        local selBulkCol = { R = COLORS.Selected.R, G = COLORS.Selected.G, B = COLORS.Selected.B, A = 0.48 }
+        local sIdx = 1
+        local function addTrackedSelBorder(bx, by, w, h, col, z)
+            local b = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, w, h, col, z)
+            if b then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b end
+        end
+        local function addTrackedSelOutline(bx, by, pxW, pxH, thick, col, z)
+            local hw, hh = pxW * 0.5, pxH * 0.5
+            addTrackedSelBorder(bx, by - hh, pxW + thick, thick, col, z)
+            addTrackedSelBorder(bx, by + hh, pxW + thick, thick, col, z)
+            addTrackedSelBorder(bx - hw, by, thick, pxH + thick, col, z)
+            addTrackedSelBorder(bx + hw, by, thick, pxH + thick, col, z)
+        end
+        local function pumpSelOnly()
+            if mySelOnlyGen ~= Perf.SelOnlyGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
+                return
+            end
+            local budgetEnd = os.clock() + 0.0030
+            local ops = 0
+            while sIdx <= #selList and (ops < 15 or os.clock() < budgetEnd) and ops < 90 do
+                local rm = selList[sIdx]
+                sIdx = sIdx + 1
+                ops = ops + 1
+                local bx, by = WorldToBaseCanvas(rm.x, rm.y)
+                local rx, ry = GetRotatedCellDims(rm.cellsX or 1, rm.cellsY or 1, rm.yaw or 0)
+                local pxW = math.max(8.0, rx * BASE_CELL_PX)
+                local pxH = math.max(8.0, ry * BASE_CELL_PX)
+                if compactSel then
+                    addTrackedSelBorder(bx, by, pxW, pxH, selBulkCol, 2)
+                    if rm.pairX and rm.pairY then
+                        local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
+                        addTrackedSelBorder(pbx, pby, pxW, pxH, selBulkCol, 2)
+                    end
+                else
+                    addTrackedSelBorder(bx, by, pxW, pxH, COLORS.SelectedFill, 1)
+                    addTrackedSelOutline(bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
+                    if rm.pairX and rm.pairY then
+                        local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
+                        addTrackedSelBorder(pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
+                        addTrackedSelOutline(pbx, pby, pxW, pxH, 2.5, COLORS.Selected, 2)
+                    end
+                end
+            end
+            if sIdx <= #selList then
+                ExecuteInGameThreadAfterFrames(1, pumpSelOnly)
+            end
+        end
+        pumpSelOnly()
+        UpdateStatusBanner()
+        return
+    end
+
+    Perf.SelRenderGen = (Perf.SelRenderGen or 0) + 1
+    Perf.SelOnlyGen = (Perf.SelOnlyGen or 0) + 1
+    local mySelGen = Perf.SelRenderGen
+    Perf.SelHighlightWidgets = {}
+    ClearCanvasChildren(MapUI.SelectionCanvas)
 
     local selList = {}
     for _, rm in ipairs(RenderedMachines) do
@@ -3424,18 +3496,35 @@ local function RefreshSelectionLayer()
             local pxW = math.max(8.0, rx * BASE_CELL_PX)
             local pxH = math.max(8.0, ry * BASE_CELL_PX)
             if compactSel then
-                AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, selBulkCol, 2)
+                local b1 = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, selBulkCol, 2)
+                if b1 then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b1 end
                 if rm.pairX and rm.pairY then
                     local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, selBulkCol, 2)
+                    local b2 = AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, selBulkCol, 2)
+                    if b2 then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b2 end
                 end
             else
-                AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, COLORS.SelectedFill, 1)
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
+                local b1 = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, COLORS.SelectedFill, 1)
+                if b1 then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b1 end
+                local hw, hh = pxW * 0.5, pxH * 0.5
+                for _, seg in ipairs({
+                    { bx, by - hh, pxW + 2.5, 2.5 }, { bx, by + hh, pxW + 2.5, 2.5 },
+                    { bx - hw, by, 2.5, pxH + 2.5 }, { bx + hw, by, 2.5, pxH + 2.5 },
+                }) do
+                    local eb = AddBorderFast(outer, MapUI.SelectionCanvas, seg[1], seg[2], seg[3], seg[4], COLORS.Selected, 2)
+                    if eb then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = eb end
+                end
                 if rm.pairX and rm.pairY then
                     local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
-                    RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.5, COLORS.Selected, 2)
+                    local bp = AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
+                    if bp then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = bp end
+                    for _, seg in ipairs({
+                        { pbx, pby - hh, pxW + 2.5, 2.5 }, { pbx, pby + hh, pxW + 2.5, 2.5 },
+                        { pbx - hw, pby, 2.5, pxH + 2.5 }, { pbx + hw, pby, 2.5, pxH + 2.5 },
+                    }) do
+                        local eb = AddBorderFast(outer, MapUI.SelectionCanvas, seg[1], seg[2], seg[3], seg[4], COLORS.Selected, 2)
+                        if eb then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = eb end
+                    end
                 end
             end
         end
@@ -4843,7 +4932,7 @@ RefreshStationMapCanvas = function(machinesOnly)
     end -- if not useRT
 
     -- 4. Render player markers & nametags on this floor (refreshable on cached map reopen!)
-    PlayerMarkerWidgets = {}
+    -- Note: do NOT clear PlayerMarkerWidgets before RefreshPlayerMarkers() removes old widgets from mCanvas!
     RefreshPlayerMarkers = function()
         if not MapUI or not Core.IsValidObj(mCanvas) or not Core.IsValidObj(MapUI.Window) then return end
         for _, pw in ipairs(PlayerMarkerWidgets) do
@@ -5676,13 +5765,22 @@ local function HandleMapLeftClick(mx, my, isShift)
         end
     end
 
+    local hadMachSel = (next(SelectedMachines) ~= nil)
+    local hadGhostSel = (next(SelectedGhosts) ~= nil)
+    if not hitGhost and not hit and (isShift or (not hadMachSel and not hadGhostSel)) then
+        return
+    end
+
+    local ghostSelChanged = false
     if not isShift then
+        if hadGhostSel then ghostSelChanged = true end
         SelectedMachines = {}
         SelectedGhosts = {}
     end
     if hitGhost and hitGhost.ghostId then
         local toggleOff = isShift and SelectedGhosts[hitGhost.ghostId] ~= nil
         SelectedGhosts[hitGhost.ghostId] = toggleOff and nil or hitGhost
+        ghostSelChanged = true
     elseif hit then
         local toggleOff = isShift and SelectedMachines[hit.addr] ~= nil
         SelectedMachines[hit.addr] = toggleOff and nil or hit
@@ -5691,7 +5789,7 @@ local function HandleMapLeftClick(mx, my, isShift)
             SelectedMachines[pairRm.addr] = toggleOff and nil or pairRm
         end
     end
-    RefreshSelectionLayer()
+    RefreshSelectionLayer(not ghostSelChanged)
 end
 
 local function FinishBoxSelect(x1, y1, x2, y2, isShift)
@@ -5699,7 +5797,12 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
     local wx2, wy2 = CanvasToWorld(math.max(x1, x2), math.max(y1, y2))
     local floor = CurrentFloors[SelectedFloorIdx]
 
+    local hadMachSel = (next(SelectedMachines) ~= nil)
+    local hadGhostSel = (next(SelectedGhosts) ~= nil)
+    local ghostSelChanged = false
+    local machSelAdded = false
     if not isShift then
+        if hadGhostSel then ghostSelChanged = true end
         SelectedMachines = {}
         SelectedGhosts = {}
     end
@@ -5709,6 +5812,7 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
             local inPair = rm.pairX and rm.pairY and (rm.pairX + rm.halfW) >= wx1 and (rm.pairX - rm.halfW) <= wx2 and (rm.pairY + rm.halfH) >= wy1 and (rm.pairY - rm.halfH) <= wy2
             if inMain or inPair then
                 SelectedMachines[rm.addr] = rm
+                machSelAdded = true
                 local pairRm = FindUndergroundPairEntry(rm)
                 if pairRm and IsSelectableMachine(pairRm) then
                     SelectedMachines[pairRm.addr] = pairRm
@@ -5725,11 +5829,15 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
                 local inPair = gp.pairX and gp.pairY and (gp.pairX + hw) >= wx1 and (gp.pairX - hw) <= wx2 and (gp.pairY + hh) >= wy1 and (gp.pairY - hh) <= wy2
                 if inMain or inPair then
                     SelectedGhosts[gp.ghostId] = gp
+                    ghostSelChanged = true
                 end
             end
         end
     end
-    RefreshSelectionLayer()
+    if not machSelAdded and not ghostSelChanged and (isShift or not hadMachSel) then
+        return
+    end
+    RefreshSelectionLayer(not ghostSelChanged)
 end
 
 --------------------------------------------------------------------------------
