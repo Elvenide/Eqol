@@ -340,6 +340,7 @@ function RT.CreateFloorRenderer(opts)
     local PORT_PX   = math.max(14.0, CELL_PX * 0.56)
 
     local tiles = {} -- "tx,ty" -> { tx, ty, key, minX, maxX, minY, maxY, rt, img, visible, dirty, platforms, walls, machines, links, ports }
+    local machineTiles = {} -- mAddr -> { tile1, tile2, ... } for O(1) RemoveMachine
     local dirtyList = {}
     local dirtySet = {}
     local destroyed = false
@@ -445,34 +446,8 @@ function RT.CreateFloorRenderer(opts)
         local ox, oy = t.minX, t.minY
 
         pcall(function()
-            -- 1. Platforms
-            for i = 1, #t.platforms do
-                local p = t.platforms[i]
-                local pcx = (p.cx - ox) * PX_PER_CM
-                local pcy = (p.cy - oy) * PX_PER_CM
-                local pw  = p.ex * 2.0 * PX_PER_CM
-                local ph  = p.ey * 2.0 * PX_PER_CM
-                DrawFilledRect(canvas, whiteTex, pcx, pcy, pw + 3.0, ph + 3.0, colors.PlatformBorder, 0.0)
-                DrawFilledRect(canvas, whiteTex, pcx, pcy, pw, ph, colors.PlatformFill, 0.0)
-            end
-
-            -- 2. Grid lines (100cm minor, 400cm major)
-            local minCol = math.ceil((t.minX - gridOriginX) / cellCm)
-            local maxCol = math.floor((t.maxX - gridOriginX) / cellCm)
-            for c = minCol, maxCol do
-                local gx = ((gridOriginX + c * cellCm) - ox) * PX_PER_CM
-                local isMaj = ((c % 4) == 0)
-                DrawLine(canvas, gx, 0.0, gx, TILE_PX, isMaj and 1.4 or 0.9, isMaj and COL_GRID_MAJ or COL_GRID_MIN)
-            end
-            local minRow = math.ceil((t.minY - gridOriginY) / cellCm)
-            local maxRow = math.floor((t.maxY - gridOriginY) / cellCm)
-            for r = minRow, maxRow do
-                local gy = ((gridOriginY + r * cellCm) - oy) * PX_PER_CM
-                local isMaj = ((r % 4) == 0)
-                DrawLine(canvas, 0.0, gy, TILE_PX, gy, isMaj and 1.4 or 0.9, isMaj and COL_GRID_MAJ or COL_GRID_MIN)
-            end
-
-            -- 3. Interior walls (2-pass border + fill so adjacent segments merge cleanly)
+            -- Platforms & zoom-adaptive crisp grid are rendered on MapCanvas beneath these transparent RT tiles.
+            -- 1. Interior walls (2-pass border + fill so adjacent segments merge cleanly)
             local wallPad = 11.0 * (PX_PER_CM / basePxPerCm)
             for i = 1, #t.walls do
                 local w = t.walls[i]
@@ -624,11 +599,8 @@ function RT.CreateFloorRenderer(opts)
     local inst = {}
 
     function inst.AddPlatform(cx, cy, ex, ey)
-        local p = { cx = cx, cy = cy, ex = ex, ey = ey }
-        forEachOverlappingTile(cx - ex - 20.0, cx + ex + 20.0, cy - ey - 20.0, cy + ey + 20.0, true, function(t)
-            t.platforms[#t.platforms + 1] = p
-            markTileDirty(t)
-        end)
+        -- Platforms and crisp dynamic grid lines are rendered on MapCanvas beneath RT tiles,
+        -- so empty platform space does not allocate or redraw RT tiles.
     end
 
     function inst.AddWall(cx, cy, w, h)
@@ -663,6 +635,7 @@ function RT.CreateFloorRenderer(opts)
             markTileDirty(t)
         end)
         drawEntry._rtTiles = touched
+        machineTiles[mAddr] = touched
     end
 
     function inst.AddUndergroundLink(pKey, linkEntry)
@@ -691,12 +664,16 @@ function RT.CreateFloorRenderer(opts)
     end
 
     function inst.RemoveMachine(mAddr)
-        for _, t in pairs(tiles) do
+        local list = machineTiles[mAddr]
+        if not list then return end
+        for i = 1, #list do
+            local t = list[i]
             local changed = false
             if t.machines[mAddr] then t.machines[mAddr] = nil; changed = true end
             if t.ports[mAddr] then t.ports[mAddr] = nil; changed = true end
             if changed then markTileDirty(t) end
         end
+        machineTiles[mAddr] = nil
     end
 
     function inst.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
@@ -775,6 +752,7 @@ function RT.CreateFloorRenderer(opts)
             t.img = nil
         end
         tiles = {}
+        machineTiles = {}
         dirtyList = {}
         dirtySet = {}
     end
