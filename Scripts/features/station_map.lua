@@ -160,34 +160,74 @@ local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, half
 
 -- Consolidated performance state & helpers (single local table to stay well under Lua's 200-local limit)
 local Perf = {
-    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover)
+    RT = require("station_map_rt"),
+    ActiveRT = nil,
+    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover & overlap)
     PortGrid = {},    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
     HOVER_CELL_CM = 400.0,
     LastIconCanvasVisible = nil,
     MapKeys = nil,
 }
 
+function Perf.DestroyActiveRT()
+    if Perf.ActiveRT then
+        pcall(function() Perf.ActiveRT.Destroy() end)
+        Perf.ActiveRT = nil
+    end
+end
+
 function Perf.GridBucketKey(gx, gy)
     return gx .. "," .. gy
 end
 
-function Perf.InsertMachine(recEntry)
+function Perf.InsertMachineRect(recEntry, cx, cy)
     local cell = Perf.HOVER_CELL_CM
-    local minX = math.floor((recEntry.x - recEntry.halfW) / cell)
-    local maxX = math.floor((recEntry.x + recEntry.halfW) / cell)
-    local minY = math.floor((recEntry.y - recEntry.halfH) / cell)
-    local maxY = math.floor((recEntry.y + recEntry.halfH) / cell)
-    local keys = {}
+    local minX = math.floor((cx - recEntry.halfW) / cell)
+    local maxX = math.floor((cx + recEntry.halfW) / cell)
+    local minY = math.floor((cy - recEntry.halfH) / cell)
+    local maxY = math.floor((cy + recEntry.halfH) / cell)
+    local keys = recEntry._gridKeys or {}
+    local seen = {}
+    for i = 1, #keys do seen[keys[i]] = true end
     for gx = minX, maxX do
         for gy = minY, maxY do
             local k = Perf.GridBucketKey(gx, gy)
-            local b = Perf.MachineGrid[k]
-            if not b then b = {}; Perf.MachineGrid[k] = b end
-            b[#b + 1] = recEntry
-            keys[#keys + 1] = k
+            if not seen[k] then
+                seen[k] = true
+                local b = Perf.MachineGrid[k]
+                if not b then b = {}; Perf.MachineGrid[k] = b end
+                b[#b + 1] = recEntry
+                keys[#keys + 1] = k
+            end
         end
     end
     recEntry._gridKeys = keys
+end
+
+function Perf.InsertMachine(recEntry)
+    Perf.InsertMachineRect(recEntry, recEntry.x, recEntry.y)
+end
+
+function Perf.QueryMachinesInRect(minWX, maxWX, minWY, maxWY, outList, seenAddr)
+    local cell = Perf.HOVER_CELL_CM
+    local minX = math.floor(minWX / cell)
+    local maxX = math.floor(maxWX / cell)
+    local minY = math.floor(minWY / cell)
+    local maxY = math.floor(maxWY / cell)
+    for gx = minX, maxX do
+        for gy = minY, maxY do
+            local b = Perf.MachineGrid[Perf.GridBucketKey(gx, gy)]
+            if b then
+                for i = 1, #b do
+                    local rm = b[i]
+                    if not seenAddr[rm.addr] then
+                        seenAddr[rm.addr] = true
+                        outList[#outList + 1] = rm
+                    end
+                end
+            end
+        end
+    end
 end
 
 function Perf.RemoveMachine(recEntry)
@@ -2137,7 +2177,11 @@ local function EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
     local seenAddr = {}
 
     local function checkFootprintAgainst(fx, fy)
-        for _, rm in ipairs(RenderedMachines) do
+        local candidates = {}
+        local candSeen = {}
+        Perf.QueryMachinesInRect(fx - hw - 10.0, fx + hw + 10.0, fy - hh - 10.0, fy + hh + 10.0, candidates, candSeen)
+        for i = 1, #candidates do
+            local rm = candidates[i]
             if not PendingDeletes[rm.addr] and not seenAddr[rm.addr] then
                 local hitMain = (math.abs(fx - rm.x) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.y) < (hh + rm.halfH - 10.0))
                 local hitPair = rm.pairX and rm.pairY and (math.abs(fx - rm.pairX) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.pairY) < (hh + rm.halfH - 10.0))
@@ -3392,6 +3436,7 @@ RefreshStationMapCanvas = function(machinesOnly)
         LastGridZoomRatio = nil
     end
 
+    Perf.DestroyActiveRT()
     ClearCanvasChildren(mCanvas)
     ClearCanvasChildren(MapUI.SelectionCanvas)
     ClearCanvasChildren(MapUI.IconCanvas)
@@ -3421,6 +3466,362 @@ RefreshStationMapCanvas = function(machinesOnly)
     local deferredWalls = {}
     local myCanvasGen = CanvasRenderGen
 
+    local useRT = (Perf.RT ~= nil) and Perf.RT.IsSupported(pc)
+    if useRT then
+        CanvasRenderGen = CanvasRenderGen + 1
+        myCanvasGen = CanvasRenderGen
+        MachineRenderGen = MachineRenderGen + 1
+        local myMachineGen = MachineRenderGen
+
+        local rtFloor = Perf.RT.CreateFloorRenderer({
+            worldCtx = pc,
+            outer = outer,
+            parentCanvas = mCanvas,
+            basePxPerCm = BASE_PX_PER_CM,
+            cellCm = CELL_CM,
+            gridOriginX = ViewTransform.gridOriginX,
+            gridOriginY = ViewTransform.gridOriginY,
+            colors = {
+                PlatformFill   = COLORS.ModuleFill,
+                PlatformBorder = COLORS.ModuleBorder,
+                WallBorder     = COLORS.WallBorder,
+                WallFill       = COLORS.WallFill,
+            },
+            getTierArrowColor = GetTierArrowColor,
+            getMachineColor   = GetColorForMachine,
+        })
+
+        if rtFloor then
+            Perf.ActiveRT = rtFloor
+            OnViewportChangedStatic = nil
+
+            for _, pe in ipairs(floor.platforms) do
+                local b = pe.bounds
+                rtFloor.AddPlatform(b.cx, b.cy, b.ex, b.ey)
+            end
+            if floor.walls and #floor.walls > 0 then
+                for _, w in ipairs(floor.walls) do
+                    rtFloor.AddWall(w.cx, w.cy, math.max(12.0, w.maxX - w.minX), math.max(12.0, w.maxY - w.minY))
+                end
+            end
+
+            local function getPaddedVisibleWorldRectRT()
+                local scale = math.max(0.05, ViewTransform.scale or 0.36)
+                local halfW = (math.max(300.0, ViewTransform.canvasW or 1200.0) * 0.5) / scale
+                local halfH = (math.max(200.0, ViewTransform.canvasH or 800.0) * 0.5) / scale
+                local padX = math.max(600.0, halfW * 0.35)
+                local padY = math.max(600.0, halfH * 0.35)
+                return ViewTransform.cx - halfW - padX, ViewTransform.cx + halfW + padX,
+                       ViewTransform.cy - halfH - padY, ViewTransform.cy + halfH + padY
+            end
+
+            local floorMachines = floor.machines or {}
+            local presentAddrs = {}
+            local knownByAddr = {}
+            local toIndexQueue = {}
+            local idxCursor = 1
+            for _, me in ipairs(floorMachines) do
+                if Core.IsValidObj(me.machine) then
+                    local addr = me.machine:GetAddress()
+                    presentAddrs[addr] = true
+                    knownByAddr[addr] = me
+                    toIndexQueue[#toIndexQueue + 1] = me
+                end
+            end
+
+            local seenUndergroundPairs = {}
+            local ugLinkByKey = {}
+            local ugKeysByAddr = {}
+            local portHalfCm = 32.0
+            local nextPortId = 0
+            local rtPumpRunning = false
+
+            local function removeMachineRT(mAddr)
+                rtFloor.RemoveMachine(mAddr)
+                local pKeys = ugKeysByAddr[mAddr]
+                if pKeys then
+                    for _, pk in ipairs(pKeys) do
+                        rtFloor.RemoveUndergroundLink(pk, ugLinkByKey[pk])
+                        ugLinkByKey[pk] = nil
+                        seenUndergroundPairs[pk] = nil
+                    end
+                    ugKeysByAddr[mAddr] = nil
+                end
+                SelectedMachines[mAddr] = nil
+                for i = #RenderedMachines, 1, -1 do
+                    if RenderedMachines[i].addr == mAddr then
+                        Perf.RemoveMachine(RenderedMachines[i])
+                        table.remove(RenderedMachines, i)
+                    end
+                end
+                for i = #RenderedConveyors, 1, -1 do
+                    if RenderedConveyors[i].addr == mAddr then table.remove(RenderedConveyors, i) end
+                end
+                for i = #RenderedPorts, 1, -1 do
+                    if RenderedPorts[i].ownerAddr == mAddr then
+                        Perf.RemovePort(RenderedPorts[i])
+                        table.remove(RenderedPorts, i)
+                    end
+                end
+            end
+
+            local function indexOneMachineRT(me)
+                local m = me.machine
+                if not (Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m)) then return end
+                local mAddr = m:GetAddress()
+                if not presentAddrs[mAddr] then return end
+
+                local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
+                local cat = StationData.GetMachineCategory(m)
+                local cellsX, cellsY = StationData.GetMachineFootprintCells(m)
+                local rx, ry = GetRotatedCellDims(cellsX, cellsY, myaw)
+                local pxW = math.max(8.0, rx * cellPx)
+                local okB, bldRaw = pcall(function() return m.Buildable end)
+                local bld = okB and Core.IsValidObj(bldRaw) and bldRaw or nil
+                local okR, rec = pcall(function() return m.Recipe end)
+                local clsKey = select(1, GetMachineClassKey(m, bld))
+                local sprite = RequestMachineSprite(clsKey, m, cat, bld)
+
+                local overlayChips = {}
+                local isContainer = (cat == "Container")
+                local isProducer = false
+                if isContainer then
+                    local topItems = StationData.GetContainerTopItems(m, (pxW >= 72.0) and 2 or 1)
+                    for _, entry in ipairs(topItems) do
+                        overlayChips[#overlayChips + 1] = { item = entry.Item, rate = nil }
+                    end
+                elseif cat ~= "Conveyor" then
+                    local outputs = StationData.GetProducerOutputsAndRates(m)
+                    if #outputs > 0 then
+                        isProducer = true
+                        local maxChips = (pxW >= 80.0) and 2 or 1
+                        for i = 1, math.min(maxChips, #outputs) do
+                            overlayChips[#overlayChips + 1] = { item = outputs[i].Item, rate = outputs[i].Rate }
+                        end
+                    end
+                end
+
+                local recEntry = {
+                    machine = m,
+                    addr = mAddr,
+                    x = mwx,
+                    y = mwy,
+                    z = mwz,
+                    yaw = myaw,
+                    cellsX = cellsX,
+                    cellsY = cellsY,
+                    halfW = rx * CELL_CM * 0.5,
+                    halfH = ry * CELL_CM * 0.5,
+                    cat = cat,
+                    buildable = bld,
+                    recipe = okR and rec or nil,
+                    actorClsPath = clsKey,
+                    sprite = sprite,
+                    displayName = StationData.GetMachineDisplayName(m),
+                }
+                RenderedMachines[#RenderedMachines + 1] = recEntry
+                Perf.InsertMachine(recEntry)
+                if cat == "Conveyor" then
+                    RenderedConveyors[#RenderedConveyors + 1] = recEntry
+                end
+
+                local clsLow = clsKey and clsKey:lower() or ""
+                local isUnderground = (clsLow:find("underground", 1, true) ~= nil)
+                local drawExitPair = false
+                local uInfo = isUnderground and StationData.GetUndergroundBeltPairInfo(m, CurrentFrameXform) or nil
+                if uInfo and uInfo.pairX and uInfo.pairY then
+                    recEntry.pairX = uInfo.pairX
+                    recEntry.pairY = uInfo.pairY
+                    Perf.InsertMachineRect(recEntry, uInfo.pairX, uInfo.pairY)
+                    recEntry.ugLength = math.max(2, math.floor(math.sqrt((uInfo.pairX - mwx) ^ 2 + (uInfo.pairY - mwy) ^ 2) / CELL_CM + 0.5) + 1)
+                    local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or tostring(mAddr)
+                    if not seenUndergroundPairs[pKey] then
+                        seenUndergroundPairs[pKey] = true
+                        local arrowCol = GetTierArrowColor(sprite and sprite.tier or 1)
+                        local lineCol = { R = arrowCol.R, G = arrowCol.G, B = arrowCol.B, A = 0.80 }
+                        local x1, y1, x2, y2 = mwx, mwy, uInfo.pairX, uInfo.pairY
+                        if uInfo.isInput == false then
+                            x1, y1, x2, y2 = uInfo.pairX, uInfo.pairY, mwx, mwy
+                        end
+                        local linkEntry = { x1 = x1, y1 = y1, x2 = x2, y2 = y2, lineCol = lineCol, arrowCol = arrowCol }
+                        ugLinkByKey[pKey] = linkEntry
+                        ugKeysByAddr[mAddr] = ugKeysByAddr[mAddr] or {}
+                        table.insert(ugKeysByAddr[mAddr], pKey)
+                        if uInfo.pairAddr then
+                            ugKeysByAddr[uInfo.pairAddr] = ugKeysByAddr[uInfo.pairAddr] or {}
+                            table.insert(ugKeysByAddr[uInfo.pairAddr], pKey)
+                        end
+                        rtFloor.AddUndergroundLink(pKey, linkEntry)
+                    end
+                    if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
+                        drawExitPair = true
+                    end
+                end
+
+                local portList = {}
+                local isTransportOnly = (cat == "Conveyor")
+                    or clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true)
+                    or clsLow:find("merger", 1, true) or isUnderground
+                if not isTransportOnly then
+                    local ports = StationData.GetMachineItemPorts(m, mwx, mwy, myaw, cellsX, cellsY, CurrentFrameXform)
+                    local seenMachinePorts = {}
+                    for _, p in ipairs(ports) do
+                        local cellKey = string.format("%.0f,%.0f", p.px / 25.0, p.py / 25.0)
+                        local existing = seenMachinePorts[cellKey]
+                        if not existing then
+                            nextPortId = nextPortId + 1
+                            existing = {
+                                idx = nextPortId,
+                                x = p.px,
+                                y = p.py,
+                                halfW = portHalfCm,
+                                halfH = portHalfCm,
+                                isInput = p.isInput == true,
+                                isOutput = p.isOutput == true,
+                                machineName = recEntry.displayName,
+                                ownerAddr = mAddr,
+                            }
+                            seenMachinePorts[cellKey] = existing
+                            RenderedPorts[#RenderedPorts + 1] = existing
+                            Perf.InsertPort(existing)
+                            portList[#portList + 1] = { x = p.px, y = p.py }
+                        else
+                            if p.isInput then existing.isInput = true end
+                            if p.isOutput then existing.isOutput = true end
+                        end
+                    end
+                end
+
+                local drawEntry = {
+                    x = mwx, y = mwy,
+                    rx = rx, ry = ry,
+                    yaw = myaw,
+                    cat = cat,
+                    clsLow = clsLow,
+                    sprite = sprite,
+                    overlayChips = overlayChips,
+                    isProducer = isProducer,
+                    isUnderground = isUnderground,
+                    drawExitPair = drawExitPair,
+                    pairX = recEntry.pairX,
+                    pairY = recEntry.pairY,
+                }
+                rtFloor.UpsertMachine(mAddr, drawEntry, portList)
+            end
+
+            local function pumpRT()
+                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(ActiveMapWin) then
+                    rtPumpRunning = false
+                    return
+                end
+                local budgetEnd = os.clock() + 0.0080
+                local indexed = 0
+                while idxCursor <= #toIndexQueue and (indexed < 25 or os.clock() < budgetEnd) and indexed < 160 do
+                    indexOneMachineRT(toIndexQueue[idxCursor])
+                    idxCursor = idxCursor + 1
+                    indexed = indexed + 1
+                end
+
+                local moreDirty = rtFloor.PumpDirtyTiles(3, 0.0060)
+                if idxCursor <= #toIndexQueue or moreDirty then
+                    ExecuteInGameThreadAfterFrames(1, pumpRT)
+                else
+                    rtPumpRunning = false
+                end
+            end
+
+            local function startRTPump()
+                if not rtPumpRunning then
+                    rtPumpRunning = true
+                    ExecuteInGameThreadAfterFrames(1, pumpRT)
+                end
+            end
+
+            OnViewportChangedMachines = function()
+                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor then return end
+                local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRectRT()
+                rtFloor.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
+                if idxCursor <= #toIndexQueue then
+                    startRTPump()
+                end
+            end
+
+            SyncFloorMachinesIncremental = function()
+                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) then return end
+                local curFl = CurrentFloors[SelectedFloorIdx]
+                if not curFl then return end
+
+                StationData.InvalidateMachineCache()
+                local allMachines = StationData.GetAllStationMachines(CurrentStation, curFl.platforms, CurrentWalkFrame)
+                local liveList = {}
+                local liveByAddr = {}
+                for _, m in ipairs(allMachines or {}) do
+                    if Core.IsValidObj(m) then
+                        local lx, ly, lz, lyaw = StationData.GetMachineLocalPosAndYaw(m, CurrentFrameXform)
+                        if lx and ly and lz and math.abs(lz - curFl.z) <= 220.0 then
+                            local addr = m:GetAddress()
+                            local me = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw or 0.0 }
+                            table.insert(liveList, me)
+                            liveByAddr[addr] = me
+                        end
+                    end
+                end
+                curFl.machines = liveList
+
+                local removedCount = 0
+                for addr, _ in pairs(knownByAddr) do
+                    if not liveByAddr[addr] then
+                        knownByAddr[addr] = nil
+                        presentAddrs[addr] = nil
+                        removeMachineRT(addr)
+                        removedCount = removedCount + 1
+                    end
+                end
+
+                local addedCount = 0
+                for addr, me in pairs(liveByAddr) do
+                    if not knownByAddr[addr] then
+                        knownByAddr[addr] = me
+                        presentAddrs[addr] = true
+                        toIndexQueue[#toIndexQueue + 1] = me
+                        addedCount = addedCount + 1
+                    end
+                end
+
+                if removedCount > 0 then
+                    LastHoveredPortIdx = nil
+                    LastHoveredMachineAddr = nil
+                    RefreshSelectionLayer()
+                    RefreshDynamicOverlay()
+                end
+                if removedCount > 0 or addedCount > 0 then
+                    startRTPump()
+                    if RevalidatePendingChanges then
+                        RevalidatePendingChanges(false)
+                    end
+                end
+            end
+
+            RefreshSingleMachineVisual = function(mAddr)
+                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor then return end
+                local me = knownByAddr[mAddr]
+                if not me or not Core.IsValidObj(me.machine) then return end
+                removeMachineRT(mAddr)
+                toIndexQueue[#toIndexQueue + 1] = me
+                startRTPump()
+            end
+
+            -- Kick off first viewport cull + RT pump immediately
+            local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRectRT()
+            rtFloor.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
+            startRTPump()
+            Core.Log(string.format("[StationMapRT] Initialized tiled RT floor: tiles=%d machines=%d", rtFloor.GetTileCount(), #toIndexQueue))
+        else
+            useRT = false
+        end
+    end
+
+    if not useRT then
     if not machinesOnly then
         CanvasRenderGen = CanvasRenderGen + 1
         myCanvasGen = CanvasRenderGen
@@ -4178,6 +4579,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
         end
     end
+    end -- if not useRT
 
     -- 4. Render player markers & nametags on this floor (refreshable on cached map reopen!)
     PlayerMarkerWidgets = {}
@@ -4864,6 +5266,38 @@ local function HandleMapLeftClick(mx, my, isShift)
         local stampId = tostring(os.clock())
         local staged = {}
         local skippedBlocked = 0
+        local ghostCellBuckets = {}
+        local function addGhostPointToBuckets(px, py)
+            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
+            local k = bx .. "," .. by
+            local list = ghostCellBuckets[k]
+            if not list then list = {}; ghostCellBuckets[k] = list end
+            list[#list + 1] = { x = px, y = py }
+        end
+        local function hasNearbyGhostPoint(px, py)
+            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
+            for dx = -1, 1 do
+                for dy = -1, 1 do
+                    local list = ghostCellBuckets[(bx + dx) .. "," .. (by + dy)]
+                    if list then
+                        for i = 1, #list do
+                            if math.abs(list[i].x - px) < 25.0 and math.abs(list[i].y - py) < 25.0 then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+            return false
+        end
+        for _, eg in ipairs(PendingGhosts) do
+            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
+                addGhostPointToBuckets(eg.x, eg.y)
+                if eg.pairX and eg.pairY then
+                    addGhostPointToBuckets(eg.pairX, eg.pairY)
+                end
+            end
+        end
         for _, item in ipairs(Clipboard) do
             if Core.IsValidObj(item.buildable) then
                 local rdx = item.dx * cosA - item.dy * sinA
@@ -4885,23 +5319,10 @@ local function HandleMapLeftClick(mx, my, isShift)
                 if inBounds then
                     local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
                     if allowed then
-                        -- Also avoid stacking a duplicate ghost on top of an existing ghost (checking both primary and underground exit endpoints)
-                        local dupGhost = false
-                        for _, eg in ipairs(PendingGhosts) do
-                            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
-                                local hitMain = math.abs(eg.x - sx) < 25.0 and math.abs(eg.y - sy) < 25.0
-                                local hitEgPair = eg.pairX and eg.pairY and math.abs(eg.pairX - sx) < 25.0 and math.abs(eg.pairY - sy) < 25.0
-                                local hitNewPair = pX and pY and (
-                                    (math.abs(eg.x - pX) < 25.0 and math.abs(eg.y - pY) < 25.0)
-                                    or (eg.pairX and eg.pairY and math.abs(eg.pairX - pX) < 25.0 and math.abs(eg.pairY - pY) < 25.0)
-                                )
-                                if hitMain or hitEgPair or hitNewPair then
-                                    dupGhost = true
-                                    break
-                                end
-                            end
-                        end
+                        local dupGhost = hasNearbyGhostPoint(sx, sy) or (pX ~= nil and pY ~= nil and hasNearbyGhostPoint(pX, pY))
                         if not dupGhost then
+                            addGhostPointToBuckets(sx, sy)
+                            if pX and pY then addGhostPointToBuckets(pX, pY) end
                             NextGhostSeq = NextGhostSeq + 1
                             table.insert(staged, {
                                 ghostId = "ghost:" .. tostring(NextGhostSeq),
@@ -5294,7 +5715,7 @@ local function EnsureInputPoll()
 
         -- Handle Left Mouse Button transitions (Box Select / Click, or Space+LeftDrag to Pan)
         if lDown and not MouseState.wasLDown then
-            if insideMap and not WaitingForBuildMenuSelection and not IsAnyButtonHovered() and not Perf.IsHoveredOnMachineIconButton(mx, my) then
+            if insideMap and not WaitingForBuildMenuSelection and not IsAnyButtonHovered() then
                 MouseState.lDownInMap = true
                 MouseState.lDraggingBox = false
                 MouseState.lPanning = spaceDown
@@ -5592,6 +6013,7 @@ local function DestroyStationMap()
     InteractionMode = "Select"
     PendingBuildable = nil
     WaitingForBuildMenuSelection = false
+    Perf.DestroyActiveRT()
     RenderedMachines = {}
     RenderedConveyors = {}
     RenderedPorts = {}
