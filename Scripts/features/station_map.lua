@@ -160,34 +160,66 @@ local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, half
 
 -- Consolidated performance state & helpers (single local table to stay well under Lua's 200-local limit)
 local Perf = {
-    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover)
+    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover & overlap)
     PortGrid = {},    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
     HOVER_CELL_CM = 400.0,
     LastIconCanvasVisible = nil,
     MapKeys = nil,
+    SelectionRenderGen = 0,
 }
 
 function Perf.GridBucketKey(gx, gy)
     return gx .. "," .. gy
 end
 
-function Perf.InsertMachine(recEntry)
+function Perf.InsertMachineRect(recEntry, cx, cy)
     local cell = Perf.HOVER_CELL_CM
-    local minX = math.floor((recEntry.x - recEntry.halfW) / cell)
-    local maxX = math.floor((recEntry.x + recEntry.halfW) / cell)
-    local minY = math.floor((recEntry.y - recEntry.halfH) / cell)
-    local maxY = math.floor((recEntry.y + recEntry.halfH) / cell)
-    local keys = {}
+    local minX = math.floor((cx - recEntry.halfW) / cell)
+    local maxX = math.floor((cx + recEntry.halfW) / cell)
+    local minY = math.floor((cy - recEntry.halfH) / cell)
+    local maxY = math.floor((cy + recEntry.halfH) / cell)
+    local keys = recEntry._gridKeys or {}
+    local seen = {}
+    for i = 1, #keys do seen[keys[i]] = true end
     for gx = minX, maxX do
         for gy = minY, maxY do
             local k = Perf.GridBucketKey(gx, gy)
-            local b = Perf.MachineGrid[k]
-            if not b then b = {}; Perf.MachineGrid[k] = b end
-            b[#b + 1] = recEntry
-            keys[#keys + 1] = k
+            if not seen[k] then
+                seen[k] = true
+                local b = Perf.MachineGrid[k]
+                if not b then b = {}; Perf.MachineGrid[k] = b end
+                b[#b + 1] = recEntry
+                keys[#keys + 1] = k
+            end
         end
     end
     recEntry._gridKeys = keys
+end
+
+function Perf.InsertMachine(recEntry)
+    Perf.InsertMachineRect(recEntry, recEntry.x, recEntry.y)
+end
+
+function Perf.QueryMachinesInRect(minWX, maxWX, minWY, maxWY, outList, seenAddr)
+    local cell = Perf.HOVER_CELL_CM
+    local minX = math.floor(minWX / cell)
+    local maxX = math.floor(maxWX / cell)
+    local minY = math.floor(minWY / cell)
+    local maxY = math.floor(maxWY / cell)
+    for gx = minX, maxX do
+        for gy = minY, maxY do
+            local b = Perf.MachineGrid[Perf.GridBucketKey(gx, gy)]
+            if b then
+                for i = 1, #b do
+                    local rm = b[i]
+                    if not seenAddr[rm.addr] then
+                        seenAddr[rm.addr] = true
+                        outList[#outList + 1] = rm
+                    end
+                end
+            end
+        end
+    end
 end
 
 function Perf.RemoveMachine(recEntry)
@@ -2137,7 +2169,11 @@ local function EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
     local seenAddr = {}
 
     local function checkFootprintAgainst(fx, fy)
-        for _, rm in ipairs(RenderedMachines) do
+        local candidates = {}
+        local candSeen = {}
+        Perf.QueryMachinesInRect(fx - hw - 10.0, fx + hw + 10.0, fy - hh - 10.0, fy + hh + 10.0, candidates, candSeen)
+        for i = 1, #candidates do
+            local rm = candidates[i]
             if not PendingDeletes[rm.addr] and not seenAddr[rm.addr] then
                 local hitMain = (math.abs(fx - rm.x) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.y) < (hh + rm.halfH - 10.0))
                 local hitPair = rm.pairX and rm.pairY and (math.abs(fx - rm.pairX) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.pairY) < (hh + rm.halfH - 10.0))
@@ -3260,6 +3296,8 @@ end
 
 local function RefreshSelectionLayer()
     if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
+    Perf.SelectionRenderGen = Perf.SelectionRenderGen + 1
+    local mySelGen = Perf.SelectionRenderGen
     ClearCanvasChildren(MapUI.SelectionCanvas)
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -3317,55 +3355,93 @@ local function RefreshSelectionLayer()
     end
 
     -- Stamped build ghosts (green for new builds, blue + replace icon for valid overwrites)
+    -- Small batches render instantly on the same frame; large pasted blueprints stream with a 6ms/frame budget.
     local replaceFillCol = { R = 0.12, G = 0.48, B = 0.98, A = 0.44 }
     local replaceBdrCol  = { R = 0.28, G = 0.76, B = 1.00, A = 0.98 }
-    for _, gp in ipairs(PendingGhosts) do
+    local floorGhosts = {}
+    for i = 1, #PendingGhosts do
+        local gp = PendingGhosts[i]
         if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
-            local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
-            local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
-            local pxW = math.max(8.0, rx * BASE_CELL_PX)
-            local pxH = math.max(8.0, ry * BASE_CELL_PX)
-            local gpCat = gp.cat or "Other"
-            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-            if gp.isReplace then
-                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
-            end
-            local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
-            local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
-            if isGhostSel then
-                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
-            else
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-            end
-            if gp.isReplace then
-                DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
-            end
-            local clsLow = (gp.actorClsPath or ""):lower()
-            if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-                AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
-            elseif clsLow:find("underground", 1, true) then
-                AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-                if gp.pairX and gp.pairY then
-                    local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
-                    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-                    if gp.isReplace then
-                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
-                        DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
-                    end
-                    if isGhostSel then
-                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 8)
-                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 9)
-                    else
-                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-                    end
-                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-                    RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
-                    local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
-                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
+            floorGhosts[#floorGhosts + 1] = gp
+        end
+    end
+
+    local function renderOneGhost(gp)
+        local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
+        local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
+        local pxW = math.max(8.0, rx * BASE_CELL_PX)
+        local pxH = math.max(8.0, ry * BASE_CELL_PX)
+        local gpCat = gp.cat or "Other"
+        local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
+        CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+        if gp.isReplace then
+            AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
+        end
+        local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
+        local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
+        if isGhostSel then
+            AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
+            RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
+        else
+            RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+        end
+        if gp.isReplace then
+            DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
+        end
+        local clsLow = (gp.actorClsPath or ""):lower()
+        if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
+            AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
+        elseif clsLow:find("underground", 1, true) then
+            AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+            if gp.pairX and gp.pairY then
+                local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
+                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+                if gp.isReplace then
+                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
+                    DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
                 end
+                if isGhostSel then
+                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 8)
+                    RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 9)
+                else
+                    RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+                end
+                AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+                RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
+                local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
+                AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
             end
+        end
+    end
+
+    local gIdx = 1
+    local function pumpGhosts()
+        if mySelGen ~= Perf.SelectionRenderGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
+            return
+        end
+        local budgetEnd = os.clock() + 0.0060
+        local count = 0
+        while gIdx <= #floorGhosts and (count < 16 or os.clock() < budgetEnd) and count < 40 do
+            renderOneGhost(floorGhosts[gIdx])
+            gIdx = gIdx + 1
+            count = count + 1
+        end
+        if gIdx <= #floorGhosts then
+            ExecuteInGameThreadAfterFrames(1, pumpGhosts)
+        end
+    end
+
+    -- Render the first batch synchronously so small/medium selections & pastes appear with zero latency
+    if #floorGhosts > 0 then
+        local firstBudgetEnd = os.clock() + 0.0060
+        local firstCount = 0
+        while gIdx <= #floorGhosts and (firstCount < 16 or os.clock() < firstBudgetEnd) and firstCount < 32 do
+            renderOneGhost(floorGhosts[gIdx])
+            gIdx = gIdx + 1
+            firstCount = firstCount + 1
+        end
+        if gIdx <= #floorGhosts then
+            ExecuteInGameThreadAfterFrames(1, pumpGhosts)
         end
     end
 
@@ -3873,6 +3949,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 if uInfo.pairX and uInfo.pairY then
                     recEntry.pairX = uInfo.pairX
                     recEntry.pairY = uInfo.pairY
+                    Perf.InsertMachineRect(recEntry, uInfo.pairX, uInfo.pairY)
                     recEntry.ugLength = math.max(2, math.floor(math.sqrt((uInfo.pairX - mwx) ^ 2 + (uInfo.pairY - mwy) ^ 2) / CELL_CM + 0.5) + 1)
                     local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
@@ -4949,6 +5026,39 @@ local function HandleMapLeftClick(mx, my, isShift)
         local stampId = tostring(os.clock())
         local staged = {}
         local skippedBlocked = 0
+        -- Pre-index existing PendingGhosts on this floor by 50cm spatial bucket for O(1) duplicate checks
+        local ghostCellBuckets = {}
+        local function addGhostPointToBuckets(px, py)
+            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
+            local k = bx .. "," .. by
+            local list = ghostCellBuckets[k]
+            if not list then list = {}; ghostCellBuckets[k] = list end
+            list[#list + 1] = { x = px, y = py }
+        end
+        local function hasNearbyGhostPoint(px, py)
+            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
+            for dx = -1, 1 do
+                for dy = -1, 1 do
+                    local list = ghostCellBuckets[(bx + dx) .. "," .. (by + dy)]
+                    if list then
+                        for i = 1, #list do
+                            if math.abs(list[i].x - px) < 25.0 and math.abs(list[i].y - py) < 25.0 then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+            return false
+        end
+        for _, eg in ipairs(PendingGhosts) do
+            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
+                addGhostPointToBuckets(eg.x, eg.y)
+                if eg.pairX and eg.pairY then
+                    addGhostPointToBuckets(eg.pairX, eg.pairY)
+                end
+            end
+        end
         for _, item in ipairs(Clipboard) do
             if Core.IsValidObj(item.buildable) then
                 local rdx = item.dx * cosA - item.dy * sinA
@@ -4971,22 +5081,10 @@ local function HandleMapLeftClick(mx, my, isShift)
                     local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
                     if allowed then
                         -- Also avoid stacking a duplicate ghost on top of an existing ghost (checking both primary and underground exit endpoints)
-                        local dupGhost = false
-                        for _, eg in ipairs(PendingGhosts) do
-                            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
-                                local hitMain = math.abs(eg.x - sx) < 25.0 and math.abs(eg.y - sy) < 25.0
-                                local hitEgPair = eg.pairX and eg.pairY and math.abs(eg.pairX - sx) < 25.0 and math.abs(eg.pairY - sy) < 25.0
-                                local hitNewPair = pX and pY and (
-                                    (math.abs(eg.x - pX) < 25.0 and math.abs(eg.y - pY) < 25.0)
-                                    or (eg.pairX and eg.pairY and math.abs(eg.pairX - pX) < 25.0 and math.abs(eg.pairY - pY) < 25.0)
-                                )
-                                if hitMain or hitEgPair or hitNewPair then
-                                    dupGhost = true
-                                    break
-                                end
-                            end
-                        end
+                        local dupGhost = hasNearbyGhostPoint(sx, sy) or (pX ~= nil and pY ~= nil and hasNearbyGhostPoint(pX, pY))
                         if not dupGhost then
+                            addGhostPointToBuckets(sx, sy)
+                            if pX and pY then addGhostPointToBuckets(pX, pY) end
                             NextGhostSeq = NextGhostSeq + 1
                             table.insert(staged, {
                                 ghostId = "ghost:" .. tostring(NextGhostSeq),
