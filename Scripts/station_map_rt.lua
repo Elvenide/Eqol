@@ -8,13 +8,17 @@ local StationData = require("station_data")
 
 local RT = {}
 
-RT.TILE_WORLD_CM = 1600.0 -- 16x16 station cells per tile
-RT.TILE_PX       = 768    -- 48 px/cell (~2.25 MB VRAM per active tile, matches 46 px/cell UMG sharpness)
+RT.TILE_WORLD_CM = 800.0  -- 8x8 station cells per tile (4x faster per-tile draw & RT alloc)
+RT.TILE_PX       = 384    -- 48 px/cell (~0.56 MB VRAM per active tile, crisp 1:1 sharpness)
 RT.PX_PER_CM     = RT.TILE_PX / RT.TILE_WORLD_CM
 
 local UV0          = { X = 0.0, Y = 0.0 }
 local UV1          = { X = 1.0, Y = 1.0 }
 local PIVOT_CENTER = { X = 0.5, Y = 0.5 }
+local TMP_POS      = { X = 0.0, Y = 0.0 }
+local TMP_SIZE     = { X = 0.0, Y = 0.0 }
+local TMP_P1       = { X = 0.0, Y = 0.0 }
+local TMP_P2       = { X = 0.0, Y = 0.0 }
 local COL_WHITE    = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
 local COL_CLEAR    = { R = 0.0, G = 0.0, B = 0.0, A = 0.0 }
 local COL_SHADOW   = { R = 0.0, G = 0.0, B = 0.0, A = 0.85 }
@@ -210,10 +214,14 @@ end
 
 local function DrawFilledRect(canvas, whiteTex, cx, cy, w, h, col, angleDeg)
     if w <= 0.1 or h <= 0.1 then return end
+    TMP_POS.X = cx - w * 0.5
+    TMP_POS.Y = cy - h * 0.5
+    TMP_SIZE.X = w
+    TMP_SIZE.Y = h
     canvas:K2_DrawTexture(
         whiteTex,
-        { X = cx - w * 0.5, Y = cy - h * 0.5 },
-        { X = w, Y = h },
+        TMP_POS,
+        TMP_SIZE,
         UV0, UV1,
         col,
         BLEND_TRANSLUCENT,
@@ -224,10 +232,14 @@ end
 
 local function DrawSprite(canvas, tex, cx, cy, w, h, col, angleDeg)
     if not Core.IsValidObj(tex) or w <= 0.1 or h <= 0.1 then return end
+    TMP_POS.X = cx - w * 0.5
+    TMP_POS.Y = cy - h * 0.5
+    TMP_SIZE.X = w
+    TMP_SIZE.Y = h
     canvas:K2_DrawTexture(
         tex,
-        { X = cx - w * 0.5, Y = cy - h * 0.5 },
-        { X = w, Y = h },
+        TMP_POS,
+        TMP_SIZE,
         UV0, UV1,
         col or COL_WHITE,
         BLEND_TRANSLUCENT,
@@ -237,20 +249,24 @@ local function DrawSprite(canvas, tex, cx, cy, w, h, col, angleDeg)
 end
 
 local function DrawLine(canvas, x1, y1, x2, y2, thickness, col)
-    canvas:K2_DrawLine({ X = x1, Y = y1 }, { X = x2, Y = y2 }, thickness, col)
+    TMP_P1.X = x1; TMP_P1.Y = y1
+    TMP_P2.X = x2; TMP_P2.Y = y2
+    canvas:K2_DrawLine(TMP_P1, TMP_P2, thickness, col)
 end
 
 local function DrawChevron(canvas, whiteTex, cx, cy, armLen, armThick, yawDeg, col)
-    local halfArm = armLen * 0.3536
     local rad = math.rad(yawDeg or 0.0)
     local cosA, sinA = math.cos(rad), math.sin(rad)
-    for _, sign in ipairs({ -1.0, 1.0 }) do
-        local lx = -halfArm * 0.2
-        local ly = sign * halfArm
-        local rx = lx * cosA - ly * sinA
-        local ry = lx * sinA + ly * cosA
-        DrawFilledRect(canvas, whiteTex, cx + rx, cy + ry, armLen, armThick, col, (yawDeg or 0.0) - sign * 45.0)
-    end
+    local tipX = cx + armLen * 0.35 * cosA
+    local tipY = cy + armLen * 0.35 * sinA
+    local back = armLen * 0.35
+    local wing = armLen * 0.48
+    local b1x = cx - back * cosA - wing * sinA
+    local b1y = cy - back * sinA + wing * cosA
+    local b2x = cx - back * cosA + wing * sinA
+    local b2y = cy - back * sinA - wing * cosA
+    DrawLine(canvas, b1x, b1y, tipX, tipY, armThick, col)
+    DrawLine(canvas, b2x, b2y, tipX, tipY, armThick, col)
 end
 
 local function DrawDashedLine(canvas, x1, y1, x2, y2, col, thickness, dashLen, gapLen)
@@ -689,10 +705,12 @@ function RT.CreateFloorRenderer(opts)
     end
 
     -- Draws dirty tiles prioritizing currently visible tiles first (maxTiles per call)
+    -- Returns: moreDirty (bool), elapsedMs (number)
     function inst.PumpDirtyTiles(maxTiles, budgetSec)
-        if destroyed or #dirtyList == 0 then return false end
-        local limit = maxTiles or 2
-        local budgetEnd = os.clock() + (budgetSec or 0.008)
+        if destroyed or #dirtyList == 0 then return false, 0.0 end
+        local tStart = os.clock()
+        local limit = maxTiles or 1
+        local budgetEnd = tStart + (budgetSec or 0.0035)
         local drawn = 0
 
         -- Pass 1: visible dirty tiles first
@@ -717,7 +735,7 @@ function RT.CreateFloorRenderer(opts)
             local rem = {}
             for i = 1, #nextDirty do
                 local t = nextDirty[i]
-                if t.dirty and drawn < limit and os.clock() < budgetEnd then
+                if t.dirty and (drawn < 1 or (drawn < limit and os.clock() < budgetEnd)) then
                     dirtySet[t.key] = nil
                     drawTileNow(t)
                     drawn = drawn + 1
@@ -729,7 +747,7 @@ function RT.CreateFloorRenderer(opts)
         end
 
         dirtyList = nextDirty
-        return #dirtyList > 0
+        return #dirtyList > 0, (os.clock() - tStart) * 1000.0
     end
 
     function inst.HasDirtyTiles()

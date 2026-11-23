@@ -3725,21 +3725,45 @@ RefreshStationMapCanvas = function(machinesOnly)
             local knownByAddr = {}
             local toIndexQueue = {}
             local idxCursor = 1
+            local tileCmRT = (Perf.RT and Perf.RT.TILE_WORLD_CM) or 800.0
+            local vcx = ViewTransform.cx or 0.0
+            local vcy = ViewTransform.cy or 0.0
             for _, me in ipairs(floorMachines) do
                 if Core.IsValidObj(me.machine) then
                     local addr = me.machine:GetAddress()
                     presentAddrs[addr] = true
                     knownByAddr[addr] = me
+                    local tx = math.floor((me.x or 0.0) / tileCmRT)
+                    local ty = math.floor((me.y or 0.0) / tileCmRT)
+                    local tcx = (tx + 0.5) * tileCmRT - vcx
+                    local tcy = (ty + 0.5) * tileCmRT - vcy
+                    me._rtTileKey = tx * 100000 + ty
+                    me._rtTileDist = tcx * tcx + tcy * tcy
                     toIndexQueue[#toIndexQueue + 1] = me
                 end
             end
+            -- Group machines contiguously by RT tile, ordered outward from viewport center,
+            -- so each tile completes indexing and renders immediately (once, with zero multi-second wait).
+            if #toIndexQueue > 1 then
+                table.sort(toIndexQueue, function(a, b)
+                    if a._rtTileKey == b._rtTileKey then return false end
+                    if a._rtTileDist ~= b._rtTileDist then return a._rtTileDist < b._rtTileDist end
+                    return a._rtTileKey < b._rtTileKey
+                end)
+            end
 
+            local bldMetaCache = {}
             local seenUndergroundPairs = {}
             local ugLinkByKey = {}
             local ugKeysByAddr = {}
             local portHalfCm = 32.0
             local nextPortId = 0
             local rtPumpRunning = false
+            local rtTileInProgress = false
+            local rtDrawCount = 0
+            local rtDrawSumMs = 0.0
+            local rtDrawMaxMs = 0.0
+            local rtLoggedDone = false
 
             local function removeMachineRT(mAddr)
                 rtFloor.RemoveMachine(mAddr)
@@ -3772,7 +3796,7 @@ RefreshStationMapCanvas = function(machinesOnly)
 
             local function indexOneMachineRT(me)
                 local m = me.machine
-                if not (Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m)) then return end
+                if not Core.IsValidObj(m) then return end
                 local mAddr = m:GetAddress()
                 if not presentAddrs[mAddr] then return end
 
@@ -3783,25 +3807,45 @@ RefreshStationMapCanvas = function(machinesOnly)
                 local pxW = math.max(8.0, rx * cellPx)
                 local okB, bldRaw = pcall(function() return m.Buildable end)
                 local bld = okB and Core.IsValidObj(bldRaw) and bldRaw or nil
-                local okR, rec = pcall(function() return m.Recipe end)
-                local clsKey = select(1, GetMachineClassKey(m, bld))
-                local sprite = RequestMachineSprite(clsKey, m, cat, bld)
-
-                local overlayChips = {}
-                local isContainer = (cat == "Container")
-                local isProducer = false
-                if isContainer then
-                    local topItems = StationData.GetContainerTopItems(m, (pxW >= 72.0) and 2 or 1)
-                    for _, entry in ipairs(topItems) do
-                        overlayChips[#overlayChips + 1] = { item = entry.Item, rate = nil }
+                local bldAddr = bld and bld:GetAddress() or nil
+                local meta = bldAddr and bldMetaCache[bldAddr] or nil
+                local clsKey, sprite, dispName
+                if meta then
+                    clsKey = meta.clsKey
+                    sprite = meta.sprite
+                    dispName = meta.dispName
+                else
+                    clsKey = select(1, GetMachineClassKey(m, bld))
+                    sprite = RequestMachineSprite(clsKey, m, cat, bld)
+                    dispName = StationData.GetMachineDisplayName(m)
+                    if bldAddr then
+                        bldMetaCache[bldAddr] = { clsKey = clsKey, sprite = sprite, dispName = dispName }
                     end
-                elseif cat ~= "Conveyor" then
-                    local outputs = StationData.GetProducerOutputsAndRates(m)
-                    if #outputs > 0 then
-                        isProducer = true
-                        local maxChips = (pxW >= 80.0) and 2 or 1
-                        for i = 1, math.min(maxChips, #outputs) do
-                            overlayChips[#overlayChips + 1] = { item = outputs[i].Item, rate = outputs[i].Rate }
+                end
+
+                local rec = nil
+                local overlayChips = nil
+                local isProducer = false
+                if cat ~= "Conveyor" then
+                    local okR, recRaw = pcall(function() return m.Recipe end)
+                    if okR then rec = recRaw end
+                    if cat == "Container" then
+                        local topItems = StationData.GetContainerTopItems(m, (pxW >= 72.0) and 2 or 1)
+                        if #topItems > 0 then
+                            overlayChips = {}
+                            for _, entry in ipairs(topItems) do
+                                overlayChips[#overlayChips + 1] = { item = entry.Item, rate = nil }
+                            end
+                        end
+                    else
+                        local outputs = StationData.GetProducerOutputsAndRates(m)
+                        if #outputs > 0 then
+                            isProducer = true
+                            overlayChips = {}
+                            local maxChips = (pxW >= 80.0) and 2 or 1
+                            for i = 1, math.min(maxChips, #outputs) do
+                                overlayChips[#overlayChips + 1] = { item = outputs[i].Item, rate = outputs[i].Rate }
+                            end
                         end
                     end
                 end
@@ -3819,15 +3863,23 @@ RefreshStationMapCanvas = function(machinesOnly)
                     halfH = ry * CELL_CM * 0.5,
                     cat = cat,
                     buildable = bld,
-                    recipe = okR and rec or nil,
+                    recipe = rec,
                     actorClsPath = clsKey,
                     sprite = sprite,
-                    displayName = StationData.GetMachineDisplayName(m),
+                    displayName = dispName,
                 }
                 RenderedMachines[#RenderedMachines + 1] = recEntry
                 Perf.InsertMachine(recEntry)
                 if cat == "Conveyor" then
                     RenderedConveyors[#RenderedConveyors + 1] = recEntry
+                    rtFloor.UpsertMachine(mAddr, {
+                        x = mwx, y = mwy,
+                        rx = rx, ry = ry,
+                        yaw = myaw,
+                        cat = "Conveyor",
+                        sprite = sprite,
+                    }, nil)
+                    return
                 end
 
                 local clsLow = clsKey and clsKey:lower() or ""
@@ -3919,27 +3971,56 @@ RefreshStationMapCanvas = function(machinesOnly)
                     rtPumpRunning = false
                     return
                 end
+
+                -- Alternate cleanly between indexing one tile's machines and drawing one completed tile,
+                -- so machines appear immediately from the center outward while keeping each frame <= ~3ms.
+                if not rtTileInProgress and rtFloor.HasDirtyTiles() then
+                    local moreDirty, drawMs = rtFloor.PumpDirtyTiles(1, 0.0025)
+                    rtDrawCount = rtDrawCount + 1
+                    rtDrawSumMs = rtDrawSumMs + (drawMs or 0.0)
+                    if (drawMs or 0.0) > rtDrawMaxMs then rtDrawMaxMs = drawMs or 0.0 end
+                    local nextFrames = ((drawMs or 0.0) > 3.5) and 2 or 1
+                    if idxCursor <= #toIndexQueue or moreDirty then
+                        ExecuteInGameThreadAfterFrames(nextFrames, pumpRT)
+                    else
+                        rtPumpRunning = false
+                        if not rtLoggedDone and rtDrawCount > 0 then
+                            rtLoggedDone = true
+                            Core.Log(string.format("[StationMapRT] Floor render done: tiles=%d draws=%d avg=%.2fms max=%.2fms",
+                                rtFloor.GetTileCount(), rtDrawCount, rtDrawSumMs / rtDrawCount, rtDrawMaxMs))
+                        end
+                    end
+                    return
+                end
+
                 if idxCursor <= #toIndexQueue then
-                    -- Phase 1: Pure-Lua machine indexing only (3ms/frame budget).
-                    -- Avoids drawing partially-populated tiles and redrawing them 3-5x over!
-                    local budgetEnd = os.clock() + 0.0030
+                    local budgetEnd = os.clock() + 0.0025
                     local indexed = 0
-                    while idxCursor <= #toIndexQueue and (indexed < 15 or os.clock() < budgetEnd) and indexed < 80 do
-                        indexOneMachineRT(toIndexQueue[idxCursor])
+                    local startTileKey = toIndexQueue[idxCursor]._rtTileKey
+                    rtTileInProgress = true
+                    while idxCursor <= #toIndexQueue and (indexed < 12 or os.clock() < budgetEnd) and indexed < 60 do
+                        local me = toIndexQueue[idxCursor]
+                        if indexed > 0 and me._rtTileKey ~= startTileKey then
+                            -- Finished the previous tile cleanly; draw it on the next frame!
+                            rtTileInProgress = false
+                            break
+                        end
+                        indexOneMachineRT(me)
                         idxCursor = idxCursor + 1
                         indexed = indexed + 1
+                    end
+                    if idxCursor > #toIndexQueue or (toIndexQueue[idxCursor]._rtTileKey ~= startTileKey) then
+                        rtTileInProgress = false
                     end
                     ExecuteInGameThreadAfterFrames(1, pumpRT)
                     return
                 end
 
-                -- Phase 2: All machines on this floor are indexed; draw 1 dirty RT tile per frame
-                -- (~2-3ms) so each tile renders exactly once and FPS stays smooth.
-                local moreDirty = rtFloor.PumpDirtyTiles(1, 0.0030)
-                if moreDirty then
-                    ExecuteInGameThreadAfterFrames(1, pumpRT)
-                else
-                    rtPumpRunning = false
+                rtPumpRunning = false
+                if not rtLoggedDone and rtDrawCount > 0 then
+                    rtLoggedDone = true
+                    Core.Log(string.format("[StationMapRT] Floor render done: tiles=%d draws=%d avg=%.2fms max=%.2fms",
+                        rtFloor.GetTileCount(), rtDrawCount, rtDrawSumMs / rtDrawCount, rtDrawMaxMs))
                 end
             end
 
