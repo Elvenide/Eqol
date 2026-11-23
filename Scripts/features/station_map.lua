@@ -160,66 +160,34 @@ local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, half
 
 -- Consolidated performance state & helpers (single local table to stay well under Lua's 200-local limit)
 local Perf = {
-    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover & overlap)
+    MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover)
     PortGrid = {},    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
     HOVER_CELL_CM = 400.0,
     LastIconCanvasVisible = nil,
     MapKeys = nil,
-    SelectionRenderGen = 0,
 }
 
 function Perf.GridBucketKey(gx, gy)
     return gx .. "," .. gy
 end
 
-function Perf.InsertMachineRect(recEntry, cx, cy)
+function Perf.InsertMachine(recEntry)
     local cell = Perf.HOVER_CELL_CM
-    local minX = math.floor((cx - recEntry.halfW) / cell)
-    local maxX = math.floor((cx + recEntry.halfW) / cell)
-    local minY = math.floor((cy - recEntry.halfH) / cell)
-    local maxY = math.floor((cy + recEntry.halfH) / cell)
-    local keys = recEntry._gridKeys or {}
-    local seen = {}
-    for i = 1, #keys do seen[keys[i]] = true end
+    local minX = math.floor((recEntry.x - recEntry.halfW) / cell)
+    local maxX = math.floor((recEntry.x + recEntry.halfW) / cell)
+    local minY = math.floor((recEntry.y - recEntry.halfH) / cell)
+    local maxY = math.floor((recEntry.y + recEntry.halfH) / cell)
+    local keys = {}
     for gx = minX, maxX do
         for gy = minY, maxY do
             local k = Perf.GridBucketKey(gx, gy)
-            if not seen[k] then
-                seen[k] = true
-                local b = Perf.MachineGrid[k]
-                if not b then b = {}; Perf.MachineGrid[k] = b end
-                b[#b + 1] = recEntry
-                keys[#keys + 1] = k
-            end
+            local b = Perf.MachineGrid[k]
+            if not b then b = {}; Perf.MachineGrid[k] = b end
+            b[#b + 1] = recEntry
+            keys[#keys + 1] = k
         end
     end
     recEntry._gridKeys = keys
-end
-
-function Perf.InsertMachine(recEntry)
-    Perf.InsertMachineRect(recEntry, recEntry.x, recEntry.y)
-end
-
-function Perf.QueryMachinesInRect(minWX, maxWX, minWY, maxWY, outList, seenAddr)
-    local cell = Perf.HOVER_CELL_CM
-    local minX = math.floor(minWX / cell)
-    local maxX = math.floor(maxWX / cell)
-    local minY = math.floor(minWY / cell)
-    local maxY = math.floor(maxWY / cell)
-    for gx = minX, maxX do
-        for gy = minY, maxY do
-            local b = Perf.MachineGrid[Perf.GridBucketKey(gx, gy)]
-            if b then
-                for i = 1, #b do
-                    local rm = b[i]
-                    if not seenAddr[rm.addr] then
-                        seenAddr[rm.addr] = true
-                        outList[#outList + 1] = rm
-                    end
-                end
-            end
-        end
-    end
 end
 
 function Perf.RemoveMachine(recEntry)
@@ -2169,11 +2137,7 @@ local function EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
     local seenAddr = {}
 
     local function checkFootprintAgainst(fx, fy)
-        local candidates = {}
-        local candSeen = {}
-        Perf.QueryMachinesInRect(fx - hw - 10.0, fx + hw + 10.0, fy - hh - 10.0, fy + hh + 10.0, candidates, candSeen)
-        for i = 1, #candidates do
-            local rm = candidates[i]
+        for _, rm in ipairs(RenderedMachines) do
             if not PendingDeletes[rm.addr] and not seenAddr[rm.addr] then
                 local hitMain = (math.abs(fx - rm.x) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.y) < (hh + rm.halfH - 10.0))
                 local hitPair = rm.pairX and rm.pairY and (math.abs(fx - rm.pairX) < (hw + rm.halfW - 10.0)) and (math.abs(fy - rm.pairY) < (hh + rm.halfH - 10.0))
@@ -3296,8 +3260,6 @@ end
 
 local function RefreshSelectionLayer()
     if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
-    Perf.SelectionRenderGen = Perf.SelectionRenderGen + 1
-    local mySelGen = Perf.SelectionRenderGen
     ClearCanvasChildren(MapUI.SelectionCanvas)
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -3355,93 +3317,55 @@ local function RefreshSelectionLayer()
     end
 
     -- Stamped build ghosts (green for new builds, blue + replace icon for valid overwrites)
-    -- Small batches render instantly on the same frame; large pasted blueprints stream with a 6ms/frame budget.
     local replaceFillCol = { R = 0.12, G = 0.48, B = 0.98, A = 0.44 }
     local replaceBdrCol  = { R = 0.28, G = 0.76, B = 1.00, A = 0.98 }
-    local floorGhosts = {}
-    for i = 1, #PendingGhosts do
-        local gp = PendingGhosts[i]
+    for _, gp in ipairs(PendingGhosts) do
         if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
-            floorGhosts[#floorGhosts + 1] = gp
-        end
-    end
-
-    local function renderOneGhost(gp)
-        local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
-        local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
-        local pxW = math.max(8.0, rx * BASE_CELL_PX)
-        local pxH = math.max(8.0, ry * BASE_CELL_PX)
-        local gpCat = gp.cat or "Other"
-        local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
-        CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-        if gp.isReplace then
-            AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
-        end
-        local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
-        local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
-        if isGhostSel then
-            AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
-            RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
-        else
-            RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-        end
-        if gp.isReplace then
-            DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
-        end
-        local clsLow = (gp.actorClsPath or ""):lower()
-        if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-            AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
-        elseif clsLow:find("underground", 1, true) then
-            AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-            if gp.pairX and gp.pairY then
-                local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
-                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-                if gp.isReplace then
-                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
-                    DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
-                end
-                if isGhostSel then
-                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 8)
-                    RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 9)
-                else
-                    RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-                end
-                AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-                RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
-                local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
-                AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
+            local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
+            local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
+            local pxW = math.max(8.0, rx * BASE_CELL_PX)
+            local pxH = math.max(8.0, ry * BASE_CELL_PX)
+            local gpCat = gp.cat or "Other"
+            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+            if gp.isReplace then
+                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
             end
-        end
-    end
-
-    local gIdx = 1
-    local function pumpGhosts()
-        if mySelGen ~= Perf.SelectionRenderGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
-            return
-        end
-        local budgetEnd = os.clock() + 0.0060
-        local count = 0
-        while gIdx <= #floorGhosts and (count < 16 or os.clock() < budgetEnd) and count < 40 do
-            renderOneGhost(floorGhosts[gIdx])
-            gIdx = gIdx + 1
-            count = count + 1
-        end
-        if gIdx <= #floorGhosts then
-            ExecuteInGameThreadAfterFrames(1, pumpGhosts)
-        end
-    end
-
-    -- Render the first batch synchronously so small/medium selections & pastes appear with zero latency
-    if #floorGhosts > 0 then
-        local firstBudgetEnd = os.clock() + 0.0060
-        local firstCount = 0
-        while gIdx <= #floorGhosts and (firstCount < 16 or os.clock() < firstBudgetEnd) and firstCount < 32 do
-            renderOneGhost(floorGhosts[gIdx])
-            gIdx = gIdx + 1
-            firstCount = firstCount + 1
-        end
-        if gIdx <= #floorGhosts then
-            ExecuteInGameThreadAfterFrames(1, pumpGhosts)
+            local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
+            local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
+            if isGhostSel then
+                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
+            else
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+            end
+            if gp.isReplace then
+                DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
+            end
+            local clsLow = (gp.actorClsPath or ""):lower()
+            if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
+                AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
+            elseif clsLow:find("underground", 1, true) then
+                AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+                if gp.pairX and gp.pairY then
+                    local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
+                    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+                    if gp.isReplace then
+                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
+                        DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
+                    end
+                    if isGhostSel then
+                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 8)
+                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 9)
+                    else
+                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+                    end
+                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+                    RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
+                    local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
+                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
+                end
+            end
         end
     end
 
@@ -3680,10 +3604,10 @@ RefreshStationMapCanvas = function(machinesOnly)
                 staticPumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.0065
+            local budgetEnd = os.clock() + 0.0030
             local addedGrid = false
             local gCount = 0
-            while gIdx <= #deferredGridLines and (gCount < 12 or os.clock() < budgetEnd) and gCount < 64 do
+            while gIdx <= #deferredGridLines and (gCount < 6 or os.clock() < budgetEnd) and gCount < 24 do
                 local dg = deferredGridLines[gIdx]
                 local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
                 if line and s then
@@ -3705,7 +3629,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
             end
             local wCount = 0
-            while wQueueIdx <= #visibleWallQueue and (wCount < 8 or os.clock() < budgetEnd) and wCount < 48 do
+            while wQueueIdx <= #visibleWallQueue and (wCount < 4 or os.clock() < budgetEnd) and wCount < 18 do
                 local dw = visibleWallQueue[wQueueIdx]
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
@@ -3713,7 +3637,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 wCount = wCount + 1
             end
             if gIdx <= #deferredGridLines or wQueueIdx <= #visibleWallQueue then
-                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
+                ExecuteInGameThreadAfterFrames(2, pumpStaticBatch)
             else
                 staticPumpRunning = false
             end
@@ -3805,9 +3729,6 @@ RefreshStationMapCanvas = function(machinesOnly)
         local visibleMachineQueue = {}
         local mQueueIdx = 1
         local pIdx = 1
-        local deferredIconsByChunk = {} -- "cx,cy" -> { minX, maxX, minY, maxY, items = {}, unbuilt = 0 }
-        local visibleIconQueue = {}
-        local iQueueIdx = 1
         local machinePumpRunning = false
         local knownPendingByAddr = {}
         for _, pm in ipairs(pendingMachines) do
@@ -3949,7 +3870,6 @@ RefreshStationMapCanvas = function(machinesOnly)
                 if uInfo.pairX and uInfo.pairY then
                     recEntry.pairX = uInfo.pairX
                     recEntry.pairY = uInfo.pairY
-                    Perf.InsertMachineRect(recEntry, uInfo.pairX, uInfo.pairY)
                     recEntry.ugLength = math.max(2, math.floor(math.sqrt((uInfo.pairX - mwx) ^ 2 + (uInfo.pairY - mwy) ^ 2) / CELL_CM + 0.5) + 1)
                     local omx, omy = WorldToBaseCanvas(uInfo.pairX, uInfo.pairY)
                     local pKey = (uInfo.pairAddr and (mAddr < uInfo.pairAddr and (mAddr .. ":" .. uInfo.pairAddr) or (uInfo.pairAddr .. ":" .. mAddr))) or mAddr
@@ -3982,42 +3902,87 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
 
             if hasBottomOverlay then
-                -- Defer heavy Blueprint icon/rate overlays (WBP_Button_C + WBP_Item_C + WBP_Text_C)
-                -- so machine bodies populate at max speed and icon overlays only build when zoomed in & on-screen.
-                local cx, cy, ck = getChunkCoords(mwx, mwy)
-                local ib = deferredIconsByChunk[ck]
-                if not ib then
-                    ib = {
-                        minX = cx * CHUNK_CM - 300.0,
-                        maxX = (cx + 1) * CHUNK_CM + 300.0,
-                        minY = cy * CHUNK_CM - 300.0,
-                        maxY = (cy + 1) * CHUNK_CM + 300.0,
-                        items = {},
-                        unbuilt = 0,
-                    }
-                    deferredIconsByChunk[ck] = ib
+                local isHidden = StationData.IsMachineIconHidden(m)
+                local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 16.0, 32.0)
+                local badgeW = #overlayChips * (iconSize + 10.0) + ((#overlayChips > 1) and 4.0 or 0.0)
+                if isProducer then
+                    badgeW = math.max(badgeW, #overlayChips * math.max(44.0, iconSize + 20.0))
                 end
-                local iconJob = {
-                    m = m,
-                    mAddr = mAddr,
-                    mx = mx,
-                    my = my,
-                    pxW = pxW,
-                    pxH = pxH,
-                    mwx = mwx,
-                    mwy = mwy,
-                    overlayChips = overlayChips,
-                    isProducer = isProducer,
-                    track = mTrack,
-                    mWidgets = mWidgets,
-                    queued = false,
-                }
-                ib.items[#ib.items + 1] = iconJob
-                if Perf.LastIconCanvasVisible == true then
-                    iconJob.queued = true
-                    visibleIconQueue[#visibleIconQueue + 1] = iconJob
-                else
-                    ib.unbuilt = ib.unbuilt + 1
+                local badgeH = isProducer and (iconSize + 18.0) or (iconSize + 6.0)
+                local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
+
+                local ov = CreateRawFast(PATHS.OverlayClass, outer)
+                local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
+                local chipsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+                if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(chipsHBox) then
+                    table.insert(mWidgets, ov)
+                    pcall(function()
+                        iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.72 })
+                        iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                        local bSlot = ov:AddChildToOverlay(iconBtn)
+                        if Core.IsValidObj(bSlot) then
+                            bSlot:SetHorizontalAlignment(0)
+                            bSlot:SetVerticalAlignment(0)
+                        end
+                        local cSlot = ov:AddChildToOverlay(chipsHBox)
+                        if Core.IsValidObj(cSlot) then
+                            cSlot:SetHorizontalAlignment(2)
+                            cSlot:SetVerticalAlignment(2)
+                        end
+                        chipsHBox:SetVisibility(3)
+
+                        for ci, chip in ipairs(overlayChips) do
+                            local chipVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+                            local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
+                            if Core.IsValidObj(chipVBox) and Core.IsValidObj(itemW) then
+                                chipVBox:SetVisibility(3)
+                                local iwSlot = chipVBox:AddChildToVerticalBox(itemW)
+                                if Core.IsValidObj(iwSlot) then iwSlot:SetHorizontalAlignment(2) end
+                                itemW.TooltipEnabled = false
+                                itemW:SetVisibility(3)
+                                itemW:SetIconSize(iconSize)
+                                itemW:SetItem(chip.item)
+                                itemW:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
+
+                                if chip.rate ~= nil then
+                                    local rTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+                                    if Core.IsValidObj(rTxt) then
+                                        local rtSlot = chipVBox:AddChildToVerticalBox(rTxt)
+                                        if Core.IsValidObj(rtSlot) then rtSlot:SetHorizontalAlignment(2) end
+                                        local rateStr = (chip.rate >= 10.0) and string.format("%.0f/min", chip.rate) or string.format("%.1f/min", chip.rate)
+                                        rTxt:SetVisibility(3)
+                                        rTxt:SetSize(10)
+                                        rTxt:SetText(Core.MakeText(rateStr))
+                                    end
+                                end
+
+                                local hbSlot = chipsHBox:AddChildToHorizontalBox(chipVBox)
+                                if Core.IsValidObj(hbSlot) then
+                                    hbSlot:SetVerticalAlignment(2)
+                                    if ci > 1 then
+                                        hbSlot:SetPadding({ Left = 4.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                                    end
+                                end
+                            end
+                        end
+                    end)
+
+                    local iconParent = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
+                    local iconTarget = getOrCreateChunkCanvas(iconChunks, iconParent, mwx, mwy)
+                    local iSlot = iconTarget:AddChildToCanvas(ov)
+                    SetCanvasSlot(iSlot, mx, badgeY, badgeW, badgeH, 0.5, 0.5, 40)
+
+                    FloorIconButtons[mAddr] = { btn = iconBtn, widget = chipsHBox }
+                    local capturedM = m
+                    local capturedGroup = chipsHBox
+                    Core.RegisterWBPButtonClick(iconBtn, function()
+                        local nowHidden = StationData.ToggleMachineIcon(capturedM)
+                        if Core.IsValidObj(capturedGroup) then
+                            pcall(function()
+                                capturedGroup:SetRenderOpacity(nowHidden and 0.25 or 1.0)
+                            end)
+                        end
+                    end)
                 end
             end
 
@@ -4057,113 +4022,20 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
         end
 
-        local function buildOneDeferredIcon(job)
-            if not job or not job.track or job.track.cancelled or not Core.IsValidObj(job.m) then return end
-            local m = job.m
-            local mAddr = job.mAddr
-            local overlayChips = job.overlayChips
-            local isProducer = job.isProducer
-            local pxW, pxH = job.pxW, job.pxH
-            local mx, my = job.mx, job.my
-
-            local isHidden = StationData.IsMachineIconHidden(m)
-            local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 16.0, 32.0)
-            local badgeW = #overlayChips * (iconSize + 10.0) + ((#overlayChips > 1) and 4.0 or 0.0)
-            if isProducer then
-                badgeW = math.max(badgeW, #overlayChips * math.max(44.0, iconSize + 20.0))
-            end
-            local badgeH = isProducer and (iconSize + 18.0) or (iconSize + 6.0)
-            local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
-
-            local ov = CreateRawFast(PATHS.OverlayClass, outer)
-            local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
-            local chipsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
-            if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(chipsHBox) then
-                table.insert(job.mWidgets, ov)
-                pcall(function()
-                    iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.72 })
-                    iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                    local bSlot = ov:AddChildToOverlay(iconBtn)
-                    if Core.IsValidObj(bSlot) then
-                        bSlot:SetHorizontalAlignment(0)
-                        bSlot:SetVerticalAlignment(0)
-                    end
-                    local cSlot = ov:AddChildToOverlay(chipsHBox)
-                    if Core.IsValidObj(cSlot) then
-                        cSlot:SetHorizontalAlignment(2)
-                        cSlot:SetVerticalAlignment(2)
-                    end
-                    chipsHBox:SetVisibility(3)
-
-                    for ci, chip in ipairs(overlayChips) do
-                        local chipVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
-                        local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
-                        if Core.IsValidObj(chipVBox) and Core.IsValidObj(itemW) then
-                            chipVBox:SetVisibility(3)
-                            local iwSlot = chipVBox:AddChildToVerticalBox(itemW)
-                            if Core.IsValidObj(iwSlot) then iwSlot:SetHorizontalAlignment(2) end
-                            itemW.TooltipEnabled = false
-                            itemW:SetVisibility(3)
-                            itemW:SetIconSize(iconSize)
-                            itemW:SetItem(chip.item)
-                            itemW:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
-
-                            if chip.rate ~= nil then
-                                local rTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
-                                if Core.IsValidObj(rTxt) then
-                                    local rtSlot = chipVBox:AddChildToVerticalBox(rTxt)
-                                    if Core.IsValidObj(rtSlot) then rtSlot:SetHorizontalAlignment(2) end
-                                    local rateStr = (chip.rate >= 10.0) and string.format("%.0f/min", chip.rate) or string.format("%.1f/min", chip.rate)
-                                    rTxt:SetVisibility(3)
-                                    rTxt:SetSize(10)
-                                    rTxt:SetText(Core.MakeText(rateStr))
-                                end
-                            end
-
-                            local hbSlot = chipsHBox:AddChildToHorizontalBox(chipVBox)
-                            if Core.IsValidObj(hbSlot) then
-                                hbSlot:SetVerticalAlignment(2)
-                                if ci > 1 then
-                                    hbSlot:SetPadding({ Left = 4.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                                end
-                            end
-                        end
-                    end
-                end)
-
-                local iconParent = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
-                local iconTarget = getOrCreateChunkCanvas(iconChunks, iconParent, job.mwx, job.mwy)
-                local iSlot = iconTarget:AddChildToCanvas(ov)
-                SetCanvasSlot(iSlot, mx, badgeY, badgeW, badgeH, 0.5, 0.5, 40)
-
-                FloorIconButtons[mAddr] = { btn = iconBtn, widget = chipsHBox }
-                local capturedM = m
-                local capturedGroup = chipsHBox
-                Core.RegisterWBPButtonClick(iconBtn, function()
-                    local nowHidden = StationData.ToggleMachineIcon(capturedM)
-                    if Core.IsValidObj(capturedGroup) then
-                        pcall(function()
-                            capturedGroup:SetRenderOpacity(nowHidden and 0.25 or 1.0)
-                        end)
-                    end
-                end)
-            end
-        end
-
         local function pumpMachineBatch()
             if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(mCanvas) then
                 machinePumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.0070
+            local budgetEnd = os.clock() + 0.0035
             local mCount = 0
-            while mQueueIdx <= #visibleMachineQueue and (mCount < 10 or os.clock() < budgetEnd) and mCount < 60 do
+            while mQueueIdx <= #visibleMachineQueue and (mCount < 3 or os.clock() < budgetEnd) and mCount < 14 do
                 processOneMachine(visibleMachineQueue[mQueueIdx])
                 mQueueIdx = mQueueIdx + 1
                 mCount = mCount + 1
             end
             local pCount = 0
-            while pIdx <= #deferredPorts and (pCount < 12 or os.clock() < budgetEnd) and pCount < 64 do
+            while pIdx <= #deferredPorts and (pCount < 4 or os.clock() < budgetEnd) and pCount < 16 do
                 local dp = deferredPorts[pIdx]
                 pIdx = pIdx + 1
                 if dp and dp.track and not dp.track.cancelled then
@@ -4172,20 +4044,8 @@ RefreshStationMapCanvas = function(machinesOnly)
                     pCount = pCount + 1
                 end
             end
-            local iCount = 0
-            if mQueueIdx > #visibleMachineQueue and Perf.LastIconCanvasVisible == true then
-                while iQueueIdx <= #visibleIconQueue and (iCount < 4 or os.clock() < budgetEnd) and iCount < 16 do
-                    local job = visibleIconQueue[iQueueIdx]
-                    iQueueIdx = iQueueIdx + 1
-                    if job and job.track and not job.track.cancelled then
-                        buildOneDeferredIcon(job)
-                        iCount = iCount + 1
-                    end
-                end
-            end
-            local hasMoreIcons = (Perf.LastIconCanvasVisible == true and iQueueIdx <= #visibleIconQueue)
-            if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts or hasMoreIcons then
-                ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
+            if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts then
+                ExecuteInGameThreadAfterFrames(2, pumpMachineBatch)
             else
                 machinePumpRunning = false
             end
@@ -4216,27 +4076,6 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
-            -- 1b. When zoomed in (IconCanvas visible), queue unbuilt icon overlays for visible chunks
-            if Perf.LastIconCanvasVisible == true then
-                for _, ib in pairs(deferredIconsByChunk) do
-                    if ib.unbuilt > 0
-                        and ib.maxX >= vMinX and ib.minX <= vMaxX
-                        and ib.maxY >= vMinY and ib.minY <= vMaxY
-                    then
-                        for i = 1, #ib.items do
-                            local job = ib.items[i]
-                            if not job.queued then
-                                job.queued = true
-                                ib.unbuilt = math.max(0, ib.unbuilt - 1)
-                                if job.track and not job.track.cancelled then
-                                    visibleIconQueue[#visibleIconQueue + 1] = job
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-
             -- 2. Viewport-cull spatial chunk UCanvasPanels (Collapse off-screen chunks in O(chunks))
             for _, ch in pairs(machineChunks) do
                 if Core.IsValidObj(ch.canvas) then
@@ -4257,8 +4096,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
-            local hasMoreIcons = (Perf.LastIconCanvasVisible == true and iQueueIdx <= #visibleIconQueue)
-            if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts or hasMoreIcons) then
+            if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts) then
                 machinePumpRunning = true
                 ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             end
@@ -5026,39 +4864,6 @@ local function HandleMapLeftClick(mx, my, isShift)
         local stampId = tostring(os.clock())
         local staged = {}
         local skippedBlocked = 0
-        -- Pre-index existing PendingGhosts on this floor by 50cm spatial bucket for O(1) duplicate checks
-        local ghostCellBuckets = {}
-        local function addGhostPointToBuckets(px, py)
-            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
-            local k = bx .. "," .. by
-            local list = ghostCellBuckets[k]
-            if not list then list = {}; ghostCellBuckets[k] = list end
-            list[#list + 1] = { x = px, y = py }
-        end
-        local function hasNearbyGhostPoint(px, py)
-            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
-            for dx = -1, 1 do
-                for dy = -1, 1 do
-                    local list = ghostCellBuckets[(bx + dx) .. "," .. (by + dy)]
-                    if list then
-                        for i = 1, #list do
-                            if math.abs(list[i].x - px) < 25.0 and math.abs(list[i].y - py) < 25.0 then
-                                return true
-                            end
-                        end
-                    end
-                end
-            end
-            return false
-        end
-        for _, eg in ipairs(PendingGhosts) do
-            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
-                addGhostPointToBuckets(eg.x, eg.y)
-                if eg.pairX and eg.pairY then
-                    addGhostPointToBuckets(eg.pairX, eg.pairY)
-                end
-            end
-        end
         for _, item in ipairs(Clipboard) do
             if Core.IsValidObj(item.buildable) then
                 local rdx = item.dx * cosA - item.dy * sinA
@@ -5081,10 +4886,22 @@ local function HandleMapLeftClick(mx, my, isShift)
                     local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
                     if allowed then
                         -- Also avoid stacking a duplicate ghost on top of an existing ghost (checking both primary and underground exit endpoints)
-                        local dupGhost = hasNearbyGhostPoint(sx, sy) or (pX ~= nil and pY ~= nil and hasNearbyGhostPoint(pX, pY))
+                        local dupGhost = false
+                        for _, eg in ipairs(PendingGhosts) do
+                            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
+                                local hitMain = math.abs(eg.x - sx) < 25.0 and math.abs(eg.y - sy) < 25.0
+                                local hitEgPair = eg.pairX and eg.pairY and math.abs(eg.pairX - sx) < 25.0 and math.abs(eg.pairY - sy) < 25.0
+                                local hitNewPair = pX and pY and (
+                                    (math.abs(eg.x - pX) < 25.0 and math.abs(eg.y - pY) < 25.0)
+                                    or (eg.pairX and eg.pairY and math.abs(eg.pairX - pX) < 25.0 and math.abs(eg.pairY - pY) < 25.0)
+                                )
+                                if hitMain or hitEgPair or hitNewPair then
+                                    dupGhost = true
+                                    break
+                                end
+                            end
+                        end
                         if not dupGhost then
-                            addGhostPointToBuckets(sx, sy)
-                            if pX and pY then addGhostPointToBuckets(pX, pY) end
                             NextGhostSeq = NextGhostSeq + 1
                             table.insert(staged, {
                                 ghostId = "ghost:" .. tostring(NextGhostSeq),
