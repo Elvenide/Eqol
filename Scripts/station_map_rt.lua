@@ -452,6 +452,8 @@ function RT.CreateFloorRenderer(opts)
     local dirtySet = {}
     local floorVisible = true
     local destroyed = false
+    local scratchRT = nil        -- shared offscreen 1024x1024 RT for flicker-free double-buffered redraws
+    local scratchOwnerKey = nil  -- tile.key currently rendering into scratchRT
 
     -- Sub-phase timing stats for diagnostics
     local stats = {
@@ -625,7 +627,24 @@ function RT.CreateFloorRenderer(opts)
         end
 
         if t.needsClear then
-            pcall(function() krl:ClearRenderTarget2D(worldCtx, t.rt, COL_CLEAR) end)
+            -- If this tile is already visible on screen, double-buffer the full redraw into scratchRT
+            -- and swap atomically on completion so unrelated machines never disappear or visibly rerender!
+            if t.hasRenderedOnce and Core.IsValidObj(t.rt) and Core.IsValidObj(t.img) then
+                if not Core.IsValidObj(scratchRT) then
+                    local okS, srt = CreateRT2D(krl, worldCtx, TILE_PX, TILE_PX)
+                    if okS and Core.IsValidObj(srt) then scratchRT = srt end
+                end
+                if Core.IsValidObj(scratchRT) and (scratchOwnerKey == nil or scratchOwnerKey == t.key) then
+                    scratchOwnerKey = t.key
+                    t.useScratch = true
+                else
+                    t.useScratch = false
+                end
+            else
+                t.useScratch = false
+            end
+            local clearTarget = (t.useScratch and Core.IsValidObj(scratchRT)) and scratchRT or t.rt
+            pcall(function() krl:ClearRenderTarget2D(worldCtx, clearTarget, COL_CLEAR) end)
             t.needsClear = false
             t.addMachines = {}
             t.addLinks = {}
@@ -669,7 +688,8 @@ function RT.CreateFloorRenderer(opts)
             return true, (os.clock() - sliceStart) * 1000.0
         end
 
-        local canvas, ctx = BeginDrawRT(krl, worldCtx, t.rt)
+        local drawTarget = (t.useScratch and Core.IsValidObj(scratchRT)) and scratchRT or t.rt
+        local canvas, ctx = BeginDrawRT(krl, worldCtx, drawTarget)
         if not Core.IsValidObj(canvas) then
             return true, (os.clock() - sliceStart) * 1000.0
         end
@@ -893,6 +913,16 @@ function RT.CreateFloorRenderer(opts)
         if elapsedMs > stats.maxSliceMs then stats.maxSliceMs = elapsedMs end
 
         if ds.phase >= 7 then
+            if t.useScratch and Core.IsValidObj(scratchRT) then
+                local oldRT = t.rt
+                t.rt = scratchRT
+                scratchRT = oldRT
+                t.useScratch = false
+                if scratchOwnerKey == t.key then scratchOwnerKey = nil end
+                if Core.IsValidObj(t.img) and t.img.SetBrushResourceObject then
+                    pcall(function() t.img:SetBrushResourceObject(t.rt) end)
+                end
+            end
             t.hasRenderedOnce = true
             t.drawState = nil
             if #t.addMachines > 0 or #t.addLinks > 0 or #t.addPorts > 0 then
@@ -943,8 +973,10 @@ function RT.CreateFloorRenderer(opts)
         end
     end
 
-    function inst.UpsertMachine(mAddr, drawEntry, portList, deferDirty)
-        inst.RemoveMachine(mAddr, deferDirty)
+    function inst.UpsertMachine(mAddr, drawEntry, portList, deferDirty, inPlaceAdditive)
+        if not inPlaceAdditive then
+            inst.RemoveMachine(mAddr, deferDirty)
+        end
         local hw = drawEntry.rx * cellCm * 0.5 + 40.0
         local hh = drawEntry.ry * cellCm * 0.5 + 40.0
         local minX, maxX = drawEntry.x - hw, drawEntry.x + hw
@@ -1045,16 +1077,27 @@ function RT.CreateFloorRenderer(opts)
     end
 
     -- Draws ONE time-budgeted slice of the highest-priority dirty mega-tile (visible tiles first).
+    -- If a tile is currently double-buffering into scratchRT, finish it first before starting another.
     -- Returns: moreDirty (bool), elapsedMs (number)
     function inst.PumpDirtyTiles(maxSlices, budgetSec)
         if destroyed or #dirtyList == 0 then return false, 0.0 end
-        -- Pick first visible dirty tile; otherwise first dirty tile
         local pickIdx = nil
-        for i = 1, #dirtyList do
-            local t = dirtyList[i]
-            if t.dirty and t.visible then
-                pickIdx = i
-                break
+        if scratchOwnerKey then
+            for i = 1, #dirtyList do
+                if dirtyList[i].key == scratchOwnerKey and dirtyList[i].dirty then
+                    pickIdx = i
+                    break
+                end
+            end
+            if not pickIdx then scratchOwnerKey = nil end
+        end
+        if not pickIdx then
+            for i = 1, #dirtyList do
+                local t = dirtyList[i]
+                if t.dirty and t.visible then
+                    pickIdx = i
+                    break
+                end
             end
         end
         if not pickIdx then
@@ -1108,6 +1151,8 @@ function RT.CreateFloorRenderer(opts)
         machineTiles = {}
         dirtyList = {}
         dirtySet = {}
+        scratchRT = nil
+        scratchOwnerKey = nil
     end
 
     return inst

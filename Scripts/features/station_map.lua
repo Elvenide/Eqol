@@ -4193,7 +4193,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
-            local function indexOneMachineRT(me, deferDirty)
+            local function indexOneMachineRT(me, deferDirty, inPlaceAdditive)
                 local m = me.machine
                 if not Core.IsValidObj(m) then return end
                 local mAddr = m:GetAddress()
@@ -4283,7 +4283,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                         yaw = myaw,
                         cat = "Conveyor",
                         sprite = sprite,
-                    }, nil, deferDirty)
+                    }, nil, deferDirty, inPlaceAdditive)
                     return
                 end
 
@@ -4368,7 +4368,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                     pairX = recEntry.pairX,
                     pairY = recEntry.pairY,
                 }
-                rtFloor.UpsertMachine(mAddr, drawEntry, portList, deferDirty)
+                rtFloor.UpsertMachine(mAddr, drawEntry, portList, deferDirty, inPlaceAdditive)
             end
 
             local function logRTFloorDone()
@@ -4586,8 +4586,24 @@ RefreshStationMapCanvas = function(machinesOnly)
                 if Perf.ActiveRT ~= rtFloor then return end
                 local me = knownByAddr[mAddr]
                 if not me or not Core.IsValidObj(me.machine) then return end
-                removeMachineRT(mAddr)
-                toIndexQueue[#toIndexQueue + 1] = me
+                -- In-place additive update: keep the mega-tile RT intact (no tile wipe!) and redraw
+                -- only this machine's updated icon/recipe chip directly on top of its footprint.
+                for i = #RenderedMachines, 1, -1 do
+                    if RenderedMachines[i].addr == mAddr then
+                        Perf.RemoveMachine(RenderedMachines[i])
+                        table.remove(RenderedMachines, i)
+                    end
+                end
+                for i = #RenderedConveyors, 1, -1 do
+                    if RenderedConveyors[i].addr == mAddr then table.remove(RenderedConveyors, i) end
+                end
+                for i = #RenderedPorts, 1, -1 do
+                    if RenderedPorts[i].ownerAddr == mAddr then
+                        Perf.RemovePort(RenderedPorts[i])
+                        table.remove(RenderedPorts, i)
+                    end
+                end
+                indexOneMachineRT(me, false, true)
                 startRTPump()
             end
 
