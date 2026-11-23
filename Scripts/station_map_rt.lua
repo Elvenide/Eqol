@@ -141,6 +141,19 @@ local function EndDrawRT(krl, worldCtx, ctx)
     end)
 end
 
+local function CreateRT2D(krl, worldCtx, w, h)
+    -- UE 5.7 CreateRenderTarget2D takes 7 params (added bSupportUAVs=false); fallback to 6 params for older UE
+    local ok, rt = pcall(function()
+        return krl:CreateRenderTarget2D(worldCtx, w, h, RTF_RGBA8, COL_CLEAR, false, false)
+    end)
+    if ok and Core.IsValidObj(rt) then return true, rt end
+    local ok6, rt6 = pcall(function()
+        return krl:CreateRenderTarget2D(worldCtx, w, h, RTF_RGBA8, COL_CLEAR, false)
+    end)
+    if ok6 and Core.IsValidObj(rt6) then return true, rt6 end
+    return false, rt or rt6
+end
+
 -- Probes once whether UE 5.7 BeginDrawCanvasToRenderTarget works cleanly in UE4SS
 function RT.IsSupported(worldCtx)
     if ProbeDone then return ProbeSucceeded end
@@ -155,9 +168,7 @@ function RT.IsSupported(worldCtx)
         return false
     end
 
-    local okRT, testRT = pcall(function()
-        return krl:CreateRenderTarget2D(worldCtx, 64, 64, RTF_RGBA8, COL_CLEAR, false)
-    end)
+    local okRT, testRT = CreateRT2D(krl, worldCtx, 64, 64)
     if not okRT or not Core.IsValidObj(testRT) then
         Core.Log("[StationMapRT] Probe failed: CreateRenderTarget2D err=" .. tostring(testRT))
         return false
@@ -373,9 +384,7 @@ function RT.CreateFloorRenderer(opts)
 
     local function ensureTileWidget(t)
         if Core.IsValidObj(t.rt) and Core.IsValidObj(t.img) then return true end
-        local okRT, rt = pcall(function()
-            return krl:CreateRenderTarget2D(worldCtx, TILE_PX, TILE_PX, RTF_RGBA8, COL_CLEAR, false)
-        end)
+        local okRT, rt = CreateRT2D(krl, worldCtx, TILE_PX, TILE_PX)
         if not okRT or not Core.IsValidObj(rt) then return false end
 
         if not Core.IsValidObj(CachedImageCls) then
@@ -743,6 +752,10 @@ function RT.CreateFloorRenderer(opts)
         end
 
         dirtyList = nextDirty
+        return #dirtyList > 0
+    end
+
+    function inst.HasDirtyTiles()
         return #dirtyList > 0
     end
 

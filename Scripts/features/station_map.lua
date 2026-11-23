@@ -3710,7 +3710,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
 
             local function pumpRT()
-                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(ActiveMapWin) then
+                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then
                     rtPumpRunning = false
                     return
                 end
@@ -3738,10 +3738,10 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
 
             OnViewportChangedMachines = function()
-                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor then return end
+                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
                 local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRectRT()
                 rtFloor.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
-                if idxCursor <= #toIndexQueue then
+                if idxCursor <= #toIndexQueue or (rtFloor.HasDirtyTiles and rtFloor.HasDirtyTiles()) then
                     startRTPump()
                 end
             end
