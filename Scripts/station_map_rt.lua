@@ -1,6 +1,7 @@
--- Eqol Station Map Tiled RenderTarget2D (UCanvas) Renderer
--- Replaces thousands of UMG Border/Image/UserWidget instances with a small grid of GPU
--- UTextureRenderTarget2D tiles (1 UImage per 16x16 cell tile) drawn via native UCanvas C++ calls.
+-- Eqol Station Map Progressive Mega-Tile RenderTarget2D (UCanvas) Renderer
+-- Replaces thousands of UMG widgets with a small grid of GPU UTextureRenderTarget2D mega-tiles
+-- (1 UImage per 24x24 cell tile = ~4-16 tiles for an entire floor), drawn progressively with a
+-- strict per-frame time budget checked INSIDE each draw loop and merged straight conveyor runs.
 -- 100% save-safe, zero cooked assets, automatic fallback to UMG if BeginDrawCanvasToRenderTarget is unavailable.
 
 local Core = require("core")
@@ -8,8 +9,8 @@ local StationData = require("station_data")
 
 local RT = {}
 
-RT.TILE_WORLD_CM = 800.0  -- 8x8 station cells per tile (4x faster per-tile draw & RT alloc)
-RT.TILE_PX       = 384    -- 48 px/cell (~0.56 MB VRAM per active tile, crisp 1:1 sharpness)
+RT.TILE_WORLD_CM = 2400.0 -- 24x24 station cells per mega-tile (~4-16 tiles per floor)
+RT.TILE_PX       = 1024   -- ~42.67 px/cell (~4 MB VRAM per active mega-tile, crisp sharpness)
 RT.PX_PER_CM     = RT.TILE_PX / RT.TILE_WORLD_CM
 
 local UV0          = { X = 0.0, Y = 0.0 }
@@ -19,18 +20,25 @@ local TMP_POS      = { X = 0.0, Y = 0.0 }
 local TMP_SIZE     = { X = 0.0, Y = 0.0 }
 local TMP_P1       = { X = 0.0, Y = 0.0 }
 local TMP_P2       = { X = 0.0, Y = 0.0 }
+local TMP_SCALE    = { X = 0.62, Y = 0.62 }
+local TMP_SHAD_OFF = { X = 1.0, Y = 1.0 }
 local COL_WHITE    = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
 local COL_CLEAR    = { R = 0.0, G = 0.0, B = 0.0, A = 0.0 }
 local COL_SHADOW   = { R = 0.0, G = 0.0, B = 0.0, A = 0.85 }
-local COL_OUTLINE  = { R = 0.0, G = 0.0, B = 0.0, A = 0.90 }
 local COL_CHIP_BG  = { R = 0.03, G = 0.04, B = 0.06, A = 0.78 }
 local COL_PORT_OUT = { R = 0.0, G = 0.0, B = 0.0, A = 0.98 }
 local COL_PORT_IN  = { R = 0.08, G = 0.10, B = 0.14, A = 0.90 }
 local COL_CHEVRON  = { R = 1.0, G = 0.86, B = 0.14, A = 0.98 }
-local COL_GRID_MIN = { R = 0.24, G = 0.29, B = 0.37, A = 0.30 }
-local COL_GRID_MAJ = { R = 0.30, G = 0.37, B = 0.48, A = 0.50 }
+local COL_RAIL     = { R = 0.05, G = 0.06, B = 0.08, A = 0.98 }
+local COL_DEF_BDR  = { R = 0.08, G = 0.10, B = 0.14, A = 1.0 }
 local BLEND_TRANSLUCENT = 2 -- EBlendMode::BLEND_Translucent
 local RTF_RGBA8 = 6         -- ETextureRenderTargetFormat::RTF_RGBA8
+
+local BELT_BG_BY_TIER = {
+    [1] = { R = 0.22,        G = 0.24,        B = 0.27,        A = 0.96 },
+    [2] = { R = 0.22 * 0.78, G = 0.24 * 0.78, B = 0.27 * 0.78, A = 0.96 },
+    [3] = { R = 0.22 * 0.62, G = 0.24 * 0.62, B = 0.27 * 0.62, A = 0.96 },
+}
 
 local CachedKRL = nil
 local CachedWhiteTex = nil
@@ -185,7 +193,9 @@ function RT.IsSupported(worldCtx)
     end
 
     local okDraw, drawErr = pcall(function()
-        canvas:K2_DrawLine({ X = 0.0, Y = 0.0 }, { X = 10.0, Y = 10.0 }, 1.0, COL_WHITE)
+        TMP_P1.X = 0.0; TMP_P1.Y = 0.0
+        TMP_P2.X = 10.0; TMP_P2.Y = 10.0
+        canvas:K2_DrawLine(TMP_P1, TMP_P2, 1.0, COL_WHITE)
     end)
     EndDrawRT(krl, worldCtx, ctx)
 
@@ -205,11 +215,10 @@ end
 function RT.ResetCaches()
     ItemTexCache = {}
     CachedImageCls = nil
-    -- Keep ProbeDone/ProbeSucceeded, whiteTex, font across floor switches
 end
 
 --------------------------------------------------------------------------------
--- Canvas Drawing Primitives (Tile Pixel Space)
+-- Canvas Drawing Primitives (Tile Pixel Space, Zero Per-Call Table Allocations)
 --------------------------------------------------------------------------------
 
 local function DrawFilledRect(canvas, whiteTex, cx, cy, w, h, col, angleDeg)
@@ -254,7 +263,7 @@ local function DrawLine(canvas, x1, y1, x2, y2, thickness, col)
     canvas:K2_DrawLine(TMP_P1, TMP_P2, thickness, col)
 end
 
-local function DrawChevron(canvas, whiteTex, cx, cy, armLen, armThick, yawDeg, col)
+local function DrawChevron(canvas, cx, cy, armLen, armThick, yawDeg, col)
     local rad = math.rad(yawDeg or 0.0)
     local cosA, sinA = math.cos(rad), math.sin(rad)
     local tipX = cx + armLen * 0.35 * cosA
@@ -287,7 +296,7 @@ local function DrawDashedLine(canvas, x1, y1, x2, y2, col, thickness, dashLen, g
     end
 end
 
-local function DrawSplitterOrBalancerChevrons(canvas, whiteTex, mx, my, pxW, pxH, yawDeg, clsLow)
+local function DrawSplitterOrBalancerChevrons(canvas, mx, my, pxW, pxH, yawDeg, clsLow)
     local isSplitter = clsLow:find("splitter", 1, true) ~= nil
     local isBalancer = clsLow:find("balancer", 1, true) ~= nil
     if not isSplitter and not isBalancer then return end
@@ -308,27 +317,111 @@ local function DrawSplitterOrBalancerChevrons(canvas, whiteTex, mx, my, pxW, pxH
         local edgeX = unrotW * 0.38
         local edgeY = unrotH * 0.38
         local bx, by = toTile(-edgeX, 0.0)
-        DrawChevron(canvas, whiteTex, bx, by, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
+        DrawChevron(canvas, bx, by, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
         local fx, fy = toTile(edgeX, 0.0)
-        DrawChevron(canvas, whiteTex, fx, fy, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
+        DrawChevron(canvas, fx, fy, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
         local lx, ly = toTile(0.0, -edgeY)
-        DrawChevron(canvas, whiteTex, lx, ly, armLen, armThick, (yawDeg or 0.0) - 90.0, COL_CHEVRON)
+        DrawChevron(canvas, lx, ly, armLen, armThick, (yawDeg or 0.0) - 90.0, COL_CHEVRON)
         local rx, ry = toTile(0.0, edgeY)
-        DrawChevron(canvas, whiteTex, rx, ry, armLen, armThick, (yawDeg or 0.0) + 90.0, COL_CHEVRON)
+        DrawChevron(canvas, rx, ry, armLen, armThick, (yawDeg or 0.0) + 90.0, COL_CHEVRON)
     elseif isBalancer then
         local edgeX = unrotW * 0.36
         local laneY = unrotH * 0.25
         for _, sideSign in ipairs({ -1.0, 1.0 }) do
             local ix, iy = toTile(-edgeX, sideSign * laneY)
-            DrawChevron(canvas, whiteTex, ix, iy, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
+            DrawChevron(canvas, ix, iy, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
             local ox, oy = toTile(edgeX, sideSign * laneY)
-            DrawChevron(canvas, whiteTex, ox, oy, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
+            DrawChevron(canvas, ox, oy, armLen, armThick, yawDeg or 0.0, COL_CHEVRON)
         end
     end
 end
 
+-- Merges contiguous straight same-tier, same-direction conveyor belts inside a tile into runs
+-- so a 10-cell belt line draws 2 rects instead of 20.
+local function BuildMergedBeltRuns(rawBelts, cellCm)
+    local runs = {}
+    if #rawBelts == 0 then return runs end
+
+    local groups = {} -- key -> { belt1, belt2, ... }
+    for i = 1, #rawBelts do
+        local m = rawBelts[i]
+        local tier = (m.sprite and m.sprite.tier) or 1
+        local norm = (math.floor((m.yaw or 0.0) / 90.0 + 0.5) % 4 + 4) % 4
+        local isVert = (norm == 1 or norm == 3)
+        -- Only merge standard 1x1 belts
+        if (m.rx or 1) == 1 and (m.ry or 1) == 1 then
+            local laneKey = math.floor((isVert and m.x or m.y) / 25.0 + 0.5)
+            local gKey = tier .. ":" .. norm .. ":" .. laneKey
+            local g = groups[gKey]
+            if not g then
+                g = { tier = tier, norm = norm, isVert = isVert, yaw = m.yaw or 0.0, items = {} }
+                groups[gKey] = g
+            end
+            g.items[#g.items + 1] = m
+        else
+            runs[#runs + 1] = {
+                tier = tier, norm = norm, isVert = isVert, yaw = m.yaw or 0.0,
+                cx = m.x, cy = m.y, spanX = (m.rx or 1) * cellCm, spanY = (m.ry or 1) * cellCm,
+                cells = { { x = m.x, y = m.y } },
+            }
+        end
+    end
+
+    local maxGap = cellCm + 12.0
+    for _, g in pairs(groups) do
+        local items = g.items
+        if g.isVert then
+            table.sort(items, function(a, b) return a.y < b.y end)
+        else
+            table.sort(items, function(a, b) return a.x < b.x end)
+        end
+
+        local curStart = items[1]
+        local curEnd = items[1]
+        local curCells = { { x = curStart.x, y = curStart.y } }
+        local function flushRun()
+            if g.isVert then
+                local minY = curStart.y - cellCm * 0.5
+                local maxY = curEnd.y + cellCm * 0.5
+                runs[#runs + 1] = {
+                    tier = g.tier, norm = g.norm, isVert = true, yaw = g.yaw,
+                    cx = curStart.x, cy = (minY + maxY) * 0.5,
+                    spanX = cellCm, spanY = math.max(cellCm, maxY - minY),
+                    cells = curCells,
+                }
+            else
+                local minX = curStart.x - cellCm * 0.5
+                local maxX = curEnd.x + cellCm * 0.5
+                runs[#runs + 1] = {
+                    tier = g.tier, norm = g.norm, isVert = false, yaw = g.yaw,
+                    cx = (minX + maxX) * 0.5, cy = curStart.y,
+                    spanX = math.max(cellCm, maxX - minX), spanY = cellCm,
+                    cells = curCells,
+                }
+            end
+        end
+
+        for i = 2, #items do
+            local m = items[i]
+            local gap = g.isVert and (m.y - curEnd.y) or (m.x - curEnd.x)
+            if gap <= maxGap and gap >= 1.0 then
+                curEnd = m
+                curCells[#curCells + 1] = { x = m.x, y = m.y }
+            else
+                flushRun()
+                curStart = m
+                curEnd = m
+                curCells = { { x = m.x, y = m.y } }
+            end
+        end
+        flushRun()
+    end
+
+    return runs
+end
+
 --------------------------------------------------------------------------------
--- Tiled Floor Renderer Instance
+-- Progressive Mega-Tile Floor Renderer Instance
 --------------------------------------------------------------------------------
 
 function RT.CreateFloorRenderer(opts)
@@ -337,8 +430,6 @@ function RT.CreateFloorRenderer(opts)
     local parentCanvas   = opts.parentCanvas
     local basePxPerCm    = opts.basePxPerCm
     local cellCm         = opts.cellCm or 100.0
-    local gridOriginX    = opts.gridOriginX or 0.0
-    local gridOriginY    = opts.gridOriginY or 0.0
     local colors         = opts.colors
     local getTierArrow   = opts.getTierArrowColor
     local getMachineCol  = opts.getMachineColor
@@ -348,18 +439,32 @@ function RT.CreateFloorRenderer(opts)
         return nil
     end
 
-    local TILE_CM   = RT.TILE_WORLD_CM
-    local TILE_PX   = RT.TILE_PX
-    local PX_PER_CM = RT.PX_PER_CM
+    local TILE_CM      = RT.TILE_WORLD_CM
+    local TILE_PX      = RT.TILE_PX
+    local PX_PER_CM    = RT.PX_PER_CM
     local TILE_BASE_PX = TILE_CM * basePxPerCm
-    local CELL_PX   = cellCm * PX_PER_CM
-    local PORT_PX   = math.max(14.0, CELL_PX * 0.56)
+    local CELL_PX      = cellCm * PX_PER_CM
+    local PORT_PX      = math.max(14.0, CELL_PX * 0.56)
 
-    local tiles = {} -- "tx,ty" -> { tx, ty, key, minX, maxX, minY, maxY, rt, img, visible, dirty, platforms, walls, machines, links, ports }
-    local machineTiles = {} -- mAddr -> { tile1, tile2, ... } for O(1) RemoveMachine
+    local tiles = {}        -- "tx,ty" -> tile
+    local machineTiles = {} -- mAddr -> { tile1, ... }
     local dirtyList = {}
     local dirtySet = {}
+    local floorVisible = true
     local destroyed = false
+
+    -- Sub-phase timing stats for diagnostics
+    local stats = {
+        allocMs = 0.0,
+        wallsMs = 0.0,
+        beltsMs = 0.0,
+        machinesMs = 0.0,
+        endMs = 0.0,
+        slices = 0,
+        maxSliceMs = 0.0,
+        rawBelts = 0,
+        beltRuns = 0,
+    }
 
     local function tileKey(tx, ty) return tx .. "," .. ty end
 
@@ -380,40 +485,46 @@ function RT.CreateFloorRenderer(opts)
             img = nil,
             visible = true,
             dirty = false,
-            platforms = {},
+            needsClear = true,
+            drawState = nil, -- progressive draw cursor for multi-frame non-clearing slicing
             walls = {},
-            machines = {}, -- mAddr -> drawEntry
-            links = {},    -- pKey -> linkEntry
-            ports = {},    -- mAddr -> { { x, y }, ... }
+            machines = {},   -- mAddr -> drawEntry
+            links = {},      -- pKey -> linkEntry
+            ports = {},      -- mAddr -> { { x, y }, ... }
         }
         tiles[key] = t
         return t
     end
 
     local function markTileDirty(t)
-        if not t or t.dirty then return end
-        t.dirty = true
-        if not dirtySet[t.key] then
-            dirtySet[t.key] = true
-            dirtyList[#dirtyList + 1] = t
+        if not t then return end
+        t.needsClear = true
+        t.drawState = nil
+        if not t.dirty then
+            t.dirty = true
+            if not dirtySet[t.key] then
+                dirtySet[t.key] = true
+                dirtyList[#dirtyList + 1] = t
+            end
         end
     end
 
     local function ensureTileWidget(t)
-        if Core.IsValidObj(t.rt) and Core.IsValidObj(t.img) then return true end
+        if Core.IsValidObj(t.rt) and Core.IsValidObj(t.img) then return true, 0.0 end
+        local t0 = os.clock()
         local okRT, rt = CreateRT2D(krl, worldCtx, TILE_PX, TILE_PX)
-        if not okRT or not Core.IsValidObj(rt) then return false end
+        if not okRT or not Core.IsValidObj(rt) then return false, 0.0 end
 
         if not Core.IsValidObj(CachedImageCls) then
             CachedImageCls = Core.FindOrLoadClass("/Script/UMG.Image")
         end
-        if not Core.IsValidObj(CachedImageCls) then return false end
+        if not Core.IsValidObj(CachedImageCls) then return false, 0.0 end
 
         local okI, img = pcall(StaticConstructObject, CachedImageCls, outer)
-        if not okI or not Core.IsValidObj(img) then return false end
+        if not okI or not Core.IsValidObj(img) then return false, 0.0 end
 
         pcall(function()
-            img:SetVisibility(t.visible and 3 or 1)
+            img:SetVisibility((floorVisible and t.visible) and 3 or 1)
             if img.SetBrushResourceObject then
                 img:SetBrushResourceObject(rt)
             end
@@ -425,7 +536,6 @@ function RT.CreateFloorRenderer(opts)
                 slot:SetAnchors({ Minimum = { X = 0.0, Y = 0.0 }, Maximum = { X = 0.0, Y = 0.0 } })
                 slot:SetAlignment({ X = 0.0, Y = 0.0 })
                 slot:SetPosition({ X = t.tx * TILE_BASE_PX, Y = t.ty * TILE_BASE_PX })
-                -- +0.5px overlap prevents subpixel hairlines between adjacent tiles when scaled
                 slot:SetSize({ X = TILE_BASE_PX + 0.5, Y = TILE_BASE_PX + 0.5 })
                 slot:SetZOrder(2)
             end
@@ -433,7 +543,10 @@ function RT.CreateFloorRenderer(opts)
 
         t.rt = rt
         t.img = img
-        return true
+        t.needsClear = true
+        local dtMs = (os.clock() - t0) * 1000.0
+        stats.allocMs = stats.allocMs + dtMs
+        return true, dtMs
     end
 
     local function forEachOverlappingTile(minX, maxX, minY, maxY, createIfMissing, fn)
@@ -449,68 +562,172 @@ function RT.CreateFloorRenderer(opts)
         end
     end
 
-    local function drawTileNow(t)
-        if destroyed or not t then return false end
-        if not ensureTileWidget(t) then return false end
+    local function buildTileDrawState(t)
+        local rawBelts = {}
+        local otherMachines = {}
+        for _, m in pairs(t.machines) do
+            if m.cat == "Conveyor" then
+                rawBelts[#rawBelts + 1] = m
+            else
+                otherMachines[#otherMachines + 1] = m
+            end
+        end
+        local beltRuns = BuildMergedBeltRuns(rawBelts, cellCm)
+        stats.rawBelts = stats.rawBelts + #rawBelts
+        stats.beltRuns = stats.beltRuns + #beltRuns
 
-        pcall(function() krl:ClearRenderTarget2D(worldCtx, t.rt, COL_CLEAR) end)
+        local linkList = {}
+        for _, lk in pairs(t.links) do linkList[#linkList + 1] = lk end
+
+        local portFlat = {}
+        for _, plist in pairs(t.ports) do
+            for i = 1, #plist do portFlat[#portFlat + 1] = plist[i] end
+        end
+
+        return {
+            phase = 1, -- 1=wallBdr, 2=wallFill, 3=belts, 4=machines, 5=links, 6=ports, 7=done
+            idx = 1,
+            walls = t.walls,
+            beltRuns = beltRuns,
+            machines = otherMachines,
+            links = linkList,
+            ports = portFlat,
+        }
+    end
+
+    -- Progressively draws a strict time-budgeted slice of tile `t` without clearing between slices.
+    -- Returns: finished (bool), elapsedMs (number)
+    local function drawTileSlice(t, budgetSec)
+        if destroyed or not t then return true, 0.0 end
+        local sliceStart = os.clock()
+        local budgetEnd = sliceStart + (budgetSec or 0.0025)
+
+        local okW, allocMs = ensureTileWidget(t)
+        if not okW then return true, (os.clock() - sliceStart) * 1000.0 end
+        -- If we just created a brand-new 1024x1024 RT and it took >1.5ms, yield until next frame
+        -- so GPU texture allocation and canvas drawing never stack on the same frame.
+        if allocMs > 1.5 then
+            stats.slices = stats.slices + 1
+            if allocMs > stats.maxSliceMs then stats.maxSliceMs = allocMs end
+            return false, allocMs
+        end
+
+        if t.needsClear then
+            pcall(function() krl:ClearRenderTarget2D(worldCtx, t.rt, COL_CLEAR) end)
+            t.needsClear = false
+            t.drawState = buildTileDrawState(t)
+        elseif not t.drawState then
+            t.drawState = buildTileDrawState(t)
+        end
+
+        local ds = t.drawState
+        if ds.phase >= 7 then
+            t.dirty = false
+            return true, (os.clock() - sliceStart) * 1000.0
+        end
+
         local canvas, ctx = BeginDrawRT(krl, worldCtx, t.rt)
-        if not Core.IsValidObj(canvas) then return false end
+        if not Core.IsValidObj(canvas) then
+            return true, (os.clock() - sliceStart) * 1000.0
+        end
 
         local whiteTex = GetWhiteTex()
         local fontObj = GetDrawFont()
         local ox, oy = t.minX, t.minY
+        local wallPad = 11.0 * (PX_PER_CM / basePxPerCm)
+        local innerPortSz = math.max(6.0, PORT_PX - 4.0)
 
         pcall(function()
-            -- Platforms & zoom-adaptive crisp grid are rendered on MapCanvas beneath these transparent RT tiles.
-            -- 1. Interior walls (2-pass border + fill so adjacent segments merge cleanly)
-            local wallPad = 11.0 * (PX_PER_CM / basePxPerCm)
-            for i = 1, #t.walls do
-                local w = t.walls[i]
-                local wx = (w.cx - ox) * PX_PER_CM
-                local wy = (w.cy - oy) * PX_PER_CM
-                local ww = math.max(2.0, w.w * PX_PER_CM)
-                local wh = math.max(2.0, w.h * PX_PER_CM)
-                DrawFilledRect(canvas, whiteTex, wx, wy, ww + wallPad, wh + wallPad, colors.WallBorder, 0.0)
-            end
-            for i = 1, #t.walls do
-                local w = t.walls[i]
-                local wx = (w.cx - ox) * PX_PER_CM
-                local wy = (w.cy - oy) * PX_PER_CM
-                local ww = math.max(2.0, w.w * PX_PER_CM)
-                local wh = math.max(2.0, w.h * PX_PER_CM)
-                DrawFilledRect(canvas, whiteTex, wx, wy, ww + 1.0, wh + 1.0, colors.WallFill, 0.0)
+            local ops = 0
+
+            -- Phase 1: Wall borders
+            if ds.phase == 1 then
+                local tw0 = os.clock()
+                local walls = ds.walls
+                while ds.idx <= #walls do
+                    local w = walls[ds.idx]
+                    ds.idx = ds.idx + 1
+                    ops = ops + 1
+                    local wx = (w.cx - ox) * PX_PER_CM
+                    local wy = (w.cy - oy) * PX_PER_CM
+                    local ww = math.max(2.0, w.w * PX_PER_CM)
+                    local wh = math.max(2.0, w.h * PX_PER_CM)
+                    DrawFilledRect(canvas, whiteTex, wx, wy, ww + wallPad, wh + wallPad, colors.WallBorder, 0.0)
+                    if ops >= 24 and os.clock() >= budgetEnd then break end
+                end
+                stats.wallsMs = stats.wallsMs + (os.clock() - tw0) * 1000.0
+                if ds.idx > #walls then ds.phase = 2; ds.idx = 1 end
             end
 
-            -- 4. Machines & Conveyors
-            for _, m in pairs(t.machines) do
-                local mx = (m.x - ox) * PX_PER_CM
-                local my = (m.y - oy) * PX_PER_CM
-                local pxW = math.max(8.0, m.rx * CELL_PX)
-                local pxH = math.max(8.0, m.ry * CELL_PX)
-                local fillW = math.max(6.0, pxW - 2.0)
-                local fillH = math.max(6.0, pxH - 2.0)
-                local sp = m.sprite
+            -- Phase 2: Wall fills
+            if ds.phase == 2 and (ops == 0 or os.clock() < budgetEnd) then
+                local tw0 = os.clock()
+                local walls = ds.walls
+                while ds.idx <= #walls do
+                    local w = walls[ds.idx]
+                    ds.idx = ds.idx + 1
+                    ops = ops + 1
+                    local wx = (w.cx - ox) * PX_PER_CM
+                    local wy = (w.cy - oy) * PX_PER_CM
+                    local ww = math.max(2.0, w.w * PX_PER_CM)
+                    local wh = math.max(2.0, w.h * PX_PER_CM)
+                    DrawFilledRect(canvas, whiteTex, wx, wy, ww + 1.0, wh + 1.0, colors.WallFill, 0.0)
+                    if ops >= 24 and os.clock() >= budgetEnd then break end
+                end
+                stats.wallsMs = stats.wallsMs + (os.clock() - tw0) * 1000.0
+                if ds.idx > #walls then ds.phase = 3; ds.idx = 1 end
+            end
 
-                if m.cat == "Conveyor" then
-                    local tier = (sp and sp.tier) or 1
-                    local td = (tier == 1) and 1.0 or ((tier == 2) and 0.78 or 0.62)
-                    local bgCol = { R = 0.22 * td, G = 0.24 * td, B = 0.27 * td, A = 0.96 }
-                    local railCol = { R = 0.05, G = 0.06, B = 0.08, A = 0.98 }
-                    local arrowCol = getTierArrow(tier)
-                    local norm = (math.floor((m.yaw or 0.0) / 90.0 + 0.5) % 4 + 4) % 4
-                    local isVert = (norm == 1 or norm == 3)
-                    local railThick = math.max(2.0, math.min(fillW, fillH) * 0.12)
-                    local bedW = isVert and math.max(4.0, fillW - railThick * 2.0) or fillW
-                    local bedH = isVert and fillH or math.max(4.0, fillH - railThick * 2.0)
-                    DrawFilledRect(canvas, whiteTex, mx, my, fillW, fillH, railCol, 0.0)
-                    DrawFilledRect(canvas, whiteTex, mx, my, bedW, bedH, bgCol, 0.0)
-                    local armLen = math.max(6.0, math.min(pxW, pxH) * 0.30)
-                    local armThick = math.max(1.8, math.min(2.8, math.min(pxW, pxH) * 0.065))
-                    DrawChevron(canvas, whiteTex, mx, my, armLen, armThick, m.yaw or 0.0, arrowCol)
-                else
+            -- Phase 3: Merged straight conveyor belt runs
+            if ds.phase == 3 and (ops == 0 or os.clock() < budgetEnd) then
+                local tb0 = os.clock()
+                local runs = ds.beltRuns
+                local armLen = math.max(6.0, CELL_PX * 0.30)
+                local armThick = math.max(1.8, math.min(2.6, CELL_PX * 0.065))
+                local railThick = math.max(2.0, CELL_PX * 0.12)
+                while ds.idx <= #runs do
+                    local r = runs[ds.idx]
+                    ds.idx = ds.idx + 1
+                    ops = ops + 1
+                    local rx = (r.cx - ox) * PX_PER_CM
+                    local ry = (r.cy - oy) * PX_PER_CM
+                    local rw = math.max(6.0, r.spanX * PX_PER_CM - 2.0)
+                    local rh = math.max(6.0, r.spanY * PX_PER_CM - 2.0)
+                    local bgCol = BELT_BG_BY_TIER[r.tier] or BELT_BG_BY_TIER[1]
+                    local arrowCol = getTierArrow(r.tier)
+                    local bedW = r.isVert and math.max(4.0, rw - railThick * 2.0) or rw
+                    local bedH = r.isVert and rh or math.max(4.0, rh - railThick * 2.0)
+                    DrawFilledRect(canvas, whiteTex, rx, ry, rw, rh, COL_RAIL, 0.0)
+                    DrawFilledRect(canvas, whiteTex, rx, ry, bedW, bedH, bgCol, 0.0)
+                    local cells = r.cells
+                    for ci = 1, #cells do
+                        local c = cells[ci]
+                        DrawChevron(canvas, (c.x - ox) * PX_PER_CM, (c.y - oy) * PX_PER_CM, armLen, armThick, r.yaw, arrowCol)
+                    end
+                    if ops >= 8 and os.clock() >= budgetEnd then break end
+                end
+                stats.beltsMs = stats.beltsMs + (os.clock() - tb0) * 1000.0
+                if ds.idx > #runs then ds.phase = 4; ds.idx = 1 end
+            end
+
+            -- Phase 4: Non-conveyor machines, sprites, and item/rate chips
+            if ds.phase == 4 and (ops == 0 or os.clock() < budgetEnd) then
+                local tm0 = os.clock()
+                local machines = ds.machines
+                while ds.idx <= #machines do
+                    local m = machines[ds.idx]
+                    ds.idx = ds.idx + 1
+                    ops = ops + 1
+                    local mx = (m.x - ox) * PX_PER_CM
+                    local my = (m.y - oy) * PX_PER_CM
+                    local pxW = math.max(8.0, m.rx * CELL_PX)
+                    local pxH = math.max(8.0, m.ry * CELL_PX)
+                    local fillW = math.max(6.0, pxW - 2.0)
+                    local fillH = math.max(6.0, pxH - 2.0)
+                    local sp = m.sprite
                     local bgCol = (sp and sp.bgCol) or getMachineCol(m.cat)
-                    local bdrCol = (sp and sp.borderCol) or { R = 0.08, G = 0.10, B = 0.14, A = 1.0 }
+                    local bdrCol = (sp and sp.borderCol) or COL_DEF_BDR
+
                     DrawFilledRect(canvas, whiteTex, mx, my, pxW, pxH, bdrCol, 0.0)
                     DrawFilledRect(canvas, whiteTex, mx, my, fillW, fillH, bgCol, 0.0)
 
@@ -530,11 +747,11 @@ function RT.CreateFloorRenderer(opts)
                     end
 
                     if m.clsLow and (m.clsLow:find("splitter", 1, true) or m.clsLow:find("balancer", 1, true)) then
-                        DrawSplitterOrBalancerChevrons(canvas, whiteTex, mx, my, pxW, pxH, m.yaw or 0.0, m.clsLow)
+                        DrawSplitterOrBalancerChevrons(canvas, mx, my, pxW, pxH, m.yaw or 0.0, m.clsLow)
                     elseif m.isUnderground then
                         local arrowCol = getTierArrow(sp and sp.tier or 1)
                         local armLen = math.max(6.0, math.min(pxW, pxH) * 0.34)
-                        DrawChevron(canvas, whiteTex, mx, my, armLen, 2.4, m.yaw or 0.0, arrowCol)
+                        DrawChevron(canvas, mx, my, armLen, 2.4, m.yaw or 0.0, arrowCol)
                         if m.drawExitPair and m.pairX and m.pairY then
                             local omx = (m.pairX - ox) * PX_PER_CM
                             local omy = (m.pairY - oy) * PX_PER_CM
@@ -544,11 +761,10 @@ function RT.CreateFloorRenderer(opts)
                                 local rot = (sp.directional and math.abs(m.yaw or 0.0) > 0.1) and m.yaw or 0.0
                                 DrawSprite(canvas, sp.tex, omx, omy, math.min(fillW, fillH) * 0.82, math.min(fillW, fillH) * 0.82, COL_WHITE, rot)
                             end
-                            DrawChevron(canvas, whiteTex, omx, omy, armLen, 2.4, m.yaw or 0.0, arrowCol)
+                            DrawChevron(canvas, omx, omy, armLen, 2.4, m.yaw or 0.0, arrowCol)
                         end
                     end
 
-                    -- Bottom item/rate chip overlay (pure UCanvas — zero Blueprint UserWidgets!)
                     if hasChips then
                         local chips = m.overlayChips
                         local nChips = #chips
@@ -570,53 +786,81 @@ function RT.CreateFloorRenderer(opts)
                             end
                             if chip.rate ~= nil and Core.IsValidObj(fontObj) then
                                 local rateStr = (chip.rate >= 10.0) and string.format("%.0f/m", chip.rate) or string.format("%.1f/m", chip.rate)
+                                TMP_POS.X = cx
+                                TMP_POS.Y = badgeY + badgeH * 0.5 - 7.0
+                                -- bOutlined=false avoids expensive UE Canvas font outline baking spikes
                                 canvas:K2_DrawText(
                                     fontObj, rateStr,
-                                    { X = cx, Y = badgeY + badgeH * 0.5 - 7.0 },
-                                    { X = 0.62, Y = 0.62 },
-                                    COL_WHITE, 0.0, COL_SHADOW, { X = 1.0, Y = 1.0 },
-                                    true, true, true, COL_OUTLINE
+                                    TMP_POS, TMP_SCALE,
+                                    COL_WHITE, 0.0, COL_SHADOW, TMP_SHAD_OFF,
+                                    true, true, false, COL_CLEAR
                                 )
                             end
                         end
                     end
+                    if ops >= 6 and os.clock() >= budgetEnd then break end
                 end
+                stats.machinesMs = stats.machinesMs + (os.clock() - tm0) * 1000.0
+                if ds.idx > #machines then ds.phase = 5; ds.idx = 1 end
             end
 
-            -- 5. Underground belt dashed link lines
-            for _, lk in pairs(t.links) do
-                local x1 = (lk.x1 - ox) * PX_PER_CM
-                local y1 = (lk.y1 - oy) * PX_PER_CM
-                local x2 = (lk.x2 - ox) * PX_PER_CM
-                local y2 = (lk.y2 - oy) * PX_PER_CM
-                DrawDashedLine(canvas, x1, y1, x2, y2, lk.lineCol, 2.6, 10.0, 6.0)
-                local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
-                DrawChevron(canvas, whiteTex, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 11.0, 2.4, linkAng, lk.arrowCol)
+            -- Phase 5: Underground belt dashed link lines
+            if ds.phase == 5 and (ops == 0 or os.clock() < budgetEnd) then
+                local links = ds.links
+                while ds.idx <= #links do
+                    local lk = links[ds.idx]
+                    ds.idx = ds.idx + 1
+                    ops = ops + 1
+                    local x1 = (lk.x1 - ox) * PX_PER_CM
+                    local y1 = (lk.y1 - oy) * PX_PER_CM
+                    local x2 = (lk.x2 - ox) * PX_PER_CM
+                    local y2 = (lk.y2 - oy) * PX_PER_CM
+                    DrawDashedLine(canvas, x1, y1, x2, y2, lk.lineCol, 2.6, 10.0, 6.0)
+                    local linkAng = math.deg(math.atan(y2 - y1, x2 - x1))
+                    DrawChevron(canvas, (x1 + x2) * 0.5, (y1 + y2) * 0.5, 11.0, 2.4, linkAng, lk.arrowCol)
+                    if ops >= 10 and os.clock() >= budgetEnd then break end
+                end
+                if ds.idx > #links then ds.phase = 6; ds.idx = 1 end
             end
 
-            -- 6. Item port badges
-            local innerSz = math.max(6.0, PORT_PX - 4.0)
-            for _, plist in pairs(t.ports) do
-                for i = 1, #plist do
-                    local p = plist[i]
+            -- Phase 6: Item port badges
+            if ds.phase == 6 and (ops == 0 or os.clock() < budgetEnd) then
+                local ports = ds.ports
+                while ds.idx <= #ports do
+                    local p = ports[ds.idx]
+                    ds.idx = ds.idx + 1
+                    ops = ops + 1
                     local px = (p.x - ox) * PX_PER_CM
                     local py = (p.y - oy) * PX_PER_CM
                     DrawFilledRect(canvas, whiteTex, px, py, PORT_PX, PORT_PX, COL_PORT_OUT, 0.0)
-                    DrawFilledRect(canvas, whiteTex, px, py, innerSz, innerSz, COL_PORT_IN, 0.0)
+                    DrawFilledRect(canvas, whiteTex, px, py, innerPortSz, innerPortSz, COL_PORT_IN, 0.0)
+                    if ops >= 20 and os.clock() >= budgetEnd then break end
                 end
+                if ds.idx > #ports then ds.phase = 7 end
             end
         end)
 
+        local te0 = os.clock()
         EndDrawRT(krl, worldCtx, ctx)
-        t.dirty = false
-        return true
+        local te1 = os.clock()
+        stats.endMs = stats.endMs + (te1 - te0) * 1000.0
+
+        local elapsedMs = (te1 - sliceStart) * 1000.0
+        stats.slices = stats.slices + 1
+        if elapsedMs > stats.maxSliceMs then stats.maxSliceMs = elapsedMs end
+
+        if ds.phase >= 7 then
+            t.dirty = false
+            t.drawState = nil
+            return true, elapsedMs
+        end
+        return false, elapsedMs
     end
 
     local inst = {}
 
-    function inst.AddPlatform(cx, cy, ex, ey)
-        -- Platforms and crisp dynamic grid lines are rendered on MapCanvas beneath RT tiles,
-        -- so empty platform space does not allocate or redraw RT tiles.
+    function inst.AddPlatform()
+        -- Platforms & dynamic zoom-adaptive grid lines render on MapCanvas beneath RT tiles.
     end
 
     function inst.AddWall(cx, cy, w, h)
@@ -629,7 +873,6 @@ function RT.CreateFloorRenderer(opts)
     end
 
     function inst.UpsertMachine(mAddr, drawEntry, portList)
-        -- Remove old tiles if updating
         inst.RemoveMachine(mAddr)
         local hw = drawEntry.rx * cellCm * 0.5 + 40.0
         local hh = drawEntry.ry * cellCm * 0.5 + 40.0
@@ -692,62 +935,61 @@ function RT.CreateFloorRenderer(opts)
         machineTiles[mAddr] = nil
     end
 
+    function inst.SetFloorVisible(vis)
+        floorVisible = (vis == true)
+        for _, t in pairs(tiles) do
+            if Core.IsValidObj(t.img) then
+                pcall(function() t.img:SetVisibility((floorVisible and t.visible) and 3 or 1) end)
+            end
+        end
+    end
+
     function inst.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
         for _, t in pairs(tiles) do
             local inView = (t.maxX >= vMinX and t.minX <= vMaxX and t.maxY >= vMinY and t.minY <= vMaxY)
             if t.visible ~= inView then
                 t.visible = inView
                 if Core.IsValidObj(t.img) then
-                    pcall(function() t.img:SetVisibility(inView and 3 or 1) end)
+                    pcall(function() t.img:SetVisibility((floorVisible and inView) and 3 or 1) end)
                 end
             end
         end
     end
 
-    -- Draws dirty tiles prioritizing currently visible tiles first (maxTiles per call)
+    -- Draws ONE time-budgeted slice of the highest-priority dirty mega-tile (visible tiles first).
     -- Returns: moreDirty (bool), elapsedMs (number)
-    function inst.PumpDirtyTiles(maxTiles, budgetSec)
+    function inst.PumpDirtyTiles(maxSlices, budgetSec)
         if destroyed or #dirtyList == 0 then return false, 0.0 end
-        local tStart = os.clock()
-        local limit = maxTiles or 1
-        local budgetEnd = tStart + (budgetSec or 0.0035)
-        local drawn = 0
-
-        -- Pass 1: visible dirty tiles first
-        local nextDirty = {}
+        -- Pick first visible dirty tile; otherwise first dirty tile
+        local pickIdx = nil
         for i = 1, #dirtyList do
             local t = dirtyList[i]
-            if t.dirty then
-                if t.visible and (drawn < 1 or (drawn < limit and os.clock() < budgetEnd)) then
-                    dirtySet[t.key] = nil
-                    drawTileNow(t)
-                    drawn = drawn + 1
-                else
-                    nextDirty[#nextDirty + 1] = t
-                end
-            else
-                dirtySet[t.key] = nil
+            if t.dirty and t.visible then
+                pickIdx = i
+                break
             end
         end
-
-        -- Pass 2: off-screen dirty tiles if budget remains
-        if drawn < limit and os.clock() < budgetEnd and #nextDirty > 0 then
-            local rem = {}
-            for i = 1, #nextDirty do
-                local t = nextDirty[i]
-                if t.dirty and (drawn < 1 or (drawn < limit and os.clock() < budgetEnd)) then
-                    dirtySet[t.key] = nil
-                    drawTileNow(t)
-                    drawn = drawn + 1
-                elseif t.dirty then
-                    rem[#rem + 1] = t
+        if not pickIdx then
+            for i = 1, #dirtyList do
+                if dirtyList[i].dirty then
+                    pickIdx = i
+                    break
                 end
             end
-            nextDirty = rem
+        end
+        if not pickIdx then
+            dirtyList = {}
+            dirtySet = {}
+            return false, 0.0
         end
 
-        dirtyList = nextDirty
-        return #dirtyList > 0, (os.clock() - tStart) * 1000.0
+        local target = dirtyList[pickIdx]
+        local finished, elapsedMs = drawTileSlice(target, budgetSec or 0.0025)
+        if finished then
+            dirtySet[target.key] = nil
+            table.remove(dirtyList, pickIdx)
+        end
+        return #dirtyList > 0, elapsedMs
     end
 
     function inst.HasDirtyTiles()
@@ -760,6 +1002,10 @@ function RT.CreateFloorRenderer(opts)
         return n
     end
 
+    function inst.GetStats()
+        return stats
+    end
+
     function inst.Destroy()
         destroyed = true
         for _, t in pairs(tiles) do
@@ -768,6 +1014,7 @@ function RT.CreateFloorRenderer(opts)
             end
             t.rt = nil
             t.img = nil
+            t.drawState = nil
         end
         tiles = {}
         machineTiles = {}

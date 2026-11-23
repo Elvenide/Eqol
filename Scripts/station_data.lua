@@ -1677,13 +1677,14 @@ end
 -- Non-blocking time-sliced variant of BuildStationFloorMap for Station Map open.
 -- Returns platforms & floor list immediately (<10ms) and streams machine binning + wall extraction
 -- across subsequent frames (3ms/frame) before invoking onComplete(floors).
-function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, playerY, playerZ, onComplete)
+function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, playerY, playerZ, onComplete, budgetSecOpt)
     AsyncFloorBuildGen = AsyncFloorBuildGen + 1
     local myGen = AsyncFloorBuildGen
+    local frameBudget = budgetSecOpt or 0.0030
     local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
     local now = os.clock()
 
-    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 30.0 then
+    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 300.0 then
         local cFloors = CachedFloorMap.floors
         local cXform = CachedFloorMap.xform
         local curIdx = 1
@@ -2007,7 +2008,7 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
 
     local function pumpAsyncBuild()
         if myGen ~= AsyncFloorBuildGen then return end
-        local budgetEnd = os.clock() + 0.0030
+        local budgetEnd = os.clock() + frameBudget
 
         if phase == "machines" then
             local step = 0

@@ -162,6 +162,8 @@ local RenderedPorts = {}     -- unconnected item ports: { idx, x, y, halfW, half
 local Perf = {
     RT = require("station_map_rt"),
     ActiveRT = nil,
+    FloorRTCache = {},          -- floorIdx -> cached RT floor state for instant <1ms floor switching
+    FloorRTCacheStation = nil,  -- station address string owning FloorRTCache
     MachineGrid = {}, -- "gx,gy" -> { recEntry, ... } (400cm spatial hash for O(1) hover & overlap)
     PortGrid = {},    -- "gx,gy" -> { portEntry, ... } (400cm spatial hash for O(1) hover)
     HOVER_CELL_CM = 400.0,
@@ -169,7 +171,25 @@ local Perf = {
     MapKeys = nil,
 }
 
+function Perf.DestroyFloorRT(floorIdx)
+    local entry = Perf.FloorRTCache[floorIdx]
+    if entry then
+        if entry.rtFloor then
+            if Perf.ActiveRT == entry.rtFloor then Perf.ActiveRT = nil end
+            pcall(function() entry.rtFloor.Destroy() end)
+        end
+        Perf.FloorRTCache[floorIdx] = nil
+    end
+end
+
 function Perf.DestroyActiveRT()
+    for idx, entry in pairs(Perf.FloorRTCache) do
+        if entry and entry.rtFloor then
+            pcall(function() entry.rtFloor.Destroy() end)
+        end
+        Perf.FloorRTCache[idx] = nil
+    end
+    Perf.FloorRTCacheStation = nil
     if Perf.ActiveRT then
         pcall(function() Perf.ActiveRT.Destroy() end)
         Perf.ActiveRT = nil
@@ -3425,6 +3445,9 @@ RefreshStationMapCanvas = function(machinesOnly)
         machinesOnly = false
     end
 
+    local pc = MapUI.PC
+    local useRT = (Perf.RT ~= nil) and Perf.RT.IsSupported(pc)
+
     if not machinesOnly then
         MeasureMapCanvasSize()
         if not ViewTransform.hasFitted then
@@ -3436,8 +3459,24 @@ RefreshStationMapCanvas = function(machinesOnly)
         LastGridZoomRatio = nil
     end
 
-    Perf.DestroyActiveRT()
-    ClearCanvasChildren(mCanvas)
+    if useRT then
+        local curStAddr = Core.IsValidObj(CurrentStation) and tostring(CurrentStation:GetAddress()) or nil
+        if Perf.FloorRTCacheStation ~= curStAddr then
+            Perf.DestroyActiveRT()
+            ClearCanvasChildren(mCanvas)
+            Perf.FloorRTCacheStation = curStAddr
+        else
+            if Perf.ActiveRT and Perf.ActiveRT.SetFloorVisible then
+                Perf.ActiveRT.SetFloorVisible(false)
+            end
+            if machinesOnly then
+                Perf.DestroyFloorRT(SelectedFloorIdx)
+            end
+        end
+    else
+        Perf.DestroyActiveRT()
+        ClearCanvasChildren(mCanvas)
+    end
     ClearCanvasChildren(MapUI.SelectionCanvas)
     ClearCanvasChildren(MapUI.IconCanvas)
     RenderedMachines = {}
@@ -3459,14 +3498,11 @@ RefreshStationMapCanvas = function(machinesOnly)
     end
 
     local outer = Core.GetWidgetOuter(MapUI.Window)
-    local pc = MapUI.PC
     local cellPx = BASE_CELL_PX
 
     local deferredGridLines = {}
     local deferredWalls = {}
     local myCanvasGen = CanvasRenderGen
-
-    local useRT = (Perf.RT ~= nil) and Perf.RT.IsSupported(pc)
 
     local function getPaddedVisibleWorldRect()
         local scale = math.max(0.05, ViewTransform.scale or 0.36)
@@ -3681,28 +3717,51 @@ RefreshStationMapCanvas = function(machinesOnly)
 
     if useRT then
         MachineRenderGen = MachineRenderGen + 1
-        local myMachineGen = MachineRenderGen
+        local floorWallCount = (floor.walls and #floor.walls) or 0
+        local floorMachCount = (floor.machines and #floor.machines) or 0
+        local cachedEntry = Perf.FloorRTCache[SelectedFloorIdx]
+        if cachedEntry and cachedEntry.rtFloor and cachedEntry.wallCount == floorWallCount
+            and (cachedEntry.machCount > 0 or floorMachCount == 0)
+        then
+            -- Instant <1ms floor switch: reuse cached mega-tile RTs and spatial indices!
+            Perf.ActiveRT = cachedEntry.rtFloor
+            cachedEntry.rtFloor.SetFloorVisible(true)
+            RenderedMachines = cachedEntry.renderedMachines
+            RenderedConveyors = cachedEntry.renderedConveyors
+            RenderedPorts = cachedEntry.renderedPorts
+            Perf.MachineGrid = cachedEntry.machineGrid
+            Perf.PortGrid = cachedEntry.portGrid
+            OnViewportChangedMachines = cachedEntry.onViewportChanged
+            SyncFloorMachinesIncremental = cachedEntry.syncIncremental
+            RefreshSingleMachineVisual = cachedEntry.refreshSingle
+            if cachedEntry.onViewportChanged then cachedEntry.onViewportChanged() end
+            if cachedEntry.resumePump then cachedEntry.resumePump() end
+            Core.Log(string.format("[StationMapRT] Instant cached floor switch: floor=%d tiles=%d machines=%d",
+                SelectedFloorIdx, cachedEntry.rtFloor.GetTileCount(), #RenderedMachines))
+        else
+            if cachedEntry then
+                Perf.DestroyFloorRT(SelectedFloorIdx)
+            end
+            local rtFloor = Perf.RT.CreateFloorRenderer({
+                worldCtx = pc,
+                outer = outer,
+                parentCanvas = mCanvas,
+                basePxPerCm = BASE_PX_PER_CM,
+                cellCm = CELL_CM,
+                gridOriginX = ViewTransform.gridOriginX,
+                gridOriginY = ViewTransform.gridOriginY,
+                colors = {
+                    PlatformFill   = COLORS.ModuleFill,
+                    PlatformBorder = COLORS.ModuleBorder,
+                    WallBorder     = COLORS.WallBorder,
+                    WallFill       = COLORS.WallFill,
+                },
+                getTierArrowColor = GetTierArrowColor,
+                getMachineColor   = GetColorForMachine,
+            })
 
-        local rtFloor = Perf.RT.CreateFloorRenderer({
-            worldCtx = pc,
-            outer = outer,
-            parentCanvas = mCanvas,
-            basePxPerCm = BASE_PX_PER_CM,
-            cellCm = CELL_CM,
-            gridOriginX = ViewTransform.gridOriginX,
-            gridOriginY = ViewTransform.gridOriginY,
-            colors = {
-                PlatformFill   = COLORS.ModuleFill,
-                PlatformBorder = COLORS.ModuleBorder,
-                WallBorder     = COLORS.WallBorder,
-                WallFill       = COLORS.WallFill,
-            },
-            getTierArrowColor = GetTierArrowColor,
-            getMachineColor   = GetColorForMachine,
-        })
-
-        if rtFloor then
-            Perf.ActiveRT = rtFloor
+            if rtFloor then
+                Perf.ActiveRT = rtFloor
 
             if floor.walls and #floor.walls > 0 then
                 for _, w in ipairs(floor.walls) do
@@ -3966,73 +4025,69 @@ RefreshStationMapCanvas = function(machinesOnly)
                 rtFloor.UpsertMachine(mAddr, drawEntry, portList)
             end
 
+            local function logRTFloorDone()
+                if rtLoggedDone then return end
+                rtLoggedDone = true
+                local st = rtFloor.GetStats and rtFloor.GetStats() or nil
+                if st and st.slices > 0 then
+                    Core.Log(string.format("[StationMapRT] Floor render done: tiles=%d slices=%d max=%.2fms alloc=%.1fms walls=%.1fms belts=%.1fms(%d->%d) mach=%.1fms end=%.1fms",
+                        rtFloor.GetTileCount(), st.slices, st.maxSliceMs,
+                        st.allocMs, st.wallsMs, st.beltsMs, st.rawBelts, st.beltRuns, st.machinesMs, st.endMs))
+                end
+            end
+
             local function pumpRT()
-                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then
+                if Perf.ActiveRT ~= rtFloor or not IsMapOpen() then
                     rtPumpRunning = false
                     return
                 end
 
-                -- Alternate cleanly between indexing one tile's machines and drawing one completed tile,
-                -- so machines appear immediately from the center outward while keeping each frame <= ~3ms.
-                if not rtTileInProgress and rtFloor.HasDirtyTiles() then
+                -- Phase 1: Index all machines on this floor first (fast with bldMetaCache, ~150ms total
+                -- at 2.5ms/frame) so every mega-tile has 100% of its walls, merged belt runs, and machines
+                -- ready before its first draw (ZERO redundant redraws!).
+                if idxCursor <= #toIndexQueue then
+                    local budgetEnd = os.clock() + 0.0025
+                    local indexed = 0
+                    while idxCursor <= #toIndexQueue and (indexed < 20 or os.clock() < budgetEnd) and indexed < 120 do
+                        indexOneMachineRT(toIndexQueue[idxCursor])
+                        idxCursor = idxCursor + 1
+                        indexed = indexed + 1
+                    end
+                    ExecuteInGameThreadAfterFrames(1, pumpRT)
+                    return
+                end
+
+                -- Phase 2: Progressively draw strict 2.5ms slices of dirty mega-tiles (visible first).
+                if rtFloor.HasDirtyTiles() then
                     local moreDirty, drawMs = rtFloor.PumpDirtyTiles(1, 0.0025)
                     rtDrawCount = rtDrawCount + 1
                     rtDrawSumMs = rtDrawSumMs + (drawMs or 0.0)
                     if (drawMs or 0.0) > rtDrawMaxMs then rtDrawMaxMs = drawMs or 0.0 end
-                    local nextFrames = ((drawMs or 0.0) > 3.5) and 2 or 1
-                    if idxCursor <= #toIndexQueue or moreDirty then
+                    local nextFrames = ((drawMs or 0.0) > 4.0) and 2 or 1
+                    if moreDirty then
                         ExecuteInGameThreadAfterFrames(nextFrames, pumpRT)
                     else
                         rtPumpRunning = false
-                        if not rtLoggedDone and rtDrawCount > 0 then
-                            rtLoggedDone = true
-                            Core.Log(string.format("[StationMapRT] Floor render done: tiles=%d draws=%d avg=%.2fms max=%.2fms",
-                                rtFloor.GetTileCount(), rtDrawCount, rtDrawSumMs / rtDrawCount, rtDrawMaxMs))
-                        end
+                        logRTFloorDone()
                     end
-                    return
-                end
-
-                if idxCursor <= #toIndexQueue then
-                    local budgetEnd = os.clock() + 0.0025
-                    local indexed = 0
-                    local startTileKey = toIndexQueue[idxCursor]._rtTileKey
-                    rtTileInProgress = true
-                    while idxCursor <= #toIndexQueue and (indexed < 12 or os.clock() < budgetEnd) and indexed < 60 do
-                        local me = toIndexQueue[idxCursor]
-                        if indexed > 0 and me._rtTileKey ~= startTileKey then
-                            -- Finished the previous tile cleanly; draw it on the next frame!
-                            rtTileInProgress = false
-                            break
-                        end
-                        indexOneMachineRT(me)
-                        idxCursor = idxCursor + 1
-                        indexed = indexed + 1
-                    end
-                    if idxCursor > #toIndexQueue or (toIndexQueue[idxCursor]._rtTileKey ~= startTileKey) then
-                        rtTileInProgress = false
-                    end
-                    ExecuteInGameThreadAfterFrames(1, pumpRT)
                     return
                 end
 
                 rtPumpRunning = false
-                if not rtLoggedDone and rtDrawCount > 0 then
-                    rtLoggedDone = true
-                    Core.Log(string.format("[StationMapRT] Floor render done: tiles=%d draws=%d avg=%.2fms max=%.2fms",
-                        rtFloor.GetTileCount(), rtDrawCount, rtDrawSumMs / rtDrawCount, rtDrawMaxMs))
-                end
+                logRTFloorDone()
             end
 
             local function startRTPump()
-                if not rtPumpRunning then
-                    rtPumpRunning = true
-                    ExecuteInGameThreadAfterFrames(1, pumpRT)
+                if not rtPumpRunning and Perf.ActiveRT == rtFloor and IsMapOpen() then
+                    if idxCursor <= #toIndexQueue or rtFloor.HasDirtyTiles() then
+                        rtPumpRunning = true
+                        ExecuteInGameThreadAfterFrames(1, pumpRT)
+                    end
                 end
             end
 
             OnViewportChangedMachines = function()
-                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
+                if Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
                 local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRectRT()
                 rtFloor.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
                 if idxCursor <= #toIndexQueue or (rtFloor.HasDirtyTiles and rtFloor.HasDirtyTiles()) then
@@ -4042,7 +4097,7 @@ RefreshStationMapCanvas = function(machinesOnly)
 
             local syncGenRT = 0
             SyncFloorMachinesIncremental = function()
-                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) or not IsMapOpen() then return end
+                if Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) or not IsMapOpen() then return end
                 local curFl = CurrentFloors[SelectedFloorIdx]
                 if not curFl then return end
 
@@ -4056,7 +4111,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 local totalScan = #allMachines
 
                 local function pumpSyncScan()
-                    if mySyncGen ~= syncGenRT or myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
+                    if mySyncGen ~= syncGenRT or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
                     local budgetEnd = os.clock() + 0.0030
                     local step = 0
                     while scanIdx <= totalScan and (step < 15 or os.clock() < budgetEnd) and step < 120 do
@@ -4094,6 +4149,9 @@ RefreshStationMapCanvas = function(machinesOnly)
                         if not knownByAddr[addr] then
                             knownByAddr[addr] = me
                             presentAddrs[addr] = true
+                            local tx = math.floor((me.x or 0.0) / tileCmRT)
+                            local ty = math.floor((me.y or 0.0) / tileCmRT)
+                            me._rtTileKey = tx * 100000 + ty
                             toIndexQueue[#toIndexQueue + 1] = me
                             addedCount = addedCount + 1
                         end
@@ -4116,7 +4174,7 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
 
             RefreshSingleMachineVisual = function(mAddr)
-                if myMachineGen ~= MachineRenderGen or Perf.ActiveRT ~= rtFloor then return end
+                if Perf.ActiveRT ~= rtFloor then return end
                 local me = knownByAddr[mAddr]
                 if not me or not Core.IsValidObj(me.machine) then return end
                 removeMachineRT(mAddr)
@@ -4124,13 +4182,30 @@ RefreshStationMapCanvas = function(machinesOnly)
                 startRTPump()
             end
 
+            -- Save into persistent per-floor RT cache for instant <1ms floor switching
+            Perf.FloorRTCache[SelectedFloorIdx] = {
+                rtFloor = rtFloor,
+                wallCount = floorWallCount,
+                machCount = floorMachCount,
+                renderedMachines = RenderedMachines,
+                renderedConveyors = RenderedConveyors,
+                renderedPorts = RenderedPorts,
+                machineGrid = Perf.MachineGrid,
+                portGrid = Perf.PortGrid,
+                onViewportChanged = OnViewportChangedMachines,
+                syncIncremental = SyncFloorMachinesIncremental,
+                refreshSingle = RefreshSingleMachineVisual,
+                resumePump = startRTPump,
+            }
+
             -- Kick off first viewport cull + RT pump immediately
             local vMinX, vMaxX, vMinY, vMaxY = getPaddedVisibleWorldRectRT()
             rtFloor.UpdateViewport(vMinX, vMaxX, vMinY, vMaxY)
             startRTPump()
-            Core.Log(string.format("[StationMapRT] Initialized tiled RT floor: tiles=%d machines=%d", rtFloor.GetTileCount(), #toIndexQueue))
-        else
-            useRT = false
+            Core.Log(string.format("[StationMapRT] Initialized mega-tile RT floor: floor=%d tiles=%d machines=%d", SelectedFloorIdx, rtFloor.GetTileCount(), #toIndexQueue))
+            else
+                useRT = false
+            end
         end
     end
 
@@ -7300,6 +7375,49 @@ function Feature.OnToggle(enabled)
     end
 end
 
+function Perf.SchedulePrewarm(delayMs, retriesLeft)
+    local curWorld = GetCurrentWorldAddr()
+    if curWorld == nil or PrewarmScheduledForWorld == curWorld then return end
+    PrewarmScheduledForWorld = curWorld
+    local myWorld = curWorld
+    local attempts = retriesLeft or 2
+
+    local function tryPrewarm()
+        if GetCurrentWorldAddr() ~= myWorld then return end
+        if not Core.IsFeatureEnabled("StationMap") or IsMapOpen() then return end
+        local pc = Core.GetLocalPlayerController()
+        if not Core.IsValidObj(pc) then
+            if attempts > 0 then
+                attempts = attempts - 1
+                ExecuteInGameThreadWithDelay(3500, tryPrewarm)
+            end
+            return
+        end
+        local inStation, walkFrame, station = StationData.IsPlayerInStation(pc)
+        if not Core.IsValidObj(station) then
+            if attempts > 0 then
+                attempts = attempts - 1
+                ExecuteInGameThreadWithDelay(4000, tryPrewarm)
+            end
+            return
+        end
+        local px, py, pz = 0.0, 0.0, 0.0
+        if Core.IsValidObj(pc.Pawn) then
+            local okL, loc = pcall(function() return pc.Pawn:K2_GetActorLocation() end)
+            if okL and loc then px, py, pz = loc.X or 0.0, loc.Y or 0.0, loc.Z or 0.0 end
+        end
+        local tStart = os.clock()
+        local _, _, _, _, _, _, isAsync = StationData.BuildStationFloorMapAsync(station, walkFrame, px, py, pz, function()
+            Core.Log(string.format("[StationMap] Background station prewarm finished in %.0fms", (os.clock() - tStart) * 1000.0))
+        end, 0.0015)
+        if isAsync then
+            Core.Log("[StationMap] Started quiet background station prewarm (1.5ms/frame)")
+        end
+    end
+
+    ExecuteInGameThreadWithDelay(delayMs or 3500, tryPrewarm)
+end
+
 function Feature.OnClientRestart()
     ApplyInProgress = false
     CachedMouseIconTex = {}
@@ -7315,6 +7433,7 @@ function Feature.OnClientRestart()
         PendingGhosts = {}
         Clipboard = {}
     end
+    Perf.SchedulePrewarm(3500, 2)
 end
 
 function Feature.OnMapLoad()
@@ -7329,6 +7448,7 @@ function Feature.OnMapLoad()
     CachedWblCDO = nil
     PendingGhosts = {}
     Clipboard = {}
+    Perf.SchedulePrewarm(4000, 2)
 end
 
 function Feature.PruneCaches()
