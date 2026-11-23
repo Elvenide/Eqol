@@ -3934,7 +3934,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
-            local function indexOneMachineRT(me)
+            local function indexOneMachineRT(me, deferDirty)
                 local m = me.machine
                 if not Core.IsValidObj(m) then return end
                 local mAddr = m:GetAddress()
@@ -4018,7 +4018,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                         yaw = myaw,
                         cat = "Conveyor",
                         sprite = sprite,
-                    }, nil)
+                    }, nil, deferDirty)
                     return
                 end
 
@@ -4048,7 +4048,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                             ugKeysByAddr[uInfo.pairAddr] = ugKeysByAddr[uInfo.pairAddr] or {}
                             table.insert(ugKeysByAddr[uInfo.pairAddr], pKey)
                         end
-                        rtFloor.AddUndergroundLink(pKey, linkEntry)
+                        rtFloor.AddUndergroundLink(pKey, linkEntry, deferDirty)
                     end
                     if not (uInfo.pairAddr and presentAddrs[uInfo.pairAddr]) then
                         drawExitPair = true
@@ -4103,7 +4103,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                     pairX = recEntry.pairX,
                     pairY = recEntry.pairY,
                 }
-                rtFloor.UpsertMachine(mAddr, drawEntry, portList)
+                rtFloor.UpsertMachine(mAddr, drawEntry, portList, deferDirty)
             end
 
             local function logRTFloorDone()
@@ -4123,45 +4123,20 @@ RefreshStationMapCanvas = function(machinesOnly)
                     return
                 end
 
-                -- Interleave per mega-tile: finish indexing the current mega-tile's machines (2-3 frames),
-                -- then immediately draw that completed mega-tile in strict 2.5ms progressive slices so
-                -- machines appear right away from the center outward with ZERO redundant redraws.
-                if not rtTileInProgress and rtFloor.HasDirtyTiles() then
-                    local moreDirty, drawMs = rtFloor.PumpDirtyTiles(1, 0.0025)
-                    rtDrawCount = rtDrawCount + 1
-                    rtDrawSumMs = rtDrawSumMs + (drawMs or 0.0)
-                    if (drawMs or 0.0) > rtDrawMaxMs then rtDrawMaxMs = drawMs or 0.0 end
-                    local nextFrames = ((drawMs or 0.0) > 4.0) and 2 or 1
-                    if idxCursor <= #toIndexQueue or moreDirty or not rtWallsFlushed then
-                        ExecuteInGameThreadAfterFrames(nextFrames, pumpRT)
-                    else
-                        rtPumpRunning = false
-                        logRTFloorDone()
-                    end
-                    return
-                end
-
+                -- Phase 1: Index all queued machines first (4ms/frame, deferDirty during initial bulk
+                -- load) so no mega-tile is ever wiped/re-rendered by a neighbor's border machine or link.
                 if idxCursor <= #toIndexQueue then
-                    local budgetEnd = os.clock() + 0.0025
+                    local budgetEnd = os.clock() + 0.0040
                     local indexed = 0
-                    local startTileKey = toIndexQueue[idxCursor]._rtTileKey
-                    rtTileInProgress = true
-                    while idxCursor <= #toIndexQueue and (indexed < 20 or os.clock() < budgetEnd) and indexed < 120 do
-                        local me = toIndexQueue[idxCursor]
-                        if indexed > 0 and me._rtTileKey ~= startTileKey then
-                            rtTileInProgress = false
-                            break
-                        end
-                        indexOneMachineRT(me)
+                    local defer = (not rtWallsFlushed)
+                    while idxCursor <= #toIndexQueue and (indexed < 30 or os.clock() < budgetEnd) and indexed < 200 do
+                        indexOneMachineRT(toIndexQueue[idxCursor], defer)
                         idxCursor = idxCursor + 1
                         indexed = indexed + 1
                     end
-                    if idxCursor > #toIndexQueue or (toIndexQueue[idxCursor]._rtTileKey ~= startTileKey) then
-                        rtTileInProgress = false
-                    end
                     if idxCursor > #toIndexQueue and not rtWallsFlushed then
                         rtWallsFlushed = true
-                        rtFloor.MarkAllWallTilesDirty()
+                        rtFloor.MarkAllTilesDirtySorted(ViewTransform.cx, ViewTransform.cy)
                     end
                     ExecuteInGameThreadAfterFrames(1, pumpRT)
                     return
@@ -4169,11 +4144,23 @@ RefreshStationMapCanvas = function(machinesOnly)
 
                 if not rtWallsFlushed then
                     rtWallsFlushed = true
-                    rtFloor.MarkAllWallTilesDirty()
-                    if rtFloor.HasDirtyTiles() then
-                        ExecuteInGameThreadAfterFrames(1, pumpRT)
-                        return
+                    rtFloor.MarkAllTilesDirtySorted(ViewTransform.cx, ViewTransform.cy)
+                end
+
+                -- Phase 2: Progressively draw mega-tiles (machine-rich center tiles first, 2.5ms/slice).
+                if rtFloor.HasDirtyTiles() then
+                    local moreDirty, drawMs = rtFloor.PumpDirtyTiles(1, 0.0025)
+                    rtDrawCount = rtDrawCount + 1
+                    rtDrawSumMs = rtDrawSumMs + (drawMs or 0.0)
+                    if (drawMs or 0.0) > rtDrawMaxMs then rtDrawMaxMs = drawMs or 0.0 end
+                    local nextFrames = ((drawMs or 0.0) > 4.0) and 2 or 1
+                    if moreDirty then
+                        ExecuteInGameThreadAfterFrames(nextFrames, pumpRT)
+                    else
+                        rtPumpRunning = false
+                        logRTFloorDone()
                     end
+                    return
                 end
 
                 rtPumpRunning = false

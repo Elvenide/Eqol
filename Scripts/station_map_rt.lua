@@ -874,16 +874,29 @@ function RT.CreateFloorRenderer(opts)
         end)
     end
 
-    function inst.MarkAllWallTilesDirty()
+    function inst.MarkAllTilesDirtySorted(vcx, vcy)
+        local cx = vcx or 0.0
+        local cy = vcy or 0.0
+        local list = {}
         for _, t in pairs(tiles) do
-            if #t.walls > 0 and t.needsClear and not t.dirty then
-                markTileDirty(t)
+            if t.needsClear and not t.dirty then
+                local hasMach = (next(t.machines) ~= nil)
+                local tcx = (t.minX + t.maxX) * 0.5 - cx
+                local tcy = (t.minY + t.maxY) * 0.5 - cy
+                list[#list + 1] = { t = t, hasMach = hasMach, dist = tcx * tcx + tcy * tcy }
             end
+        end
+        table.sort(list, function(a, b)
+            if a.hasMach ~= b.hasMach then return a.hasMach end
+            return a.dist < b.dist
+        end)
+        for i = 1, #list do
+            markTileDirty(list[i].t)
         end
     end
 
-    function inst.UpsertMachine(mAddr, drawEntry, portList)
-        inst.RemoveMachine(mAddr)
+    function inst.UpsertMachine(mAddr, drawEntry, portList, deferDirty)
+        inst.RemoveMachine(mAddr, deferDirty)
         local hw = drawEntry.rx * cellCm * 0.5 + 40.0
         local hh = drawEntry.ry * cellCm * 0.5 + 40.0
         local minX, maxX = drawEntry.x - hw, drawEntry.x + hw
@@ -901,13 +914,15 @@ function RT.CreateFloorRenderer(opts)
                 t.ports[mAddr] = portList
             end
             touched[#touched + 1] = t
-            markTileDirty(t)
+            if not deferDirty then
+                markTileDirty(t)
+            end
         end)
         drawEntry._rtTiles = touched
         machineTiles[mAddr] = touched
     end
 
-    function inst.AddUndergroundLink(pKey, linkEntry)
+    function inst.AddUndergroundLink(pKey, linkEntry, deferDirty)
         local minX = math.min(linkEntry.x1, linkEntry.x2) - 40.0
         local maxX = math.max(linkEntry.x1, linkEntry.x2) + 40.0
         local minY = math.min(linkEntry.y1, linkEntry.y2) - 40.0
@@ -916,7 +931,9 @@ function RT.CreateFloorRenderer(opts)
         forEachOverlappingTile(minX, maxX, minY, maxY, true, function(t)
             t.links[pKey] = linkEntry
             touched[#touched + 1] = t
-            markTileDirty(t)
+            if not deferDirty then
+                markTileDirty(t)
+            end
         end)
         linkEntry._rtTiles = touched
     end
@@ -932,7 +949,7 @@ function RT.CreateFloorRenderer(opts)
         end
     end
 
-    function inst.RemoveMachine(mAddr)
+    function inst.RemoveMachine(mAddr, deferDirty)
         local list = machineTiles[mAddr]
         if not list then return end
         for i = 1, #list do
@@ -940,7 +957,7 @@ function RT.CreateFloorRenderer(opts)
             local changed = false
             if t.machines[mAddr] then t.machines[mAddr] = nil; changed = true end
             if t.ports[mAddr] then t.ports[mAddr] = nil; changed = true end
-            if changed then markTileDirty(t) end
+            if changed and not deferDirty then markTileDirty(t) end
         end
         machineTiles[mAddr] = nil
     end
