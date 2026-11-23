@@ -1168,13 +1168,151 @@ local function CollectBuildableCosts(buildable, mult, outCosts)
     end
 end
 
+function Perf.IsCreativeMode(pc, playerObj)
+    local function probeObj(obj, tag, depth)
+        if not Core.IsValidObj(obj) then return false end
+        -- Direct fast checks for common UE / Main Sequence creative-mode flags & getters
+        local okFast, valFast = pcall(function()
+            if obj.bCreativeMode == true or obj.CreativeMode == true or obj.bIsCreativeMode == true
+                or obj.bIsCreative == true or obj.bCreative == true
+                or obj.bFreeBuild == true or obj.bFreeBuilding == true
+                or obj.bInfiniteResources == true or obj.bInfiniteItems == true or obj.bNoBuildCost == true
+            then
+                return true
+            end
+            for _, fnName in ipairs({ "IsCreativeMode", "GetIsCreativeMode", "IsInCreativeMode", "IsCreative", "GetCreativeMode", "IsFreeBuildEnabled" }) do
+                local fn = obj[fnName]
+                if type(fn) == "function" then
+                    local okR, r = pcall(fn, obj)
+                    if okR and r == true then return true end
+                end
+            end
+            return false
+        end)
+        if okFast and valFast == true then
+            if not Perf.CreativeDiagLogged then
+                Perf.CreativeDiagLogged = true
+                Core.Log("[StationMap] Creative mode detected via fast path on " .. tostring(tag))
+            end
+            return true
+        end
+
+        -- Dynamic reflection scan (cached per UClass) to discover any creative/freebuild/infinite bool or getter
+        local okCls, cls = pcall(function() return obj:GetClass() end)
+        if not okCls or not Core.IsValidObj(cls) then return false end
+        local clsAddr = cls:GetAddress()
+        Perf.CreativeScanCache = Perf.CreativeScanCache or {}
+        local spec = Perf.CreativeScanCache[clsAddr]
+        if not spec then
+            spec = { props = {}, funcs = {}, nested = {} }
+            pcall(function()
+                if cls.ForEachProperty then
+                    cls:ForEachProperty(function(prop)
+                        local pName = prop:GetFName():ToString()
+                        local low = pName:lower()
+                        if low:find("creative", 1, true) or low:find("freebuild", 1, true)
+                            or low:find("infinite", 1, true) or low:find("nocost", 1, true)
+                            or low:find("sandbox", 1, true) or low:find("cheat", 1, true)
+                        then
+                            spec.props[#spec.props + 1] = pName
+                        elseif (depth or 0) == 0 and (low:find("settings", 1, true) or low:find("config", 1, true) or low:find("difficulty", 1, true) or low:find("rules", 1, true)) then
+                            spec.nested[#spec.nested + 1] = pName
+                        end
+                    end)
+                end
+                if cls.ForEachFunction then
+                    cls:ForEachFunction(function(fn)
+                        local fName = fn:GetFName():ToString()
+                        local low = fName:lower()
+                        if (low:find("creative", 1, true) or low:find("freebuild", 1, true) or low:find("infinite", 1, true))
+                            and (low:find("^is") or low:find("^get") or low:find("^has"))
+                        then
+                            spec.funcs[#spec.funcs + 1] = fName
+                        end
+                    end)
+                end
+            end)
+            Perf.CreativeScanCache[clsAddr] = spec
+        end
+
+        for _, pName in ipairs(spec.props) do
+            local okV, v = pcall(function() return obj[pName] end)
+            if okV and v == true then
+                if not Perf.CreativeDiagLogged then
+                    Perf.CreativeDiagLogged = true
+                    Core.Log(string.format("[StationMap] Creative mode detected via %s.%s=true", tostring(tag), pName))
+                end
+                return true
+            end
+        end
+        for _, fName in ipairs(spec.funcs) do
+            local okV, v = pcall(function() return obj[fName](obj) end)
+            if okV and v == true then
+                if not Perf.CreativeDiagLogged then
+                    Perf.CreativeDiagLogged = true
+                    Core.Log(string.format("[StationMap] Creative mode detected via %s:%s()=true", tostring(tag), fName))
+                end
+                return true
+            end
+        end
+        if (depth or 0) == 0 then
+            for _, nName in ipairs(spec.nested) do
+                local okN, sub = pcall(function() return obj[nName] end)
+                if okN and sub ~= nil then
+                    if type(sub) == "userdata" and Core.IsValidObj(sub) then
+                        if probeObj(sub, tag .. "." .. nName, 1) then return true end
+                    elseif type(sub) == "table" or type(sub) == "userdata" then
+                        local okS, sv = pcall(function()
+                            return sub.bCreativeMode == true or sub.CreativeMode == true
+                                or sub.bIsCreative == true or sub.bFreeBuild == true
+                                or sub.bInfiniteResources == true or sub.bInfiniteItems == true
+                                or sub.bNoBuildCost == true
+                        end)
+                        if okS and sv == true then
+                            if not Perf.CreativeDiagLogged then
+                                Perf.CreativeDiagLogged = true
+                                Core.Log(string.format("[StationMap] Creative mode detected via struct %s.%s", tostring(tag), nName))
+                            end
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    if probeObj(playerObj, "PlayerObject", 0) then return true end
+    if probeObj(pc, "PlayerController", 0) then return true end
+
+    local worldSub = Core.IsValidObj(pc) and Core.GetWorldSubsystem(pc, Core.PATHS.WorldSubsystemClass) or nil
+    if Core.IsValidObj(worldSub) then
+        if probeObj(worldSub, "WorldSubsystem", 0) then return true end
+        local okW, dmsWorld = pcall(function() return worldSub:GetDMSWorld() end)
+        if okW and Core.IsValidObj(dmsWorld) and probeObj(dmsWorld, "DMSWorld", 0) then return true end
+    end
+    if Core.IsValidObj(pc) then
+        local okPS, ps = pcall(function() return pc.PlayerState end)
+        if okPS and Core.IsValidObj(ps) and probeObj(ps, "PlayerState", 0) then return true end
+        local okW, uWorld = pcall(function() return pc:GetWorld() end)
+        if okW and Core.IsValidObj(uWorld) then
+            local okGS, gs = pcall(function() return uWorld.GameState end)
+            if okGS and Core.IsValidObj(gs) and probeObj(gs, "GameState", 0) then return true end
+            local okGM, gm = pcall(function() return uWorld.AuthorityGameMode end)
+            if okGM and Core.IsValidObj(gm) and probeObj(gm, "GameMode", 0) then return true end
+        end
+        local okGI, gi = pcall(function() return pc:GetGameInstance() end)
+        if okGI and Core.IsValidObj(gi) and probeObj(gi, "GameInstance", 0) then return true end
+    end
+    return false
+end
+
 local function PlayerHasBuildableMaterials(pc, buildable, count)
     if not Core.IsValidObj(pc) or not Core.IsValidObj(buildable) then return false end
     local playerObj = pc.PlayerObject
     if not Core.IsValidObj(playerObj) then return false end
 
-    local okCreative, isCreative = pcall(function() return playerObj.bCreativeMode or pc.bCreativeMode end)
-    if okCreative and isCreative then return true end
+    if Perf.IsCreativeMode(pc, playerObj) then return true end
 
     local inv = nil
     local okBInv, bInv = pcall(function() return playerObj:GetBuildingInventory() end)
@@ -1206,8 +1344,7 @@ local function ComputePendingMaterialSummary(pc)
     local playerObj = pc.PlayerObject
     if not Core.IsValidObj(playerObj) then return summary end
 
-    local okCreative, isCreative = pcall(function() return playerObj.bCreativeMode or pc.bCreativeMode end)
-    summary.isCreative = (okCreative and isCreative == true)
+    summary.isCreative = Perf.IsCreativeMode(pc, playerObj)
 
     local inv = nil
     local okBInv, bInv = pcall(function() return playerObj:GetBuildingInventory() end)
@@ -1311,8 +1448,7 @@ local function CheckMaterialsForPendingList(pc, list, delList)
     if not Core.IsValidObj(pc) then return false, nil end
     local playerObj = pc.PlayerObject
     if not Core.IsValidObj(playerObj) then return false, nil end
-    local okCreative, isCreative = pcall(function() return playerObj.bCreativeMode or pc.bCreativeMode end)
-    if okCreative and isCreative then return true, nil end
+    if Perf.IsCreativeMode(pc, playerObj) then return true, nil end
 
     local inv = nil
     local okBInv, bInv = pcall(function() return playerObj:GetBuildingInventory() end)
@@ -2769,14 +2905,14 @@ local function RefreshModificationCostPanel(summary, freshPC)
                 end
             end
 
-            -- Net cost label (e.g. "0/40x", "10/10x", "-5x", or "40x" in Creative Mode)
+            -- Net cost label (e.g. "0/40x", "10/10x", "-5x", or "∞/40x" in Creative Mode)
             local amtStr
             local amtCol
             if entry.net < 0 then
                 amtStr = string.format("%dx", entry.net)
                 amtCol = COST_TXT_REFUND
             elseif isCreative then
-                amtStr = string.format("%dx", entry.net)
+                amtStr = string.format("∞/%dx", entry.net)
                 amtCol = COST_TXT_OK
             else
                 amtStr = string.format("%d/%dx", entry.have, entry.net)
@@ -3459,19 +3595,13 @@ local function RefreshSelectionLayer(selectionOnly)
         Perf.SelHighlightWidgets = {}
         if #selList == 0 then return end
 
-        local compactSel = (#selList > 30)
-        local selBulkCol = { R = COLORS.Selected.R, G = COLORS.Selected.G, B = COLORS.Selected.B, A = 0.48 }
+        -- Consistent, fast single-highlight fill for ALL selection sizes (1 to N machines/ghosts:
+        -- 5x fewer UMG widgets and uniform visual style regardless of selection count).
+        local selHighlightCol = { R = COLORS.Selected.R, G = COLORS.Selected.G, B = COLORS.Selected.B, A = 0.46 }
         local sIdx = 1
         local function addTrackedSelBorder(bx, by, w, h, col, z)
             local b = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, w, h, col, z)
             if b then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b end
-        end
-        local function addTrackedSelOutline(bx, by, pxW, pxH, thick, col, z)
-            local hw, hh = pxW * 0.5, pxH * 0.5
-            addTrackedSelBorder(bx, by - hh, pxW + thick, thick, col, z)
-            addTrackedSelBorder(bx, by + hh, pxW + thick, thick, col, z)
-            addTrackedSelBorder(bx - hw, by, thick, pxH + thick, col, z)
-            addTrackedSelBorder(bx + hw, by, thick, pxH + thick, col, z)
         end
         local function pumpSelOnly()
             if mySelOnlyGen ~= Perf.SelOnlyGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
@@ -3479,7 +3609,7 @@ local function RefreshSelectionLayer(selectionOnly)
             end
             local budgetEnd = os.clock() + 0.0030
             local ops = 0
-            while sIdx <= #selList and (ops < 15 or os.clock() < budgetEnd) and ops < 90 do
+            while sIdx <= #selList and (ops < 20 or os.clock() < budgetEnd) and ops < 120 do
                 local rm = selList[sIdx]
                 sIdx = sIdx + 1
                 ops = ops + 1
@@ -3487,20 +3617,10 @@ local function RefreshSelectionLayer(selectionOnly)
                 local rx, ry = GetRotatedCellDims(rm.cellsX or 1, rm.cellsY or 1, rm.yaw or 0)
                 local pxW = math.max(8.0, rx * BASE_CELL_PX)
                 local pxH = math.max(8.0, ry * BASE_CELL_PX)
-                if compactSel then
-                    addTrackedSelBorder(bx, by, pxW, pxH, selBulkCol, 12)
-                    if rm.pairX and rm.pairY then
-                        local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                        addTrackedSelBorder(pbx, pby, pxW, pxH, selBulkCol, 12)
-                    end
-                else
-                    addTrackedSelBorder(bx, by, pxW, pxH, COLORS.SelectedFill, 12)
-                    addTrackedSelOutline(bx, by, pxW, pxH, 2.8, COLORS.Selected, 13)
-                    if rm.pairX and rm.pairY then
-                        local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                        addTrackedSelBorder(pbx, pby, pxW, pxH, COLORS.SelectedFill, 12)
-                        addTrackedSelOutline(pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 13)
-                    end
+                addTrackedSelBorder(bx, by, pxW, pxH, selHighlightCol, 12)
+                if rm.pairX and rm.pairY then
+                    local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
+                    addTrackedSelBorder(pbx, pby, pxW, pxH, selHighlightCol, 12)
                 end
             end
             if sIdx <= #selList then
@@ -4024,27 +4144,33 @@ RefreshStationMapCanvas = function(machinesOnly)
                 if not presentAddrs[mAddr] then return end
 
                 local mwx, mwy, mwz, myaw = me.x, me.y, me.z, me.yaw
-                local cat = StationData.GetMachineCategory(m)
-                local cellsX, cellsY = StationData.GetMachineFootprintCells(m)
-                local rx, ry = GetRotatedCellDims(cellsX, cellsY, myaw)
-                local pxW = math.max(8.0, rx * cellPx)
                 local okB, bldRaw = pcall(function() return m.Buildable end)
                 local bld = okB and Core.IsValidObj(bldRaw) and bldRaw or nil
                 local bldAddr = bld and bld:GetAddress() or nil
                 local meta = bldAddr and bldMetaCache[bldAddr] or nil
-                local clsKey, sprite, dispName
+                local cat, cellsX, cellsY, clsKey, sprite, dispName
                 if meta then
+                    cat = meta.cat
+                    cellsX = meta.cellsX
+                    cellsY = meta.cellsY
                     clsKey = meta.clsKey
                     sprite = meta.sprite
                     dispName = meta.dispName
                 else
+                    cat = StationData.GetMachineCategory(m)
+                    cellsX, cellsY = StationData.GetMachineFootprintCells(m)
                     clsKey = select(1, GetMachineClassKey(m, bld))
                     sprite = RequestMachineSprite(clsKey, m, cat, bld)
                     dispName = StationData.GetMachineDisplayName(m)
                     if bldAddr then
-                        bldMetaCache[bldAddr] = { clsKey = clsKey, sprite = sprite, dispName = dispName }
+                        bldMetaCache[bldAddr] = {
+                            cat = cat, cellsX = cellsX, cellsY = cellsY,
+                            clsKey = clsKey, sprite = sprite, dispName = dispName,
+                        }
                     end
                 end
+                local rx, ry = GetRotatedCellDims(cellsX, cellsY, myaw)
+                local pxW = math.max(8.0, rx * cellPx)
 
                 local rec = nil
                 local overlayChips = nil
@@ -4206,13 +4332,14 @@ RefreshStationMapCanvas = function(machinesOnly)
                     return
                 end
 
-                -- Phase 1: Index all queued machines first (4ms/frame, deferDirty during initial bulk
-                -- load) so no mega-tile is ever wiped/re-rendered by a neighbor's border machine or link.
+                -- Phase 1: Index all queued machines first (5.5ms/frame pure Lua with full bldMetaCache,
+                -- ~40-80ms total) so machine-rich center mega-tiles begin drawing almost immediately with
+                -- zero redundant tile wipes/re-renders.
                 if idxCursor <= #toIndexQueue then
-                    local budgetEnd = os.clock() + 0.0040
+                    local budgetEnd = os.clock() + 0.0055
                     local indexed = 0
                     local defer = (not rtWallsFlushed)
-                    while idxCursor <= #toIndexQueue and (indexed < 30 or os.clock() < budgetEnd) and indexed < 200 do
+                    while idxCursor <= #toIndexQueue and (indexed < 50 or os.clock() < budgetEnd) and indexed < 320 do
                         indexOneMachineRT(toIndexQueue[idxCursor], defer)
                         idxCursor = idxCursor + 1
                         indexed = indexed + 1
@@ -5236,7 +5363,7 @@ local function CopySelectedMachines()
     SelectedGhosts = {}
     InteractionMode = "Paste"
     PendingRotationDeg = 0
-    RefreshSelectionLayer()
+    RefreshSelectionLayer(true)
     RefreshDynamicOverlay()
 end
 
