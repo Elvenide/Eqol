@@ -1660,18 +1660,6 @@ local function CaptureMachineConfig(m)
                 end
             end
         end
-        if #dis == 0 and m.IsPortEnabled and m.PortStates then
-            local pLen = m.PortStates.GetArrayNum and m.PortStates:GetArrayNum() or #m.PortStates
-            if type(pLen) == "number" and pLen > 0 then
-                for portIdx = 0, math.min(pLen - 1, 15) do
-                    local okP, en = pcall(function() return m:IsPortEnabled(portIdx) end)
-                    if okP and en == false and not seen[portIdx] then
-                        table.insert(dis, portIdx)
-                        seen[portIdx] = true
-                    end
-                end
-            end
-        end
         if #dis > 0 then
             cfg.disabledPorts = dis
             hasAny = true
@@ -1695,7 +1683,7 @@ local function CaptureMachineConfig(m)
             local len = flt.GetArrayNum and flt:GetArrayNum() or #flt
             if type(len) == "number" and len > 0 then
                 cfg.filters = {}
-                for i = 1, len do
+                for i = 1, math.min(len, 16) do
                     local okE, elem = pcall(function() return flt[i] end)
                     if okE and elem ~= nil then
                         local unwrapped = Core.UnwrapArrayElem and Core.UnwrapArrayElem(elem) or elem
@@ -1723,14 +1711,15 @@ local function CaptureMachineConfig(m)
         end
     end)
 
-    -- 5. LogisticFilters array (Splitters, Belt Balancers, etc. - never touches inventory)
+    -- 5. LogisticFilters array (Splitters, Belt Balancers, etc. - never touches inventory;
+    -- never store raw TArray element userdata across frames to avoid dangling pointer crashes!)
     pcall(function()
         local lf = m.LogisticFilters
         if lf then
             local len = lf.GetArrayNum and lf:GetArrayNum() or #lf
             if type(len) == "number" and len > 0 then
                 cfg.logisticFilters = {}
-                for i = 1, len do
+                for i = 1, math.min(len, 16) do
                     local okE, elem = pcall(function() return lf[i] end)
                     if okE and elem ~= nil then
                         local entry = { idx = i - 1 }
@@ -1751,50 +1740,15 @@ local function CaptureMachineConfig(m)
                             elseif elem.Count ~= nil then entry.amount = tonumber(elem.Count)
                             elseif elem.Limit ~= nil then entry.amount = tonumber(elem.Limit) end
                         end)
-                        entry.raw = elem
-                        table.insert(cfg.logisticFilters, entry)
-                        hasAny = true
+                        if Core.IsValidObj(entry.item) or entry.portIndex ~= nil then
+                            table.insert(cfg.logisticFilters, entry)
+                            hasAny = true
+                        end
                     end
                 end
             end
         end
     end)
-
-    -- One-time diagnostic per machine class to log reflected config fields (excluding inventory)
-    if clsKey ~= "" and not MachineConfigDiagLogged[clsKey] then
-        MachineConfigDiagLogged[clsKey] = true
-        local props = {}
-        pcall(function()
-            local c = m:GetClass()
-            local d = 0
-            while Core.IsValidObj(c) and d < 4 do
-                d = d + 1
-                if c.ForEachProperty then
-                    c:ForEachProperty(function(p)
-                        local pn = p:GetFName():ToString()
-                        local low = pn:lower()
-                        if (low:find("recipe", 1, true) or low:find("filter", 1, true) or low:find("priority", 1, true)
-                            or low:find("config", 1, true) or low:find("working", 1, true) or low:find("mode", 1, true)
-                            or low:find("port", 1, true) or low:find("disabled", 1, true) or low:find("length", 1, true))
-                            and not low:find("inventory", 1, true)
-                        then
-                            table.insert(props, pn)
-                        end
-                    end)
-                end
-                c = c.GetSuperStruct and c:GetSuperStruct() or nil
-            end
-        end)
-        Core.Log(string.format("[StationMap] CopyConfigDiag cls=%s hasAny=%s recipe=%s pIn=%s pOut=%s cfg=%s cfg2=%s flt=%d disP=%d lf=%d props=[%s]",
-            clsKey, tostring(hasAny),
-            Core.IsValidObj(cfg.recipe) and cfg.recipe:GetFName():ToString() or "nil",
-            tostring(cfg.priorityInput), tostring(cfg.priorityOutput),
-            tostring(cfg.config), tostring(cfg.config2),
-            cfg.filters and #cfg.filters or 0,
-            cfg.disabledPorts and #cfg.disabledPorts or 0,
-            cfg.logisticFilters and #cfg.logisticFilters or 0,
-            table.concat(props, ",")))
-    end
 
     return hasAny and cfg or nil
 end
@@ -4397,42 +4351,49 @@ RefreshStationMapCanvas = function(machinesOnly)
 
             local syncGenRT = 0
             SyncFloorMachinesIncremental = function()
-                if Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) or not IsMapOpen() then return end
+                if Perf.ActiveRT ~= rtFloor or not Core.IsValidObj(CurrentStation) or not Core.IsValidObj(ActiveMapWin) or not IsMapOpen() then return 0 end
                 local curFl = CurrentFloors[SelectedFloorIdx]
-                if not curFl then return end
+                if not curFl then return 0 end
 
                 syncGenRT = syncGenRT + 1
                 local mySyncGen = syncGenRT
                 StationData.InvalidateMachineCache()
                 local allMachines = StationData.GetAllStationMachines(CurrentStation, curFl.platforms, CurrentWalkFrame) or {}
-                local liveList = {}
-                local liveByAddr = {}
-                local scanIdx = 1
-                local totalScan = #allMachines
 
-                local function pumpSyncScan()
-                    if mySyncGen ~= syncGenRT or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
-                    local budgetEnd = os.clock() + 0.0030
-                    local step = 0
-                    while scanIdx <= totalScan and (step < 15 or os.clock() < budgetEnd) and step < 120 do
-                        local m = allMachines[scanIdx]
-                        scanIdx = scanIdx + 1
-                        step = step + 1
-                        if Core.IsValidObj(m) then
-                            local lx, ly, lz, lyaw = StationData.GetMachineLocalPosAndYaw(m, CurrentFrameXform)
-                            if lx and ly and lz and math.abs(lz - curFl.z) <= 220.0 then
-                                local addr = m:GetAddress()
-                                local me = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw or 0.0 }
-                                liveList[#liveList + 1] = me
-                                liveByAddr[addr] = me
+                -- Fast O(N) address-only diff: stationary machines never move, so we reuse knownByAddr
+                -- and skip machines already known on other floors — ONLY calling GetMachineLocalPosAndYaw
+                -- on genuinely NEW machines! (Turns a 1,892-machine multi-second scan into <2ms!)
+                local otherFloorAddrs = {}
+                for fIdx, fl in ipairs(CurrentFloors) do
+                    if fIdx ~= SelectedFloorIdx and fl and fl.machines then
+                        for i = 1, #fl.machines do
+                            local om = fl.machines[i].machine
+                            if Core.IsValidObj(om) then
+                                otherFloorAddrs[om:GetAddress()] = true
                             end
                         end
                     end
-                    if scanIdx <= totalScan then
-                        ExecuteInGameThreadAfterFrames(1, pumpSyncScan)
-                        return
-                    end
+                end
 
+                local liveList = {}
+                local liveByAddr = {}
+                local newCandidates = {}
+                for i = 1, #allMachines do
+                    local m = allMachines[i]
+                    if Core.IsValidObj(m) then
+                        local addr = m:GetAddress()
+                        local existing = knownByAddr[addr]
+                        if existing then
+                            liveList[#liveList + 1] = existing
+                            liveByAddr[addr] = existing
+                        elseif not otherFloorAddrs[addr] then
+                            newCandidates[#newCandidates + 1] = m
+                        end
+                    end
+                end
+
+                local function applyDiff()
+                    if mySyncGen ~= syncGenRT or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return 0 end
                     curFl.machines = liveList
                     local removedCount = 0
                     for addr, _ in pairs(knownByAddr) do
@@ -4460,7 +4421,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                     if removedCount > 0 then
                         LastHoveredPortIdx = nil
                         LastHoveredMachineAddr = nil
-                        RefreshSelectionLayer()
+                        RefreshSelectionLayer(true)
                         RefreshDynamicOverlay()
                     end
                     if removedCount > 0 or addedCount > 0 then
@@ -4469,8 +4430,54 @@ RefreshStationMapCanvas = function(machinesOnly)
                             RevalidatePendingChanges(false)
                         end
                     end
+                    return removedCount + addedCount
                 end
-                ExecuteInGameThreadAfterFrames(1, pumpSyncScan)
+
+                if #newCandidates <= 40 then
+                    for i = 1, #newCandidates do
+                        local m = newCandidates[i]
+                        if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
+                            local lx, ly, lz, lyaw = StationData.GetMachineLocalPosAndYaw(m, CurrentFrameXform)
+                            if lx and ly and lz and math.abs(lz - curFl.z) <= 220.0 then
+                                local addr = m:GetAddress()
+                                local me = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw or 0.0 }
+                                liveList[#liveList + 1] = me
+                                liveByAddr[addr] = me
+                            end
+                        end
+                    end
+                    return applyDiff()
+                end
+
+                -- Large batch of new machines (>40): time-slice GetMachineLocalPosAndYaw at 4ms/frame
+                local scanIdx = 1
+                local totalScan = #newCandidates
+                local function pumpNewScan()
+                    if mySyncGen ~= syncGenRT or Perf.ActiveRT ~= rtFloor or not IsMapOpen() then return end
+                    local budgetEnd = os.clock() + 0.0040
+                    local step = 0
+                    while scanIdx <= totalScan and (step < 20 or os.clock() < budgetEnd) and step < 120 do
+                        local m = newCandidates[scanIdx]
+                        scanIdx = scanIdx + 1
+                        step = step + 1
+                        if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
+                            local lx, ly, lz, lyaw = StationData.GetMachineLocalPosAndYaw(m, CurrentFrameXform)
+                            if lx and ly and lz and math.abs(lz - curFl.z) <= 220.0 then
+                                local addr = m:GetAddress()
+                                local me = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw or 0.0 }
+                                liveList[#liveList + 1] = me
+                                liveByAddr[addr] = me
+                            end
+                        end
+                    end
+                    if scanIdx <= totalScan then
+                        ExecuteInGameThreadAfterFrames(1, pumpNewScan)
+                    else
+                        applyDiff()
+                    end
+                end
+                ExecuteInGameThreadAfterFrames(1, pumpNewScan)
+                return #newCandidates
             end
 
             RefreshSingleMachineVisual = function(mAddr)
@@ -5497,9 +5504,11 @@ local function CommitPendingGhosts()
                 end
             end
 
+            local firstSyncChanged = 0
             local function pollNewMachinesAndConfig()
                 if SyncFloorMachinesIncremental then
-                    SyncFloorMachinesIncremental()
+                    local ch = SyncFloorMachinesIncremental()
+                    if type(ch) == "number" then firstSyncChanged = firstSyncChanged + ch end
                 end
                 if #pendingCfg == 0 then
                     return
@@ -5568,11 +5577,11 @@ local function CommitPendingGhosts()
                 end
             end
 
-            ExecuteInGameThreadWithDelay(150, pollNewMachinesAndConfig)
+            ExecuteInGameThreadWithDelay(100, pollNewMachinesAndConfig)
             if #pendingCfg == 0 then
-                -- Follow-up sync for higher-RTT MP clients when no config polling is active
+                -- Follow-up sync ONLY for higher-RTT MP clients when the 100ms sync saw 0 changes
                 ExecuteInGameThreadWithDelay(650, function()
-                    if IsMapOpen() and SyncFloorMachinesIncremental then
+                    if IsMapOpen() and firstSyncChanged == 0 and SyncFloorMachinesIncremental then
                         SyncFloorMachinesIncremental()
                     end
                 end)
@@ -5737,37 +5746,54 @@ local function HandleMapLeftClick(mx, my, isShift)
         local stampId = tostring(os.clock())
         local staged = {}
         local skippedBlocked = 0
-        local ghostCellBuckets = {}
-        local function addGhostPointToBuckets(px, py)
-            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
-            local k = bx .. "," .. by
-            local list = ghostCellBuckets[k]
-            if not list then list = {}; ghostCellBuckets[k] = list end
-            list[#list + 1] = { x = px, y = py }
+        local replacedGhostIds = {}
+        local replacedGhostCount = 0
+
+        local function rectsOverlapCm(ax, ay, ahw, ahh, bx, by, bhw, bhh)
+            return math.abs(ax - bx) < (ahw + bhw - 8.0) and math.abs(ay - by) < (ahh + bhh - 8.0)
         end
-        local function hasNearbyGhostPoint(px, py)
-            local bx, by = math.floor(px / 50.0), math.floor(py / 50.0)
-            for dx = -1, 1 do
-                for dy = -1, 1 do
-                    local list = ghostCellBuckets[(bx + dx) .. "," .. (by + dy)]
-                    if list then
-                        for i = 1, #list do
-                            if math.abs(list[i].x - px) < 25.0 and math.abs(list[i].y - py) < 25.0 then
-                                return true
+
+        local function isItemSplitterOrBalancer(it)
+            local clsLow = (it.actorClsPath or ""):lower()
+            return (clsLow:find("splitter", 1, true) ~= nil) or (clsLow:find("balancer", 1, true) ~= nil)
+        end
+
+        -- Evaluate footprint overlap against both existing PendingGhosts and already-staged ghosts:
+        -- Splitters & Belt Balancers cleanly replace overlapped ghost Conveyor Belts (matching real Smart Replace!).
+        local function checkGhostOverlap(item, sx, sy, pX, pY, finalYaw)
+            local rx, ry = GetRotatedCellDims(item.cellsX or 1, item.cellsY or 1, finalYaw)
+            local hw, hh = rx * CELL_CM * 0.5, ry * CELL_CM * 0.5
+            local canReplaceConveyor = isItemSplitterOrBalancer(item)
+            local toReplace = {}
+
+            local function testList(list, allowReplace)
+                for _, eg in ipairs(list) do
+                    if not replacedGhostIds[eg.ghostId] and math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
+                        local erx, ery = GetRotatedCellDims(eg.cellsX or 1, eg.cellsY or 1, eg.yaw or 0)
+                        local ehw, ehh = erx * CELL_CM * 0.5, ery * CELL_CM * 0.5
+                        local hit = rectsOverlapCm(sx, sy, hw, hh, eg.x, eg.y, ehw, ehh)
+                        if not hit and eg.pairX and eg.pairY then
+                            hit = rectsOverlapCm(sx, sy, hw, hh, eg.pairX, eg.pairY, ehw, ehh)
+                        end
+                        if not hit and pX and pY then
+                            hit = rectsOverlapCm(pX, pY, hw, hh, eg.x, eg.y, ehw, ehh)
+                                or (eg.pairX and eg.pairY and rectsOverlapCm(pX, pY, hw, hh, eg.pairX, eg.pairY, ehw, ehh))
+                        end
+                        if hit then
+                            if allowReplace and canReplaceConveyor and (eg.cat == "Conveyor") then
+                                toReplace[#toReplace + 1] = eg
+                            else
+                                return false
                             end
                         end
                     end
                 end
+                return true
             end
-            return false
-        end
-        for _, eg in ipairs(PendingGhosts) do
-            if math.abs((eg.z or floor.z) - floor.z) <= 250.0 then
-                addGhostPointToBuckets(eg.x, eg.y)
-                if eg.pairX and eg.pairY then
-                    addGhostPointToBuckets(eg.pairX, eg.pairY)
-                end
-            end
+
+            if not testList(PendingGhosts, true) then return false, nil end
+            if not testList(staged, false) then return false, nil end
+            return true, toReplace
         end
         -- Pre-filter floor walls to only those near the clipboard's bounding box for fast O(1) paste validation
         local pasteFloor = floor
@@ -5821,10 +5847,16 @@ local function HandleMapLeftClick(mx, my, isShift)
                 if inBounds then
                     local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, pasteFloor)
                     if allowed then
-                        local dupGhost = hasNearbyGhostPoint(sx, sy) or (pX ~= nil and pY ~= nil and hasNearbyGhostPoint(pX, pY))
-                        if not dupGhost then
-                            addGhostPointToBuckets(sx, sy)
-                            if pX and pY then addGhostPointToBuckets(pX, pY) end
+                        local ghostOk, ghostsToReplace = checkGhostOverlap(item, sx, sy, pX, pY, finalYaw)
+                        if ghostOk then
+                            if ghostsToReplace and #ghostsToReplace > 0 then
+                                for _, rg in ipairs(ghostsToReplace) do
+                                    if rg.ghostId and not replacedGhostIds[rg.ghostId] then
+                                        replacedGhostIds[rg.ghostId] = true
+                                        replacedGhostCount = replacedGhostCount + 1
+                                    end
+                                end
+                            end
                             NextGhostSeq = NextGhostSeq + 1
                             table.insert(staged, {
                                 ghostId = "ghost:" .. tostring(NextGhostSeq),
@@ -5863,6 +5895,17 @@ local function HandleMapLeftClick(mx, my, isShift)
         -- Allow freely staging pasted ghosts (matching Ship/Station Designer behavior;
         -- Modification Cost + Build Validation gate Apply Changes).
         -- Select the newly pasted ghost group so pressing X immediately undoes a misplaced paste.
+        -- Remove any ghost conveyor belts cleanly replaced by pasted splitters/balancers
+        if replacedGhostCount > 0 then
+            local kept = {}
+            for _, eg in ipairs(PendingGhosts) do
+                if not (eg.ghostId and replacedGhostIds[eg.ghostId]) then
+                    kept[#kept + 1] = eg
+                end
+            end
+            PendingGhosts = kept
+        end
+
         SelectedMachines = {}
         SelectedGhosts = {}
         for _, g in ipairs(staged) do
@@ -5871,10 +5914,13 @@ local function HandleMapLeftClick(mx, my, isShift)
                 SelectedGhosts[g.ghostId] = g
             end
         end
-        -- Append ONLY newly pasted ghosts (never destroys/rerenders existing ghosts!)
-        -- and defer UpdateActionBar by 1 frame so inventory cost scanning doesn't hitch the click frame.
-        AppendGhostsToSelectionCanvas(staged)
-        RefreshSelectionLayer(true)
+        if replacedGhostCount > 0 then
+            RefreshSelectionLayer(false)
+        else
+            -- Append ONLY newly pasted ghosts (never destroys/rerenders existing ghosts!)
+            AppendGhostsToSelectionCanvas(staged)
+            RefreshSelectionLayer(true)
+        end
         ExecuteInGameThreadAfterFrames(1, function()
             if IsMapOpen() then UpdateActionBar() end
         end)
