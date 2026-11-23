@@ -3604,10 +3604,10 @@ RefreshStationMapCanvas = function(machinesOnly)
                 staticPumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.0030
+            local budgetEnd = os.clock() + 0.0065
             local addedGrid = false
             local gCount = 0
-            while gIdx <= #deferredGridLines and (gCount < 6 or os.clock() < budgetEnd) and gCount < 24 do
+            while gIdx <= #deferredGridLines and (gCount < 12 or os.clock() < budgetEnd) and gCount < 64 do
                 local dg = deferredGridLines[gIdx]
                 local line, s = AddBorderFast(outer, MapUI.MapCanvas, dg.posX, dg.posY, dg.w, dg.h, COLORS.GridLine, 3)
                 if line and s then
@@ -3629,7 +3629,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 UpdateGridAppearanceForZoom(ViewTransform.scale / BASE_PX_PER_CM)
             end
             local wCount = 0
-            while wQueueIdx <= #visibleWallQueue and (wCount < 4 or os.clock() < budgetEnd) and wCount < 18 do
+            while wQueueIdx <= #visibleWallQueue and (wCount < 8 or os.clock() < budgetEnd) and wCount < 48 do
                 local dw = visibleWallQueue[wQueueIdx]
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + wallBorderPad, dw.wh + wallBorderPad, COLORS.WallBorder, 5)
                 AddBorderFast(outer, MapUI.MapCanvas, dw.wx, dw.wy, dw.ww + 1.0, dw.wh + 1.0, COLORS.WallFill, 6)
@@ -3637,7 +3637,7 @@ RefreshStationMapCanvas = function(machinesOnly)
                 wCount = wCount + 1
             end
             if gIdx <= #deferredGridLines or wQueueIdx <= #visibleWallQueue then
-                ExecuteInGameThreadAfterFrames(2, pumpStaticBatch)
+                ExecuteInGameThreadAfterFrames(1, pumpStaticBatch)
             else
                 staticPumpRunning = false
             end
@@ -3729,6 +3729,9 @@ RefreshStationMapCanvas = function(machinesOnly)
         local visibleMachineQueue = {}
         local mQueueIdx = 1
         local pIdx = 1
+        local deferredIconsByChunk = {} -- "cx,cy" -> { minX, maxX, minY, maxY, items = {}, unbuilt = 0 }
+        local visibleIconQueue = {}
+        local iQueueIdx = 1
         local machinePumpRunning = false
         local knownPendingByAddr = {}
         for _, pm in ipairs(pendingMachines) do
@@ -3902,87 +3905,42 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
 
             if hasBottomOverlay then
-                local isHidden = StationData.IsMachineIconHidden(m)
-                local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 16.0, 32.0)
-                local badgeW = #overlayChips * (iconSize + 10.0) + ((#overlayChips > 1) and 4.0 or 0.0)
-                if isProducer then
-                    badgeW = math.max(badgeW, #overlayChips * math.max(44.0, iconSize + 20.0))
+                -- Defer heavy Blueprint icon/rate overlays (WBP_Button_C + WBP_Item_C + WBP_Text_C)
+                -- so machine bodies populate at max speed and icon overlays only build when zoomed in & on-screen.
+                local cx, cy, ck = getChunkCoords(mwx, mwy)
+                local ib = deferredIconsByChunk[ck]
+                if not ib then
+                    ib = {
+                        minX = cx * CHUNK_CM - 300.0,
+                        maxX = (cx + 1) * CHUNK_CM + 300.0,
+                        minY = cy * CHUNK_CM - 300.0,
+                        maxY = (cy + 1) * CHUNK_CM + 300.0,
+                        items = {},
+                        unbuilt = 0,
+                    }
+                    deferredIconsByChunk[ck] = ib
                 end
-                local badgeH = isProducer and (iconSize + 18.0) or (iconSize + 6.0)
-                local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
-
-                local ov = CreateRawFast(PATHS.OverlayClass, outer)
-                local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
-                local chipsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
-                if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(chipsHBox) then
-                    table.insert(mWidgets, ov)
-                    pcall(function()
-                        iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.72 })
-                        iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                        local bSlot = ov:AddChildToOverlay(iconBtn)
-                        if Core.IsValidObj(bSlot) then
-                            bSlot:SetHorizontalAlignment(0)
-                            bSlot:SetVerticalAlignment(0)
-                        end
-                        local cSlot = ov:AddChildToOverlay(chipsHBox)
-                        if Core.IsValidObj(cSlot) then
-                            cSlot:SetHorizontalAlignment(2)
-                            cSlot:SetVerticalAlignment(2)
-                        end
-                        chipsHBox:SetVisibility(3)
-
-                        for ci, chip in ipairs(overlayChips) do
-                            local chipVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
-                            local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
-                            if Core.IsValidObj(chipVBox) and Core.IsValidObj(itemW) then
-                                chipVBox:SetVisibility(3)
-                                local iwSlot = chipVBox:AddChildToVerticalBox(itemW)
-                                if Core.IsValidObj(iwSlot) then iwSlot:SetHorizontalAlignment(2) end
-                                itemW.TooltipEnabled = false
-                                itemW:SetVisibility(3)
-                                itemW:SetIconSize(iconSize)
-                                itemW:SetItem(chip.item)
-                                itemW:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
-
-                                if chip.rate ~= nil then
-                                    local rTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
-                                    if Core.IsValidObj(rTxt) then
-                                        local rtSlot = chipVBox:AddChildToVerticalBox(rTxt)
-                                        if Core.IsValidObj(rtSlot) then rtSlot:SetHorizontalAlignment(2) end
-                                        local rateStr = (chip.rate >= 10.0) and string.format("%.0f/min", chip.rate) or string.format("%.1f/min", chip.rate)
-                                        rTxt:SetVisibility(3)
-                                        rTxt:SetSize(10)
-                                        rTxt:SetText(Core.MakeText(rateStr))
-                                    end
-                                end
-
-                                local hbSlot = chipsHBox:AddChildToHorizontalBox(chipVBox)
-                                if Core.IsValidObj(hbSlot) then
-                                    hbSlot:SetVerticalAlignment(2)
-                                    if ci > 1 then
-                                        hbSlot:SetPadding({ Left = 4.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
-                                    end
-                                end
-                            end
-                        end
-                    end)
-
-                    local iconParent = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
-                    local iconTarget = getOrCreateChunkCanvas(iconChunks, iconParent, mwx, mwy)
-                    local iSlot = iconTarget:AddChildToCanvas(ov)
-                    SetCanvasSlot(iSlot, mx, badgeY, badgeW, badgeH, 0.5, 0.5, 40)
-
-                    FloorIconButtons[mAddr] = { btn = iconBtn, widget = chipsHBox }
-                    local capturedM = m
-                    local capturedGroup = chipsHBox
-                    Core.RegisterWBPButtonClick(iconBtn, function()
-                        local nowHidden = StationData.ToggleMachineIcon(capturedM)
-                        if Core.IsValidObj(capturedGroup) then
-                            pcall(function()
-                                capturedGroup:SetRenderOpacity(nowHidden and 0.25 or 1.0)
-                            end)
-                        end
-                    end)
+                local iconJob = {
+                    m = m,
+                    mAddr = mAddr,
+                    mx = mx,
+                    my = my,
+                    pxW = pxW,
+                    pxH = pxH,
+                    mwx = mwx,
+                    mwy = mwy,
+                    overlayChips = overlayChips,
+                    isProducer = isProducer,
+                    track = mTrack,
+                    mWidgets = mWidgets,
+                    queued = false,
+                }
+                ib.items[#ib.items + 1] = iconJob
+                if Perf.LastIconCanvasVisible == true then
+                    iconJob.queued = true
+                    visibleIconQueue[#visibleIconQueue + 1] = iconJob
+                else
+                    ib.unbuilt = ib.unbuilt + 1
                 end
             end
 
@@ -4022,20 +3980,113 @@ RefreshStationMapCanvas = function(machinesOnly)
             end
         end
 
+        local function buildOneDeferredIcon(job)
+            if not job or not job.track or job.track.cancelled or not Core.IsValidObj(job.m) then return end
+            local m = job.m
+            local mAddr = job.mAddr
+            local overlayChips = job.overlayChips
+            local isProducer = job.isProducer
+            local pxW, pxH = job.pxW, job.pxH
+            local mx, my = job.mx, job.my
+
+            local isHidden = StationData.IsMachineIconHidden(m)
+            local iconSize = Core.Clamp(math.min(pxW * (#overlayChips > 1 and 0.34 or 0.50), pxH * 0.36), 16.0, 32.0)
+            local badgeW = #overlayChips * (iconSize + 10.0) + ((#overlayChips > 1) and 4.0 or 0.0)
+            if isProducer then
+                badgeW = math.max(badgeW, #overlayChips * math.max(44.0, iconSize + 20.0))
+            end
+            local badgeH = isProducer and (iconSize + 18.0) or (iconSize + 6.0)
+            local badgeY = (pxH >= 52.0) and (my + pxH * 0.24) or my
+
+            local ov = CreateRawFast(PATHS.OverlayClass, outer)
+            local iconBtn = Core.CreateUserWidget(PATHS.WBPButtonClass, MapUI.Window, pc)
+            local chipsHBox = CreateRawFast(PATHS.HorizontalBoxClass, outer)
+            if Core.IsValidObj(ov) and Core.IsValidObj(iconBtn) and Core.IsValidObj(chipsHBox) then
+                table.insert(job.mWidgets, ov)
+                pcall(function()
+                    iconBtn:SetBackgroundColour({ R = 0.03, G = 0.04, B = 0.06, A = 0.72 })
+                    iconBtn:SetContentPadding({ Left = 0.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                    local bSlot = ov:AddChildToOverlay(iconBtn)
+                    if Core.IsValidObj(bSlot) then
+                        bSlot:SetHorizontalAlignment(0)
+                        bSlot:SetVerticalAlignment(0)
+                    end
+                    local cSlot = ov:AddChildToOverlay(chipsHBox)
+                    if Core.IsValidObj(cSlot) then
+                        cSlot:SetHorizontalAlignment(2)
+                        cSlot:SetVerticalAlignment(2)
+                    end
+                    chipsHBox:SetVisibility(3)
+
+                    for ci, chip in ipairs(overlayChips) do
+                        local chipVBox = CreateRawFast(PATHS.VerticalBoxClass, outer)
+                        local itemW = Core.CreateUserWidget(PATHS.WBPItemClass, MapUI.Window, pc)
+                        if Core.IsValidObj(chipVBox) and Core.IsValidObj(itemW) then
+                            chipVBox:SetVisibility(3)
+                            local iwSlot = chipVBox:AddChildToVerticalBox(itemW)
+                            if Core.IsValidObj(iwSlot) then iwSlot:SetHorizontalAlignment(2) end
+                            itemW.TooltipEnabled = false
+                            itemW:SetVisibility(3)
+                            itemW:SetIconSize(iconSize)
+                            itemW:SetItem(chip.item)
+                            itemW:SetColorAndOpacity({ R = 1.0, G = 1.0, B = 1.0, A = isHidden and 0.25 or 1.0 })
+
+                            if chip.rate ~= nil then
+                                local rTxt = Core.CreateUserWidget(PATHS.WBPTextClass, MapUI.Window, pc)
+                                if Core.IsValidObj(rTxt) then
+                                    local rtSlot = chipVBox:AddChildToVerticalBox(rTxt)
+                                    if Core.IsValidObj(rtSlot) then rtSlot:SetHorizontalAlignment(2) end
+                                    local rateStr = (chip.rate >= 10.0) and string.format("%.0f/min", chip.rate) or string.format("%.1f/min", chip.rate)
+                                    rTxt:SetVisibility(3)
+                                    rTxt:SetSize(10)
+                                    rTxt:SetText(Core.MakeText(rateStr))
+                                end
+                            end
+
+                            local hbSlot = chipsHBox:AddChildToHorizontalBox(chipVBox)
+                            if Core.IsValidObj(hbSlot) then
+                                hbSlot:SetVerticalAlignment(2)
+                                if ci > 1 then
+                                    hbSlot:SetPadding({ Left = 4.0, Top = 0.0, Right = 0.0, Bottom = 0.0 })
+                                end
+                            end
+                        end
+                    end
+                end)
+
+                local iconParent = Core.IsValidObj(MapUI.IconCanvas) and MapUI.IconCanvas or MapUI.MapCanvas
+                local iconTarget = getOrCreateChunkCanvas(iconChunks, iconParent, job.mwx, job.mwy)
+                local iSlot = iconTarget:AddChildToCanvas(ov)
+                SetCanvasSlot(iSlot, mx, badgeY, badgeW, badgeH, 0.5, 0.5, 40)
+
+                FloorIconButtons[mAddr] = { btn = iconBtn, widget = chipsHBox }
+                local capturedM = m
+                local capturedGroup = chipsHBox
+                Core.RegisterWBPButtonClick(iconBtn, function()
+                    local nowHidden = StationData.ToggleMachineIcon(capturedM)
+                    if Core.IsValidObj(capturedGroup) then
+                        pcall(function()
+                            capturedGroup:SetRenderOpacity(nowHidden and 0.25 or 1.0)
+                        end)
+                    end
+                end)
+            end
+        end
+
         local function pumpMachineBatch()
             if myMachineGen ~= MachineRenderGen or not Core.IsValidObj(ActiveMapWin) or not MapUI or not Core.IsValidObj(mCanvas) then
                 machinePumpRunning = false
                 return
             end
-            local budgetEnd = os.clock() + 0.0035
+            local budgetEnd = os.clock() + 0.0070
             local mCount = 0
-            while mQueueIdx <= #visibleMachineQueue and (mCount < 3 or os.clock() < budgetEnd) and mCount < 14 do
+            while mQueueIdx <= #visibleMachineQueue and (mCount < 10 or os.clock() < budgetEnd) and mCount < 60 do
                 processOneMachine(visibleMachineQueue[mQueueIdx])
                 mQueueIdx = mQueueIdx + 1
                 mCount = mCount + 1
             end
             local pCount = 0
-            while pIdx <= #deferredPorts and (pCount < 4 or os.clock() < budgetEnd) and pCount < 16 do
+            while pIdx <= #deferredPorts and (pCount < 12 or os.clock() < budgetEnd) and pCount < 64 do
                 local dp = deferredPorts[pIdx]
                 pIdx = pIdx + 1
                 if dp and dp.track and not dp.track.cancelled then
@@ -4044,8 +4095,20 @@ RefreshStationMapCanvas = function(machinesOnly)
                     pCount = pCount + 1
                 end
             end
-            if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts then
-                ExecuteInGameThreadAfterFrames(2, pumpMachineBatch)
+            local iCount = 0
+            if mQueueIdx > #visibleMachineQueue and Perf.LastIconCanvasVisible == true then
+                while iQueueIdx <= #visibleIconQueue and (iCount < 4 or os.clock() < budgetEnd) and iCount < 16 do
+                    local job = visibleIconQueue[iQueueIdx]
+                    iQueueIdx = iQueueIdx + 1
+                    if job and job.track and not job.track.cancelled then
+                        buildOneDeferredIcon(job)
+                        iCount = iCount + 1
+                    end
+                end
+            end
+            local hasMoreIcons = (Perf.LastIconCanvasVisible == true and iQueueIdx <= #visibleIconQueue)
+            if mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts or hasMoreIcons then
+                ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             else
                 machinePumpRunning = false
             end
@@ -4076,6 +4139,27 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
+            -- 1b. When zoomed in (IconCanvas visible), queue unbuilt icon overlays for visible chunks
+            if Perf.LastIconCanvasVisible == true then
+                for _, ib in pairs(deferredIconsByChunk) do
+                    if ib.unbuilt > 0
+                        and ib.maxX >= vMinX and ib.minX <= vMaxX
+                        and ib.maxY >= vMinY and ib.minY <= vMaxY
+                    then
+                        for i = 1, #ib.items do
+                            local job = ib.items[i]
+                            if not job.queued then
+                                job.queued = true
+                                ib.unbuilt = math.max(0, ib.unbuilt - 1)
+                                if job.track and not job.track.cancelled then
+                                    visibleIconQueue[#visibleIconQueue + 1] = job
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
             -- 2. Viewport-cull spatial chunk UCanvasPanels (Collapse off-screen chunks in O(chunks))
             for _, ch in pairs(machineChunks) do
                 if Core.IsValidObj(ch.canvas) then
@@ -4096,7 +4180,8 @@ RefreshStationMapCanvas = function(machinesOnly)
                 end
             end
 
-            if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts) then
+            local hasMoreIcons = (Perf.LastIconCanvasVisible == true and iQueueIdx <= #visibleIconQueue)
+            if not machinePumpRunning and (mQueueIdx <= #visibleMachineQueue or pIdx <= #deferredPorts or hasMoreIcons) then
                 machinePumpRunning = true
                 ExecuteInGameThreadAfterFrames(1, pumpMachineBatch)
             end
