@@ -3352,6 +3352,79 @@ RefreshDynamicOverlay = function(preHoveredPort, preHoveredMachine, hasPreHover)
     LastHadDynamicOverlay = (MouseState.lDraggingBox or InteractionMode ~= "Select" or hoveredMachine ~= nil or hoveredPort ~= nil)
 end
 
+local function DrawSingleGhostOnSelectionCanvas(outer, pc, gp, compactGhosts, replaceFillCol, replaceBdrCol)
+    local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
+    local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
+    local pxW = math.max(8.0, rx * BASE_CELL_PX)
+    local pxH = math.max(8.0, ry * BASE_CELL_PX)
+    local gpCat = gp.cat or "Other"
+    local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
+    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+    if gp.isReplace then
+        AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
+    end
+    local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
+    if not (compactGhosts and gpCat == "Conveyor" and not gp.isReplace) then
+        RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+    end
+    if gp.isReplace then
+        DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
+    end
+    local clsLow = (gp.actorClsPath or ""):lower()
+    if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
+        AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
+    elseif clsLow:find("underground", 1, true) then
+        AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+        if gp.pairX and gp.pairY then
+            local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+            if gp.isReplace then
+                AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
+                DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
+            end
+            RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+            AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+            RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
+            local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
+            AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
+        end
+    end
+end
+
+local function AppendGhostsToSelectionCanvas(newGhosts)
+    if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) or not newGhosts or #newGhosts == 0 then return end
+    local floor = CurrentFloors[SelectedFloorIdx]
+    if not floor then return end
+    local outer = Core.GetWidgetOuter(MapUI.Window)
+    local pc = MapUI.PC
+    local myFullGen = Perf.SelRenderGen or 0
+    local replaceFillCol = { R = 0.12, G = 0.48, B = 0.98, A = 0.44 }
+    local replaceBdrCol  = { R = 0.28, G = 0.76, B = 1.00, A = 0.98 }
+    local compactGhosts = (#PendingGhosts > 40)
+    local gIdx = 1
+    local totalG = #newGhosts
+
+    local function pumpAppend()
+        if (Perf.SelRenderGen or 0) ~= myFullGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
+            return
+        end
+        local budgetEnd = os.clock() + 0.0030
+        local ops = 0
+        while gIdx <= totalG and (ops < 10 or os.clock() < budgetEnd) and ops < 50 do
+            local gp = newGhosts[gIdx]
+            gIdx = gIdx + 1
+            if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+                ops = ops + 1
+                DrawSingleGhostOnSelectionCanvas(outer, pc, gp, compactGhosts, replaceFillCol, replaceBdrCol)
+            end
+        end
+        if gIdx <= totalG then
+            ExecuteInGameThreadAfterFrames(1, pumpAppend)
+        end
+    end
+    pumpAppend()
+end
+
 local function RefreshSelectionLayer(selectionOnly)
     if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -3359,8 +3432,23 @@ local function RefreshSelectionLayer(selectionOnly)
     local outer = Core.GetWidgetOuter(MapUI.Window)
     local pc = MapUI.PC
 
-    -- Fast path: update ONLY real-machine selection highlights without touching stamped PendingGhosts/PendingDeletes
-    if selectionOnly then
+    -- Build unified highlight list for BOTH SelectedMachines and SelectedGhosts (never touches ghost/delete widgets!)
+    local function buildHighlightList()
+        local list = {}
+        for _, rm in ipairs(RenderedMachines) do
+            if SelectedMachines[rm.addr] ~= nil then
+                list[#list + 1] = rm
+            end
+        end
+        for _, gp in pairs(SelectedGhosts) do
+            if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+                list[#list + 1] = gp
+            end
+        end
+        return list
+    end
+
+    local function startHighlightPump(selList)
         Perf.SelOnlyGen = (Perf.SelOnlyGen or 0) + 1
         local mySelOnlyGen = Perf.SelOnlyGen
         if Perf.SelHighlightWidgets then
@@ -3369,13 +3457,8 @@ local function RefreshSelectionLayer(selectionOnly)
             end
         end
         Perf.SelHighlightWidgets = {}
+        if #selList == 0 then return end
 
-        local selList = {}
-        for _, rm in ipairs(RenderedMachines) do
-            if SelectedMachines[rm.addr] ~= nil then
-                selList[#selList + 1] = rm
-            end
-        end
         local compactSel = (#selList > 30)
         local selBulkCol = { R = COLORS.Selected.R, G = COLORS.Selected.G, B = COLORS.Selected.B, A = 0.48 }
         local sIdx = 1
@@ -3405,18 +3488,18 @@ local function RefreshSelectionLayer(selectionOnly)
                 local pxW = math.max(8.0, rx * BASE_CELL_PX)
                 local pxH = math.max(8.0, ry * BASE_CELL_PX)
                 if compactSel then
-                    addTrackedSelBorder(bx, by, pxW, pxH, selBulkCol, 2)
+                    addTrackedSelBorder(bx, by, pxW, pxH, selBulkCol, 12)
                     if rm.pairX and rm.pairY then
                         local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                        addTrackedSelBorder(pbx, pby, pxW, pxH, selBulkCol, 2)
+                        addTrackedSelBorder(pbx, pby, pxW, pxH, selBulkCol, 12)
                     end
                 else
-                    addTrackedSelBorder(bx, by, pxW, pxH, COLORS.SelectedFill, 1)
-                    addTrackedSelOutline(bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
+                    addTrackedSelBorder(bx, by, pxW, pxH, COLORS.SelectedFill, 12)
+                    addTrackedSelOutline(bx, by, pxW, pxH, 2.8, COLORS.Selected, 13)
                     if rm.pairX and rm.pairY then
                         local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                        addTrackedSelBorder(pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
-                        addTrackedSelOutline(pbx, pby, pxW, pxH, 2.5, COLORS.Selected, 2)
+                        addTrackedSelBorder(pbx, pby, pxW, pxH, COLORS.SelectedFill, 12)
+                        addTrackedSelOutline(pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 13)
                     end
                 end
             end
@@ -3425,22 +3508,20 @@ local function RefreshSelectionLayer(selectionOnly)
             end
         end
         pumpSelOnly()
+    end
+
+    -- Fast path: update ONLY selection highlights (machines + ghosts) without touching stamped ghosts/deletes!
+    if selectionOnly then
+        startHighlightPump(buildHighlightList())
         UpdateStatusBanner()
         return
     end
 
     Perf.SelRenderGen = (Perf.SelRenderGen or 0) + 1
-    Perf.SelOnlyGen = (Perf.SelOnlyGen or 0) + 1
     local mySelGen = Perf.SelRenderGen
     Perf.SelHighlightWidgets = {}
     ClearCanvasChildren(MapUI.SelectionCanvas)
 
-    local selList = {}
-    for _, rm in ipairs(RenderedMachines) do
-        if SelectedMachines[rm.addr] ~= nil then
-            selList[#selList + 1] = rm
-        end
-    end
     local delList = {}
     for _, dm in pairs(PendingDeletes) do
         if math.abs((dm.z or floor.z) - floor.z) <= 250.0 then
@@ -3454,8 +3535,6 @@ local function RefreshSelectionLayer(selectionOnly)
         end
     end
 
-    local compactSel = (#selList > 30)
-    local selBulkCol = { R = COLORS.Selected.R, G = COLORS.Selected.G, B = COLORS.Selected.B, A = 0.48 }
     local delFillCol = { R = 0.88, G = 0.10, B = 0.10, A = 0.44 }
     local delBdrCol  = { R = 1.00, G = 0.22, B = 0.22, A = 0.98 }
     local delXCol    = { R = 1.00, G = 0.16, B = 0.16, A = 1.00 }
@@ -3479,7 +3558,7 @@ local function RefreshSelectionLayer(selectionOnly)
         end
     end
 
-    local sIdx, dIdx, gIdx = 1, 1, 1
+    local dIdx, gIdx = 1, 1
     local function pumpSelectionLayer()
         if mySelGen ~= Perf.SelRenderGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
             return
@@ -3487,49 +3566,7 @@ local function RefreshSelectionLayer(selectionOnly)
         local budgetEnd = os.clock() + 0.0030
         local ops = 0
 
-        while sIdx <= #selList and (ops < 15 or os.clock() < budgetEnd) and ops < 90 do
-            local rm = selList[sIdx]
-            sIdx = sIdx + 1
-            ops = ops + 1
-            local bx, by = WorldToBaseCanvas(rm.x, rm.y)
-            local rx, ry = GetRotatedCellDims(rm.cellsX or 1, rm.cellsY or 1, rm.yaw or 0)
-            local pxW = math.max(8.0, rx * BASE_CELL_PX)
-            local pxH = math.max(8.0, ry * BASE_CELL_PX)
-            if compactSel then
-                local b1 = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, selBulkCol, 2)
-                if b1 then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b1 end
-                if rm.pairX and rm.pairY then
-                    local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                    local b2 = AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, selBulkCol, 2)
-                    if b2 then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b2 end
-                end
-            else
-                local b1 = AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, COLORS.SelectedFill, 1)
-                if b1 then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = b1 end
-                local hw, hh = pxW * 0.5, pxH * 0.5
-                for _, seg in ipairs({
-                    { bx, by - hh, pxW + 2.5, 2.5 }, { bx, by + hh, pxW + 2.5, 2.5 },
-                    { bx - hw, by, 2.5, pxH + 2.5 }, { bx + hw, by, 2.5, pxH + 2.5 },
-                }) do
-                    local eb = AddBorderFast(outer, MapUI.SelectionCanvas, seg[1], seg[2], seg[3], seg[4], COLORS.Selected, 2)
-                    if eb then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = eb end
-                end
-                if rm.pairX and rm.pairY then
-                    local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                    local bp = AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
-                    if bp then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = bp end
-                    for _, seg in ipairs({
-                        { pbx, pby - hh, pxW + 2.5, 2.5 }, { pbx, pby + hh, pxW + 2.5, 2.5 },
-                        { pbx - hw, pby, 2.5, pxH + 2.5 }, { pbx + hw, pby, 2.5, pxH + 2.5 },
-                    }) do
-                        local eb = AddBorderFast(outer, MapUI.SelectionCanvas, seg[1], seg[2], seg[3], seg[4], COLORS.Selected, 2)
-                        if eb then Perf.SelHighlightWidgets[#Perf.SelHighlightWidgets + 1] = eb end
-                    end
-                end
-            end
-        end
-
-        while sIdx > #selList and dIdx <= #delList and (ops < 10 or os.clock() < budgetEnd) and ops < 60 do
+        while dIdx <= #delList and (ops < 10 or os.clock() < budgetEnd) and ops < 60 do
             local dm = delList[dIdx]
             dIdx = dIdx + 1
             ops = ops + 1
@@ -3544,63 +3581,20 @@ local function RefreshSelectionLayer(selectionOnly)
             end
         end
 
-        while sIdx > #selList and dIdx > #delList and gIdx <= #ghostList and (ops < 10 or os.clock() < budgetEnd) and ops < 50 do
+        while dIdx > #delList and gIdx <= #ghostList and (ops < 10 or os.clock() < budgetEnd) and ops < 50 do
             local gp = ghostList[gIdx]
             gIdx = gIdx + 1
             ops = ops + 1
-            local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
-            local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
-            local pxW = math.max(8.0, rx * BASE_CELL_PX)
-            local pxH = math.max(8.0, ry * BASE_CELL_PX)
-            local gpCat = gp.cat or "Other"
-            local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-            if gp.isReplace then
-                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
-            end
-            local isGhostSel = (gp.ghostId and SelectedGhosts[gp.ghostId] ~= nil)
-            local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
-            if isGhostSel then
-                AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
-            elseif not (compactGhosts and gpCat == "Conveyor" and not gp.isReplace) then
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-            end
-            if gp.isReplace then
-                DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
-            end
-            local clsLow = (gp.actorClsPath or ""):lower()
-            if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-                AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
-            elseif clsLow:find("underground", 1, true) then
-                AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-                if gp.pairX and gp.pairY then
-                    local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
-                    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
-                    if gp.isReplace then
-                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
-                        DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
-                    end
-                    if isGhostSel then
-                        AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 8)
-                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.8, COLORS.Selected, 9)
-                    else
-                        RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-                    end
-                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-                    RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
-                    local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
-                    AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
-                end
-            end
+            DrawSingleGhostOnSelectionCanvas(outer, pc, gp, compactGhosts, replaceFillCol, replaceBdrCol)
         end
 
-        if sIdx <= #selList or dIdx <= #delList or gIdx <= #ghostList then
+        if dIdx <= #delList or gIdx <= #ghostList then
             ExecuteInGameThreadAfterFrames(1, pumpSelectionLayer)
         end
     end
 
     pumpSelectionLayer()
+    startHighlightPump(buildHighlightList())
     UpdateActionBar()
     UpdateStatusBanner()
 end
@@ -5648,6 +5642,37 @@ local function HandleMapLeftClick(mx, my, isShift)
                 end
             end
         end
+        -- Pre-filter floor walls to only those near the clipboard's bounding box for fast O(1) paste validation
+        local pasteFloor = floor
+        if floor.walls and #floor.walls > 16 then
+            local cMinX, cMaxX, cMinY, cMaxY = math.huge, -math.huge, math.huge, -math.huge
+            for _, item in ipairs(Clipboard) do
+                local rdx = item.dx * cosA - item.dy * sinA
+                local rdy = item.dx * sinA + item.dy * cosA
+                local px, py = anchorSx + rdx, anchorSy + rdy
+                if px < cMinX then cMinX = px end
+                if px > cMaxX then cMaxX = px end
+                if py < cMinY then cMinY = py end
+                if py > cMaxY then cMaxY = py end
+                if item.pairDx and item.pairDy then
+                    local ppx = px + (item.pairDx * cosA - item.pairDy * sinA)
+                    local ppy = py + (item.pairDx * sinA + item.pairDy * cosA)
+                    if ppx < cMinX then cMinX = ppx end
+                    if ppx > cMaxX then cMaxX = ppx end
+                    if ppy < cMinY then cMinY = ppy end
+                    if ppy > cMaxY then cMaxY = ppy end
+                end
+            end
+            local pad = 500.0
+            local subWalls = {}
+            for _, w in ipairs(floor.walls) do
+                if w.maxX >= (cMinX - pad) and w.minX <= (cMaxX + pad) and w.maxY >= (cMinY - pad) and w.minY <= (cMaxY + pad) then
+                    subWalls[#subWalls + 1] = w
+                end
+            end
+            pasteFloor = { platforms = floor.platforms, walls = subWalls, z = floor.z }
+        end
+
         for _, item in ipairs(Clipboard) do
             if Core.IsValidObj(item.buildable) then
                 local rdx = item.dx * cosA - item.dy * sinA
@@ -5660,14 +5685,14 @@ local function HandleMapLeftClick(mx, my, isShift)
                     local rpdy = item.pairDx * sinA + item.pairDy * cosA
                     pX, pY = SnapWorldToMachineGrid(sx + rpdx, sy + rpdy, item.cellsX or 1, item.cellsY or 1, finalYaw)
                 end
-                local inBounds = IsPointOverAnyFloorModule(sx, sy, floor)
-                    and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, floor)
+                local inBounds = IsPointOverAnyFloorModule(sx, sy, pasteFloor)
+                    and not IsFootprintBlockedByWall(sx, sy, item.cellsX or 1, item.cellsY or 1, finalYaw, pasteFloor)
                 if inBounds and pX and pY then
-                    inBounds = IsPointOverAnyFloorModule(pX, pY, floor)
-                        and not IsFootprintBlockedByWall(pX, pY, item.cellsX or 1, item.cellsY or 1, finalYaw, floor)
+                    inBounds = IsPointOverAnyFloorModule(pX, pY, pasteFloor)
+                        and not IsFootprintBlockedByWall(pX, pY, item.cellsX or 1, item.cellsY or 1, finalYaw, pasteFloor)
                 end
                 if inBounds then
-                    local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, floor)
+                    local allowed, isReplace, replaceTargets = EvaluatePasteGhostOverlap(item, sx, sy, pX, pY, finalYaw, pasteFloor)
                     if allowed then
                         local dupGhost = hasNearbyGhostPoint(sx, sy) or (pX ~= nil and pY ~= nil and hasNearbyGhostPoint(pX, pY))
                         if not dupGhost then
@@ -5719,7 +5744,13 @@ local function HandleMapLeftClick(mx, my, isShift)
                 SelectedGhosts[g.ghostId] = g
             end
         end
-        RefreshSelectionLayer()
+        -- Append ONLY newly pasted ghosts (never destroys/rerenders existing ghosts!)
+        -- and defer UpdateActionBar by 1 frame so inventory cost scanning doesn't hitch the click frame.
+        AppendGhostsToSelectionCanvas(staged)
+        RefreshSelectionLayer(true)
+        ExecuteInGameThreadAfterFrames(1, function()
+            if IsMapOpen() then UpdateActionBar() end
+        end)
         if skippedBlocked > 0 then
             UpdateStatusBanner(string.format("Pasted %d machine(s) (%d skipped - blocked)", #staged, skippedBlocked))
         end
@@ -5789,7 +5820,7 @@ local function HandleMapLeftClick(mx, my, isShift)
             SelectedMachines[pairRm.addr] = toggleOff and nil or pairRm
         end
     end
-    RefreshSelectionLayer(not ghostSelChanged)
+    RefreshSelectionLayer(true)
 end
 
 local function FinishBoxSelect(x1, y1, x2, y2, isShift)
@@ -5837,7 +5868,7 @@ local function FinishBoxSelect(x1, y1, x2, y2, isShift)
     if not machSelAdded and not ghostSelChanged and (isShift or not hadMachSel) then
         return
     end
-    RefreshSelectionLayer(not ghostSelChanged)
+    RefreshSelectionLayer(true)
 end
 
 --------------------------------------------------------------------------------
