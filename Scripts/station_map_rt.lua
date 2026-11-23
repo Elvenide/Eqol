@@ -486,7 +486,11 @@ function RT.CreateFloorRenderer(opts)
             visible = true,
             dirty = false,
             needsClear = true,
+            hasRenderedOnce = false,
             drawState = nil, -- progressive draw cursor for multi-frame non-clearing slicing
+            addMachines = {}, -- additive queue for brand-new machines on already-rendered tiles
+            addLinks = {},
+            addPorts = {},
             walls = {},
             machines = {},   -- mAddr -> drawEntry
             links = {},      -- pKey -> linkEntry
@@ -496,10 +500,8 @@ function RT.CreateFloorRenderer(opts)
         return t
     end
 
-    local function markTileDirty(t)
+    local function enqueueTileDirty(t)
         if not t then return end
-        t.needsClear = true
-        t.drawState = nil
         if not t.dirty then
             t.dirty = true
             if not dirtySet[t.key] then
@@ -507,6 +509,16 @@ function RT.CreateFloorRenderer(opts)
                 dirtyList[#dirtyList + 1] = t
             end
         end
+    end
+
+    local function markTileDirty(t)
+        if not t then return end
+        t.needsClear = true
+        t.drawState = nil
+        t.addMachines = {}
+        t.addLinks = {}
+        t.addPorts = {}
+        enqueueTileDirty(t)
     end
 
     local function ensureTileWidget(t)
@@ -615,9 +627,40 @@ function RT.CreateFloorRenderer(opts)
         if t.needsClear then
             pcall(function() krl:ClearRenderTarget2D(worldCtx, t.rt, COL_CLEAR) end)
             t.needsClear = false
+            t.addMachines = {}
+            t.addLinks = {}
+            t.addPorts = {}
             t.drawState = buildTileDrawState(t)
         elseif not t.drawState then
-            t.drawState = buildTileDrawState(t)
+            if #t.addMachines > 0 or #t.addLinks > 0 or #t.addPorts > 0 then
+                -- Additive fast path: draw ONLY newly added machines/links/ports on top of the
+                -- already-rendered mega-tile without clearing or re-rendering existing machines!
+                local rawBelts = {}
+                local otherMachines = {}
+                for i = 1, #t.addMachines do
+                    local m = t.addMachines[i]
+                    if m.cat == "Conveyor" then
+                        rawBelts[#rawBelts + 1] = m
+                    else
+                        otherMachines[#otherMachines + 1] = m
+                    end
+                end
+                local beltRuns = BuildMergedBeltRuns(rawBelts, cellCm)
+                t.drawState = {
+                    phase = 3, -- skip walls (already rendered!)
+                    idx = 1,
+                    walls = {},
+                    beltRuns = beltRuns,
+                    machines = otherMachines,
+                    links = t.addLinks,
+                    ports = t.addPorts,
+                }
+                t.addMachines = {}
+                t.addLinks = {}
+                t.addPorts = {}
+            else
+                t.drawState = buildTileDrawState(t)
+            end
         end
 
         local ds = t.drawState
@@ -850,8 +893,13 @@ function RT.CreateFloorRenderer(opts)
         if elapsedMs > stats.maxSliceMs then stats.maxSliceMs = elapsedMs end
 
         if ds.phase >= 7 then
-            t.dirty = false
+            t.hasRenderedOnce = true
             t.drawState = nil
+            if #t.addMachines > 0 or #t.addLinks > 0 or #t.addPorts > 0 then
+                -- More additive items arrived while slicing; keep tile dirty for next frame
+                return false, elapsedMs
+            end
+            t.dirty = false
             return true, elapsedMs
         end
         return false, elapsedMs
@@ -915,7 +963,15 @@ function RT.CreateFloorRenderer(opts)
             end
             touched[#touched + 1] = t
             if not deferDirty then
-                markTileDirty(t)
+                if t.hasRenderedOnce and not t.needsClear and Core.IsValidObj(t.rt) then
+                    t.addMachines[#t.addMachines + 1] = drawEntry
+                    if portList and #portList > 0 then
+                        for i = 1, #portList do t.addPorts[#t.addPorts + 1] = portList[i] end
+                    end
+                    enqueueTileDirty(t)
+                else
+                    markTileDirty(t)
+                end
             end
         end)
         drawEntry._rtTiles = touched
@@ -932,7 +988,12 @@ function RT.CreateFloorRenderer(opts)
             t.links[pKey] = linkEntry
             touched[#touched + 1] = t
             if not deferDirty then
-                markTileDirty(t)
+                if t.hasRenderedOnce and not t.needsClear and Core.IsValidObj(t.rt) then
+                    t.addLinks[#t.addLinks + 1] = linkEntry
+                    enqueueTileDirty(t)
+                else
+                    markTileDirty(t)
+                end
             end
         end)
         linkEntry._rtTiles = touched

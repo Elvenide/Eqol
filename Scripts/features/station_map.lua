@@ -3443,42 +3443,150 @@ RefreshDynamicOverlay = function(preHoveredPort, preHoveredMachine, hasPreHover)
 end
 
 local function DrawSingleGhostOnSelectionCanvas(outer, pc, gp, compactGhosts, replaceFillCol, replaceBdrCol)
+    local canvas = MapUI.SelectionCanvas
+    local nBefore = (canvas.GetChildrenCount and canvas:GetChildrenCount()) or 0
     local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
     local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
     local pxW = math.max(8.0, rx * BASE_CELL_PX)
     local pxH = math.max(8.0, ry * BASE_CELL_PX)
     local gpCat = gp.cat or "Other"
     local sprite = gp.actorClsPath and RequestMachineSprite(gp.actorClsPath, nil, gpCat, gp.buildable) or gp.sprite
-    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+    CreateMachineVisualWidget(MapUI.Window, pc, outer, canvas, gbx, gby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
     if gp.isReplace then
-        AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
+        AddBorderFast(outer, canvas, gbx, gby, pxW, pxH, replaceFillCol, 7)
     end
     local bdrCol = gp.isReplace and replaceBdrCol or COLORS.GhostBorderOk
     if not (compactGhosts and gpCat == "Conveyor" and not gp.isReplace) then
-        RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+        RenderBorderOutline(outer, canvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
     end
     if gp.isReplace then
-        DrawReplaceIcon(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 11)
+        DrawReplaceIcon(outer, canvas, gbx, gby, pxW, pxH, 11)
     end
     local clsLow = (gp.actorClsPath or ""):lower()
     if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-        AddSplitterOrBalancerChevrons(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
+        AddSplitterOrBalancerChevrons(outer, canvas, gbx, gby, pxW, pxH, gp.yaw or 0, clsLow, 9)
     elseif clsLow:find("underground", 1, true) then
-        AddMiniChevronAt(outer, MapUI.SelectionCanvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+        AddMiniChevronAt(outer, canvas, gbx, gby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
         if gp.pairX and gp.pairY then
             local pbx, pby = WorldToBaseCanvas(gp.pairX, gp.pairY)
-            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
+            CreateMachineVisualWidget(MapUI.Window, pc, outer, canvas, pbx, pby, pxW, pxH, gp.yaw or 0, gpCat, sprite, true, true, 6, false)
             if gp.isReplace then
-                AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
-                DrawReplaceIcon(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 11)
+                AddBorderFast(outer, canvas, pbx, pby, pxW, pxH, replaceFillCol, 7)
+                DrawReplaceIcon(outer, canvas, pbx, pby, pxW, pxH, 11)
             end
-            RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
-            AddMiniChevronAt(outer, MapUI.SelectionCanvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
-            RenderDashedLine(outer, MapUI.SelectionCanvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
+            RenderBorderOutline(outer, canvas, pbx, pby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
+            AddMiniChevronAt(outer, canvas, pbx, pby, math.min(pxW, pxH) * 0.30, 2.2, gp.yaw or 0, bdrCol, 9)
+            RenderDashedLine(outer, canvas, gbx, gby, pbx, pby, bdrCol, 2.6, 10.0, 6.0, 9)
             local linkAng = math.deg(math.atan(pby - gby, pbx - gbx))
-            AddMiniChevronAt(outer, MapUI.SelectionCanvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
+            AddMiniChevronAt(outer, canvas, (gbx + pbx) * 0.5, (gby + pby) * 0.5, 10.0, 2.4, linkAng, bdrCol, 10)
         end
     end
+    if gp.ghostId and canvas.GetChildrenCount and canvas.GetChildAt then
+        Perf.GhostWidgetsById = Perf.GhostWidgetsById or {}
+        local wList = {}
+        local nAfter = canvas:GetChildrenCount()
+        for ci = nBefore, nAfter - 1 do
+            local ch = canvas:GetChildAt(ci)
+            if Core.IsValidObj(ch) then wList[#wList + 1] = ch end
+        end
+        Perf.GhostWidgetsById[gp.ghostId] = wList
+    end
+end
+
+function Perf.DrawSingleDeleteMark(outer, dm)
+    local canvas = MapUI and MapUI.SelectionCanvas
+    if not Core.IsValidObj(canvas) or not dm then return end
+    local nBefore = (canvas.GetChildrenCount and canvas:GetChildrenCount()) or 0
+    local delFillCol = { R = 0.88, G = 0.10, B = 0.10, A = 0.44 }
+    local delBdrCol  = { R = 1.00, G = 0.22, B = 0.22, A = 0.98 }
+    local delXCol    = { R = 1.00, G = 0.16, B = 0.16, A = 1.00 }
+    local function drawMark(bx, by, pxW, pxH)
+        AddBorderFast(outer, canvas, bx, by, pxW, pxH, delFillCol, 3)
+        RenderBorderOutline(outer, canvas, bx, by, pxW, pxH, 2.5, delBdrCol, 4)
+        local xLen = math.max(12.0, math.min(pxW, pxH) * 0.72)
+        local xThick = math.max(2.6, math.min(5.0, xLen * 0.13))
+        for _, ang in ipairs({ 45.0, -45.0 }) do
+            local bar = AddBorderFast(outer, canvas, bx, by, xLen, xThick, delXCol, 5)
+            if bar then
+                pcall(function()
+                    bar:SetRenderTransformPivot(ALIGN_CENTER)
+                    if bar.SetRenderTransformAngle then bar:SetRenderTransformAngle(ang) end
+                end)
+            end
+        end
+    end
+    local bx, by = WorldToBaseCanvas(dm.x, dm.y)
+    local rx, ry = GetRotatedCellDims(dm.cellsX or 1, dm.cellsY or 1, dm.yaw or 0)
+    local pxW = math.max(8.0, rx * BASE_CELL_PX)
+    local pxH = math.max(8.0, ry * BASE_CELL_PX)
+    drawMark(bx, by, pxW, pxH)
+    if dm.pairX and dm.pairY then
+        local pbx, pby = WorldToBaseCanvas(dm.pairX, dm.pairY)
+        drawMark(pbx, pby, pxW, pxH)
+    end
+    if dm.addr and canvas.GetChildrenCount and canvas.GetChildAt then
+        Perf.DeleteWidgetsByAddr = Perf.DeleteWidgetsByAddr or {}
+        local wList = {}
+        local nAfter = canvas:GetChildrenCount()
+        for ci = nBefore, nAfter - 1 do
+            local ch = canvas:GetChildAt(ci)
+            if Core.IsValidObj(ch) then wList[#wList + 1] = ch end
+        end
+        Perf.DeleteWidgetsByAddr[dm.addr] = wList
+    end
+end
+
+function Perf.RemoveGhostWidgets(idSet)
+    if not Perf.GhostWidgetsById or not idSet then return end
+    for gid, _ in pairs(idSet) do
+        local wList = Perf.GhostWidgetsById[gid]
+        if wList then
+            for i = 1, #wList do
+                if Core.IsValidObj(wList[i]) then pcall(function() wList[i]:RemoveFromParent() end) end
+            end
+            Perf.GhostWidgetsById[gid] = nil
+        end
+    end
+end
+
+function Perf.RemoveDeleteWidgets(addrSet)
+    if not Perf.DeleteWidgetsByAddr or not addrSet then return end
+    for addr, _ in pairs(addrSet) do
+        local wList = Perf.DeleteWidgetsByAddr[addr]
+        if wList then
+            for i = 1, #wList do
+                if Core.IsValidObj(wList[i]) then pcall(function() wList[i]:RemoveFromParent() end) end
+            end
+            Perf.DeleteWidgetsByAddr[addr] = nil
+        end
+    end
+end
+
+function Perf.AddDeleteWidgets(newDeletes)
+    if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) or not newDeletes or #newDeletes == 0 then return end
+    local floor = CurrentFloors[SelectedFloorIdx]
+    if not floor then return end
+    local outer = Core.GetWidgetOuter(MapUI.Window)
+    local myFullGen = Perf.SelRenderGen or 0
+    local dIdx = 1
+    local totalD = #newDeletes
+    local function pumpAddDel()
+        if (Perf.SelRenderGen or 0) ~= myFullGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
+        local budgetEnd = os.clock() + 0.0030
+        local ops = 0
+        while dIdx <= totalD and (ops < 12 or os.clock() < budgetEnd) and ops < 60 do
+            local dm = newDeletes[dIdx]
+            dIdx = dIdx + 1
+            if math.abs((dm.z or floor.z) - floor.z) <= 250.0 then
+                ops = ops + 1
+                Perf.DrawSingleDeleteMark(outer, dm)
+            end
+        end
+        if dIdx <= totalD then
+            ExecuteInGameThreadAfterFrames(1, pumpAddDel)
+        end
+    end
+    pumpAddDel()
 end
 
 local function AppendGhostsToSelectionCanvas(newGhosts)
@@ -3594,6 +3702,8 @@ local function RefreshSelectionLayer(selectionOnly)
     Perf.SelRenderGen = (Perf.SelRenderGen or 0) + 1
     local mySelGen = Perf.SelRenderGen
     Perf.SelHighlightWidgets = {}
+    Perf.GhostWidgetsById = {}
+    Perf.DeleteWidgetsByAddr = {}
     ClearCanvasChildren(MapUI.SelectionCanvas)
 
     local delList = {}
@@ -3644,15 +3754,7 @@ local function RefreshSelectionLayer(selectionOnly)
             local dm = delList[dIdx]
             dIdx = dIdx + 1
             ops = ops + 1
-            local bx, by = WorldToBaseCanvas(dm.x, dm.y)
-            local rx, ry = GetRotatedCellDims(dm.cellsX or 1, dm.cellsY or 1, dm.yaw or 0)
-            local pxW = math.max(8.0, rx * BASE_CELL_PX)
-            local pxH = math.max(8.0, ry * BASE_CELL_PX)
-            drawDeleteMark(bx, by, pxW, pxH)
-            if dm.pairX and dm.pairY then
-                local pbx, pby = WorldToBaseCanvas(dm.pairX, dm.pairY)
-                drawDeleteMark(pbx, pby, pxW, pxH)
-            end
+            Perf.DrawSingleDeleteMark(outer, dm)
         end
 
         while dIdx > #delList and gIdx <= #ghostList and (ops < 10 or os.clock() < budgetEnd) and ops < 50 do
@@ -5238,10 +5340,11 @@ local function FindUndergroundPairEntry(rm)
 end
 
 local function ProposeDeleteSelected()
-    -- 1. Instantly remove any selected ghost machines (no deletion mark, no refund)
+    -- 1. Instantly remove any selected ghost machines (surgically, without rerendering other ghosts!)
     local removedGhosts = 0
     local ghostIdsToRemove = {}
     local ghostPairsToRemove = {}
+    local removedGhostIdSet = {}
     for gid, gp in pairs(SelectedGhosts) do
         ghostIdsToRemove[gid] = true
         if gp.pairGroupId then ghostPairsToRemove[gp.pairGroupId] = true end
@@ -5250,6 +5353,7 @@ local function ProposeDeleteSelected()
         for i = #PendingGhosts, 1, -1 do
             local gp = PendingGhosts[i]
             if (gp.ghostId and ghostIdsToRemove[gp.ghostId]) or (gp.pairGroupId and ghostPairsToRemove[gp.pairGroupId]) then
+                if gp.ghostId then removedGhostIdSet[gp.ghostId] = true end
                 table.remove(PendingGhosts, i)
                 removedGhosts = removedGhosts + 1
             end
@@ -5257,7 +5361,7 @@ local function ProposeDeleteSelected()
         SelectedGhosts = {}
     end
 
-    -- 2. Mark selected real machines (and their underground belt pairs) for deletion on Apply Changes
+    -- 2. Mark/unmark selected real machines (and their underground belt pairs) for deletion on Apply Changes
     local added = 0
     local toMark = {}
     for addr, entry in pairs(SelectedMachines) do
@@ -5269,17 +5373,34 @@ local function ProposeDeleteSelected()
             end
         end
     end
+    local newlyMarkedDeletes = {}
+    local unmarkedDelAddrs = {}
     for addr, entry in pairs(toMark) do
         if PendingDeletes[addr] then
             PendingDeletes[addr] = nil
+            unmarkedDelAddrs[addr] = true
         else
             PendingDeletes[addr] = entry
+            newlyMarkedDeletes[#newlyMarkedDeletes + 1] = entry
             added = added + 1
         end
     end
     SelectedMachines = {}
-    UpdateActionBar()
-    RefreshSelectionLayer()
+
+    -- Surgical widget updates: NEVER clears SelectionCanvas or rerenders untouched ghosts!
+    if next(removedGhostIdSet) ~= nil then
+        Perf.RemoveGhostWidgets(removedGhostIdSet)
+    end
+    if next(unmarkedDelAddrs) ~= nil then
+        Perf.RemoveDeleteWidgets(unmarkedDelAddrs)
+    end
+    if #newlyMarkedDeletes > 0 then
+        Perf.AddDeleteWidgets(newlyMarkedDeletes)
+    end
+    RefreshSelectionLayer(true)
+    ExecuteInGameThreadAfterFrames(1, function()
+        if IsMapOpen() then UpdateActionBar() end
+    end)
     if added > 0 then
         UpdateStatusBanner(string.format("Marked %d machine(s) for deletion (click Apply Changes to delete & refund)", added))
     elseif removedGhosts > 0 then
@@ -5914,13 +6035,12 @@ local function HandleMapLeftClick(mx, my, isShift)
                 SelectedGhosts[g.ghostId] = g
             end
         end
+        -- Surgically remove ONLY the replaced ghost conveyor belt widgets and append ONLY newly pasted ghosts!
         if replacedGhostCount > 0 then
-            RefreshSelectionLayer(false)
-        else
-            -- Append ONLY newly pasted ghosts (never destroys/rerenders existing ghosts!)
-            AppendGhostsToSelectionCanvas(staged)
-            RefreshSelectionLayer(true)
+            Perf.RemoveGhostWidgets(replacedGhostIds)
         end
+        AppendGhostsToSelectionCanvas(staged)
+        RefreshSelectionLayer(true)
         ExecuteInGameThreadAfterFrames(1, function()
             if IsMapOpen() then UpdateActionBar() end
         end)
