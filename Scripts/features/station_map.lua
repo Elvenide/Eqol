@@ -183,6 +183,7 @@ function Perf.DestroyFloorRT(floorIdx)
 end
 
 function Perf.DestroyActiveRT()
+    Perf.LastPendingSig = nil
     for idx, entry in pairs(Perf.FloorRTCache) do
         if entry and entry.rtFloor then
             pcall(function() entry.rtFloor.Destroy() end)
@@ -2830,9 +2831,15 @@ local function RefreshModificationCostPanel(summary, freshPC)
     pcall(function() MapUI.CostPanel:SetVisibility(0) end) -- Visible
 end
 
-UpdateActionBar = function()
+UpdateActionBar = function(force)
     if not MapUI then return end
-    local pendingN = #PendingGhosts + CountTableKeys(PendingDeletes)
+    local delCount = CountTableKeys(PendingDeletes)
+    local pendingN = #PendingGhosts + delCount
+    local sig = string.format("%d:%d:%s", #PendingGhosts, delCount, tostring(ApplyInProgress))
+    if not force and Perf.LastPendingSig == sig then
+        return
+    end
+    Perf.LastPendingSig = sig
     local pc = Core.GetLocalPlayerController()
     local matSummary = (pendingN > 0) and ComputePendingMaterialSummary(pc) or { isCreative = false, hasMissing = false, entries = {} }
     local hasMissing = (pendingN > 0) and (matSummary.hasMissing == true)
@@ -3155,40 +3162,63 @@ RefreshDynamicOverlay = function(preHoveredPort, preHoveredMachine, hasPreHover)
             anchorSy = SnapAxisToCellGrid(wy, ViewTransform.gridOriginY, 1)
             if GhostPreviewSig ~= sig then
                 GhostPreviewSig = sig
+                Perf.GhostPreviewGen = (Perf.GhostPreviewGen or 0) + 1
+                local myPreviewGen = Perf.GhostPreviewGen
                 ClearCanvasChildren(MapUI.GhostPreviewCanvas)
                 local rad = math.rad(PendingRotationDeg)
                 local cosA, sinA = math.cos(rad), math.sin(rad)
-                for _, item in ipairs(Clipboard) do
-                    local rdx = item.dx * cosA - item.dy * sinA
-                    local rdy = item.dx * sinA + item.dy * cosA
-                    local fYaw = (item.yaw or 0.0) + PendingRotationDeg
-                    local rx, ry = GetRotatedCellDims(item.cellsX or 1, item.cellsY or 1, fYaw)
-                    local pxW = rx * BASE_CELL_PX
-                    local pxH = ry * BASE_CELL_PX
-                    local offBx = rdx * BASE_PX_PER_CM
-                    local offBy = rdy * BASE_PX_PER_CM
-                    local itemCat = item.cat or "Other"
-                    CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, fYaw, itemCat, item.sprite, true, true, 55, false)
-                    RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
-                    local clsLow = (item.actorClsPath or ""):lower()
-                    if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
-                        AddSplitterOrBalancerChevrons(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, fYaw, clsLow, 57)
-                    elseif clsLow:find("underground", 1, true) then
-                        AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, offBx, offBy, math.min(pxW, pxH) * 0.30, 2.2, fYaw, COLORS.GhostBorderOk, 57)
-                        if item.pairDx and item.pairDy then
-                            local rpdx = item.pairDx * cosA - item.pairDy * sinA
-                            local rpdy = item.pairDx * sinA + item.pairDy * cosA
-                            local pBx = offBx + rpdx * BASE_PX_PER_CM
-                            local pBy = offBy + rpdy * BASE_PX_PER_CM
-                            CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, pBx, pBy, pxW, pxH, fYaw, itemCat, item.sprite, true, true, 55, false)
-                            RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, pBx, pBy, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
-                            AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, pBx, pBy, math.min(pxW, pxH) * 0.30, 2.2, fYaw, COLORS.GhostBorderOk, 57)
-                            RenderDashedLine(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pBx, pBy, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 58)
-                            local linkAng = math.deg(math.atan(pBy - offBy, pBx - offBx))
-                            AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, (offBx + pBx) * 0.5, (offBy + pBy) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 59)
+                local clipSnap = Clipboard
+                local skipBeltOutline = (#clipSnap > 40)
+                local pIdx = 1
+                local totalP = #clipSnap
+
+                local function pumpGhostPreview()
+                    if myPreviewGen ~= Perf.GhostPreviewGen or GhostPreviewSig ~= sig or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.GhostPreviewCanvas) then
+                        return
+                    end
+                    local budgetEnd = os.clock() + 0.0030
+                    local built = 0
+                    while pIdx <= totalP and (built < 12 or os.clock() < budgetEnd) and built < 50 do
+                        local item = clipSnap[pIdx]
+                        pIdx = pIdx + 1
+                        built = built + 1
+                        local rdx = item.dx * cosA - item.dy * sinA
+                        local rdy = item.dx * sinA + item.dy * cosA
+                        local fYaw = (item.yaw or 0.0) + PendingRotationDeg
+                        local rx, ry = GetRotatedCellDims(item.cellsX or 1, item.cellsY or 1, fYaw)
+                        local pxW = rx * BASE_CELL_PX
+                        local pxH = ry * BASE_CELL_PX
+                        local offBx = rdx * BASE_PX_PER_CM
+                        local offBy = rdy * BASE_PX_PER_CM
+                        local itemCat = item.cat or "Other"
+                        CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, fYaw, itemCat, item.sprite, true, true, 55, false)
+                        if not (skipBeltOutline and itemCat == "Conveyor") then
+                            RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
+                        end
+                        local clsLow = (item.actorClsPath or ""):lower()
+                        if clsLow:find("splitter", 1, true) or clsLow:find("balancer", 1, true) then
+                            AddSplitterOrBalancerChevrons(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pxW, pxH, fYaw, clsLow, 57)
+                        elseif clsLow:find("underground", 1, true) then
+                            AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, offBx, offBy, math.min(pxW, pxH) * 0.30, 2.2, fYaw, COLORS.GhostBorderOk, 57)
+                            if item.pairDx and item.pairDy then
+                                local rpdx = item.pairDx * cosA - item.pairDy * sinA
+                                local rpdy = item.pairDx * sinA + item.pairDy * cosA
+                                local pBx = offBx + rpdx * BASE_PX_PER_CM
+                                local pBy = offBy + rpdy * BASE_PX_PER_CM
+                                CreateMachineVisualWidget(MapUI.Window, pc, outer, MapUI.GhostPreviewCanvas, pBx, pBy, pxW, pxH, fYaw, itemCat, item.sprite, true, true, 55, false)
+                                RenderBorderOutline(outer, MapUI.GhostPreviewCanvas, pBx, pBy, pxW, pxH, 2.5, COLORS.GhostBorderOk, 56)
+                                AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, pBx, pBy, math.min(pxW, pxH) * 0.30, 2.2, fYaw, COLORS.GhostBorderOk, 57)
+                                RenderDashedLine(outer, MapUI.GhostPreviewCanvas, offBx, offBy, pBx, pBy, COLORS.GhostBorderOk, 2.6, 10.0, 6.0, 58)
+                                local linkAng = math.deg(math.atan(pBy - offBy, pBx - offBx))
+                                AddMiniChevronAt(outer, MapUI.GhostPreviewCanvas, (offBx + pBx) * 0.5, (offBy + pBy) * 0.5, 10.0, 2.4, linkAng, COLORS.GhostBorderOk, 59)
+                            end
                         end
                     end
+                    if pIdx <= totalP then
+                        ExecuteInGameThreadAfterFrames(1, pumpGhostPreview)
+                    end
                 end
+                pumpGhostPreview()
             end
         else
             showGhostPreview = false
@@ -3324,6 +3354,8 @@ end
 
 local function RefreshSelectionLayer()
     if not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then return end
+    Perf.SelRenderGen = (Perf.SelRenderGen or 0) + 1
+    local mySelGen = Perf.SelRenderGen
     ClearCanvasChildren(MapUI.SelectionCanvas)
 
     local floor = CurrentFloors[SelectedFloorIdx]
@@ -3331,26 +3363,34 @@ local function RefreshSelectionLayer()
     local outer = Core.GetWidgetOuter(MapUI.Window)
     local pc = MapUI.PC
 
+    local selList = {}
     for _, rm in ipairs(RenderedMachines) do
         if SelectedMachines[rm.addr] ~= nil then
-            local bx, by = WorldToBaseCanvas(rm.x, rm.y)
-            local rx, ry = GetRotatedCellDims(rm.cellsX or 1, rm.cellsY or 1, rm.yaw or 0)
-            local pxW = math.max(8.0, rx * BASE_CELL_PX)
-            local pxH = math.max(8.0, ry * BASE_CELL_PX)
-            AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, COLORS.SelectedFill, 1)
-            RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
-            if rm.pairX and rm.pairY then
-                local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
-                AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
-                RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.5, COLORS.Selected, 2)
-            end
+            selList[#selList + 1] = rm
+        end
+    end
+    local delList = {}
+    for _, dm in pairs(PendingDeletes) do
+        if math.abs((dm.z or floor.z) - floor.z) <= 250.0 then
+            delList[#delList + 1] = dm
+        end
+    end
+    local ghostList = {}
+    for _, gp in ipairs(PendingGhosts) do
+        if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+            ghostList[#ghostList + 1] = gp
         end
     end
 
-    -- Proposed deletions (red ghost overlay + bold red X centered on each machine, including underground belt second end)
+    local compactSel = (#selList > 30)
+    local selBulkCol = { R = COLORS.Selected.R, G = COLORS.Selected.G, B = COLORS.Selected.B, A = 0.48 }
     local delFillCol = { R = 0.88, G = 0.10, B = 0.10, A = 0.44 }
     local delBdrCol  = { R = 1.00, G = 0.22, B = 0.22, A = 0.98 }
     local delXCol    = { R = 1.00, G = 0.16, B = 0.16, A = 1.00 }
+    local replaceFillCol = { R = 0.12, G = 0.48, B = 0.98, A = 0.44 }
+    local replaceBdrCol  = { R = 0.28, G = 0.76, B = 1.00, A = 0.98 }
+    local compactGhosts = (#ghostList > 40)
+
     local function drawDeleteMark(bx, by, pxW, pxH)
         AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, delFillCol, 3)
         RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, delBdrCol, 4)
@@ -3366,8 +3406,44 @@ local function RefreshSelectionLayer()
             end
         end
     end
-    for _, dm in pairs(PendingDeletes) do
-        if math.abs((dm.z or floor.z) - floor.z) <= 250.0 then
+
+    local sIdx, dIdx, gIdx = 1, 1, 1
+    local function pumpSelectionLayer()
+        if mySelGen ~= Perf.SelRenderGen or not IsMapOpen() or not MapUI or not Core.IsValidObj(MapUI.SelectionCanvas) then
+            return
+        end
+        local budgetEnd = os.clock() + 0.0030
+        local ops = 0
+
+        while sIdx <= #selList and (ops < 15 or os.clock() < budgetEnd) and ops < 90 do
+            local rm = selList[sIdx]
+            sIdx = sIdx + 1
+            ops = ops + 1
+            local bx, by = WorldToBaseCanvas(rm.x, rm.y)
+            local rx, ry = GetRotatedCellDims(rm.cellsX or 1, rm.cellsY or 1, rm.yaw or 0)
+            local pxW = math.max(8.0, rx * BASE_CELL_PX)
+            local pxH = math.max(8.0, ry * BASE_CELL_PX)
+            if compactSel then
+                AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, selBulkCol, 2)
+                if rm.pairX and rm.pairY then
+                    local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
+                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, selBulkCol, 2)
+                end
+            else
+                AddBorderFast(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, COLORS.SelectedFill, 1)
+                RenderBorderOutline(outer, MapUI.SelectionCanvas, bx, by, pxW, pxH, 2.5, COLORS.Selected, 2)
+                if rm.pairX and rm.pairY then
+                    local pbx, pby = WorldToBaseCanvas(rm.pairX, rm.pairY)
+                    AddBorderFast(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, COLORS.SelectedFill, 1)
+                    RenderBorderOutline(outer, MapUI.SelectionCanvas, pbx, pby, pxW, pxH, 2.5, COLORS.Selected, 2)
+                end
+            end
+        end
+
+        while sIdx > #selList and dIdx <= #delList and (ops < 10 or os.clock() < budgetEnd) and ops < 60 do
+            local dm = delList[dIdx]
+            dIdx = dIdx + 1
+            ops = ops + 1
             local bx, by = WorldToBaseCanvas(dm.x, dm.y)
             local rx, ry = GetRotatedCellDims(dm.cellsX or 1, dm.cellsY or 1, dm.yaw or 0)
             local pxW = math.max(8.0, rx * BASE_CELL_PX)
@@ -3378,13 +3454,11 @@ local function RefreshSelectionLayer()
                 drawDeleteMark(pbx, pby, pxW, pxH)
             end
         end
-    end
 
-    -- Stamped build ghosts (green for new builds, blue + replace icon for valid overwrites)
-    local replaceFillCol = { R = 0.12, G = 0.48, B = 0.98, A = 0.44 }
-    local replaceBdrCol  = { R = 0.28, G = 0.76, B = 1.00, A = 0.98 }
-    for _, gp in ipairs(PendingGhosts) do
-        if math.abs((gp.z or floor.z) - floor.z) <= 250.0 then
+        while sIdx > #selList and dIdx > #delList and gIdx <= #ghostList and (ops < 10 or os.clock() < budgetEnd) and ops < 50 do
+            local gp = ghostList[gIdx]
+            gIdx = gIdx + 1
+            ops = ops + 1
             local gbx, gby = WorldToBaseCanvas(gp.x, gp.y)
             local rx, ry = GetRotatedCellDims(gp.cellsX or 1, gp.cellsY or 1, gp.yaw or 0)
             local pxW = math.max(8.0, rx * BASE_CELL_PX)
@@ -3400,7 +3474,7 @@ local function RefreshSelectionLayer()
             if isGhostSel then
                 AddBorderFast(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, COLORS.SelectedFill, 8)
                 RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, 2.8, COLORS.Selected, 9)
-            else
+            elseif not (compactGhosts and gpCat == "Conveyor" and not gp.isReplace) then
                 RenderBorderOutline(outer, MapUI.SelectionCanvas, gbx, gby, pxW, pxH, gp.isReplace and 2.5 or 2.0, bdrCol, 8)
             end
             if gp.isReplace then
@@ -3431,8 +3505,13 @@ local function RefreshSelectionLayer()
                 end
             end
         end
+
+        if sIdx <= #selList or dIdx <= #delList or gIdx <= #ghostList then
+            ExecuteInGameThreadAfterFrames(1, pumpSelectionLayer)
+        end
     end
 
+    pumpSelectionLayer()
     UpdateActionBar()
     UpdateStatusBanner()
 end
@@ -3763,9 +3842,10 @@ RefreshStationMapCanvas = function(machinesOnly)
             if rtFloor then
                 Perf.ActiveRT = rtFloor
 
+            local deferWallDirty = (#(floor.machines or {}) > 0)
             if floor.walls and #floor.walls > 0 then
                 for _, w in ipairs(floor.walls) do
-                    rtFloor.AddWall(w.cx, w.cy, math.max(12.0, w.maxX - w.minX), math.max(12.0, w.maxY - w.minY))
+                    rtFloor.AddWall(w.cx, w.cy, math.max(12.0, w.maxX - w.minX), math.max(12.0, w.maxY - w.minY), deferWallDirty)
                 end
             end
 
@@ -3818,7 +3898,8 @@ RefreshStationMapCanvas = function(machinesOnly)
             local portHalfCm = 32.0
             local nextPortId = 0
             local rtPumpRunning = false
-            local rtTileInProgress = false
+            local rtTileInProgress = (#toIndexQueue > 0)
+            local rtWallsFlushed = (not deferWallDirty)
             local rtDrawCount = 0
             local rtDrawSumMs = 0.0
             local rtDrawMaxMs = 0.0
@@ -4042,35 +4123,57 @@ RefreshStationMapCanvas = function(machinesOnly)
                     return
                 end
 
-                -- Phase 1: Index all machines on this floor first (fast with bldMetaCache, ~150ms total
-                -- at 2.5ms/frame) so every mega-tile has 100% of its walls, merged belt runs, and machines
-                -- ready before its first draw (ZERO redundant redraws!).
-                if idxCursor <= #toIndexQueue then
-                    local budgetEnd = os.clock() + 0.0025
-                    local indexed = 0
-                    while idxCursor <= #toIndexQueue and (indexed < 20 or os.clock() < budgetEnd) and indexed < 120 do
-                        indexOneMachineRT(toIndexQueue[idxCursor])
-                        idxCursor = idxCursor + 1
-                        indexed = indexed + 1
-                    end
-                    ExecuteInGameThreadAfterFrames(1, pumpRT)
-                    return
-                end
-
-                -- Phase 2: Progressively draw strict 2.5ms slices of dirty mega-tiles (visible first).
-                if rtFloor.HasDirtyTiles() then
+                -- Interleave per mega-tile: finish indexing the current mega-tile's machines (2-3 frames),
+                -- then immediately draw that completed mega-tile in strict 2.5ms progressive slices so
+                -- machines appear right away from the center outward with ZERO redundant redraws.
+                if not rtTileInProgress and rtFloor.HasDirtyTiles() then
                     local moreDirty, drawMs = rtFloor.PumpDirtyTiles(1, 0.0025)
                     rtDrawCount = rtDrawCount + 1
                     rtDrawSumMs = rtDrawSumMs + (drawMs or 0.0)
                     if (drawMs or 0.0) > rtDrawMaxMs then rtDrawMaxMs = drawMs or 0.0 end
                     local nextFrames = ((drawMs or 0.0) > 4.0) and 2 or 1
-                    if moreDirty then
+                    if idxCursor <= #toIndexQueue or moreDirty or not rtWallsFlushed then
                         ExecuteInGameThreadAfterFrames(nextFrames, pumpRT)
                     else
                         rtPumpRunning = false
                         logRTFloorDone()
                     end
                     return
+                end
+
+                if idxCursor <= #toIndexQueue then
+                    local budgetEnd = os.clock() + 0.0025
+                    local indexed = 0
+                    local startTileKey = toIndexQueue[idxCursor]._rtTileKey
+                    rtTileInProgress = true
+                    while idxCursor <= #toIndexQueue and (indexed < 20 or os.clock() < budgetEnd) and indexed < 120 do
+                        local me = toIndexQueue[idxCursor]
+                        if indexed > 0 and me._rtTileKey ~= startTileKey then
+                            rtTileInProgress = false
+                            break
+                        end
+                        indexOneMachineRT(me)
+                        idxCursor = idxCursor + 1
+                        indexed = indexed + 1
+                    end
+                    if idxCursor > #toIndexQueue or (toIndexQueue[idxCursor]._rtTileKey ~= startTileKey) then
+                        rtTileInProgress = false
+                    end
+                    if idxCursor > #toIndexQueue and not rtWallsFlushed then
+                        rtWallsFlushed = true
+                        rtFloor.MarkAllWallTilesDirty()
+                    end
+                    ExecuteInGameThreadAfterFrames(1, pumpRT)
+                    return
+                end
+
+                if not rtWallsFlushed then
+                    rtWallsFlushed = true
+                    rtFloor.MarkAllWallTilesDirty()
+                    if rtFloor.HasDirtyTiles() then
+                        ExecuteInGameThreadAfterFrames(1, pumpRT)
+                        return
+                    end
                 end
 
                 rtPumpRunning = false
@@ -5028,7 +5131,7 @@ local function CopySelectedMachines()
     for _, e in ipairs(list) do
         local cellsX = e.cellsX or 1
         local cellsY = e.cellsY or 1
-        local mCfg = e.machineConfig or (Core.IsValidObj(e.machine) and CaptureMachineConfig(e.machine) or nil)
+        local mCfg = e.machineConfig or ((e.cat ~= "Conveyor") and Core.IsValidObj(e.machine) and CaptureMachineConfig(e.machine) or nil)
         local pairDx = (e.pairX and e.pairY) and (e.pairX - e.x) or nil
         local pairDy = (e.pairX and e.pairY) and (e.pairY - e.y) or nil
         local ugLen = e.ugLength
@@ -6039,7 +6142,7 @@ end
 RevalidatePendingChanges = function(forceRefreshUI)
     if #PendingGhosts == 0 and next(PendingDeletes) == nil then
         if forceRefreshUI then
-            UpdateActionBar()
+            UpdateActionBar(true)
             UpdateStatusBanner()
         end
         return false
@@ -6110,7 +6213,7 @@ RevalidatePendingChanges = function(forceRefreshUI)
         RefreshSelectionLayer()
         UpdateStatusBanner()
     elseif forceRefreshUI then
-        UpdateActionBar()
+        UpdateActionBar(true)
         UpdateStatusBanner()
     end
     return changed

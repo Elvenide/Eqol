@@ -863,13 +863,23 @@ function RT.CreateFloorRenderer(opts)
         -- Platforms & dynamic zoom-adaptive grid lines render on MapCanvas beneath RT tiles.
     end
 
-    function inst.AddWall(cx, cy, w, h)
+    function inst.AddWall(cx, cy, w, h, deferDirty)
         local wObj = { cx = cx, cy = cy, w = w, h = h }
         local hw, hh = w * 0.5 + 30.0, h * 0.5 + 30.0
         forEachOverlappingTile(cx - hw, cx + hw, cy - hh, cy + hh, true, function(t)
             t.walls[#t.walls + 1] = wObj
-            markTileDirty(t)
+            if not deferDirty then
+                markTileDirty(t)
+            end
         end)
+    end
+
+    function inst.MarkAllWallTilesDirty()
+        for _, t in pairs(tiles) do
+            if #t.walls > 0 and t.needsClear and not t.dirty then
+                markTileDirty(t)
+            end
+        end
     end
 
     function inst.UpsertMachine(mAddr, drawEntry, portList)
