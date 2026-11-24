@@ -593,13 +593,9 @@ local function ScanAndRefreshAllDesigners(triggerSource, allowFindAll)
         end
     end
     if allowFindAll or not anyTracked then
-        local okHuds, huds = pcall(FindAllOf, "WBP_DesignerHUD_C")
-        if okHuds and huds then
-            for _, hud in ipairs(huds) do
-                if Core.IsValidObj(hud) and not seen[hud:GetAddress()] and IsHudVisible(hud) then
-                    RefreshDesignerPowerStats(hud)
-                end
-            end
+        local okHud, hud = pcall(FindFirstOf, "WBP_DesignerHUD_C")
+        if okHud and Core.IsValidObj(hud) and not seen[hud:GetAddress()] and IsHudVisible(hud) then
+            RefreshDesignerPowerStats(hud)
         end
     end
 end

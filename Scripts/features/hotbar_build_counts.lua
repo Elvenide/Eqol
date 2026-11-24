@@ -740,22 +740,9 @@ end
 
 local function TryAttachExistingHuds()
     if not Core.IsFeatureEnabled("HotbarBuildCounts") then return end
-    local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-    if okHuds and huds then
-        for _, hud in ipairs(huds) do
-            if Core.IsValidObj(hud) then
-                local isLocalHud = true
-                pcall(function()
-                    local owningPC = hud.GetOwningPlayer and hud:GetOwningPlayer() or nil
-                    if Core.IsValidObj(owningPC) and owningPC.IsLocalPlayerController then
-                        isLocalHud = (owningPC:IsLocalPlayerController() == true)
-                    end
-                end)
-                if isLocalHud then
-                    EnsureHudHotbarTracked(hud)
-                end
-            end
-        end
+    local okHud, hud = pcall(FindFirstOf, "WBP_CharacterHUD_C")
+    if okHud and Core.IsValidObj(hud) then
+        EnsureHudHotbarTracked(hud)
     end
 end
 

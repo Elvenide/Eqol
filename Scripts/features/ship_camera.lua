@@ -537,24 +537,8 @@ local function FindMMBIconTexture()
         end
     end
 
-    local okAll, texList = pcall(FindAllOf, "Texture2D")
-    if okAll and texList then
-        for _, tex in ipairs(texList) do
-            if Core.IsValidObj(tex) then
-                local okN, fullName = pcall(function() return tex:GetFullName() end)
-                if okN and type(fullName) == "string" then
-                    local low = fullName:lower()
-                    if low:find("mmb", 1, true)
-                        or (low:find("mouse", 1, true) and (low:find("middle", 1, true) or low:find("wheel", 1, true)))
-                    then
-                        CachedMMBIconTex = tex
-                        Core.Log("[ShipCamera] Found MMB icon texture: " .. fullName)
-                        return tex
-                    end
-                end
-            end
-        end
-    end
+    -- Never scan FindAllOf("Texture2D") over thousands of engine textures for a single icon;
+    -- ShipCamera legend falls back cleanly to a crisp "MMB" key pill when texture is absent.
     return nil
 end
 

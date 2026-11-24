@@ -42,25 +42,10 @@ local function PushBuiltInAlert(messageStr)
         local now = os.clock()
         if (now - LastAlertScanTime) >= ALERT_SCAN_COOLDOWN then
             LastAlertScanTime = now
-            local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
-            if okAlerts and found and #found > 0 then
-                -- Pick a single active in-viewport WBP_PlayerAlerts_C to avoid duplicate alerts
-                local fallback = nil
-                for _, w in ipairs(found) do
-                    if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
-                        if not fallback then fallback = w end
-                        local okVP, inVP = pcall(function() return w:IsInViewport() end)
-                        local okVis, isVis = pcall(function() return w:IsVisible() end)
-                        if (okVP and inVP) or (okVis and isVis) then
-                            targetWidget = w
-                            break
-                        end
-                    end
-                end
-                targetWidget = targetWidget or fallback
-                if Core.IsValidObj(targetWidget) then
-                    CachedAlertWidget = targetWidget
-                end
+            local okAlert, w = pcall(FindFirstOf, "WBP_PlayerAlerts_C")
+            if okAlert and Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
+                targetWidget = w
+                CachedAlertWidget = w
             end
         end
     end
@@ -199,6 +184,7 @@ end
 
 Feature.WatchWidgets = {
     WBP_PlayerAlerts_C = function(w)
+        if not Core.IsFeatureEnabled("PlayerAlerts") then return end
         if Core.IsValidObj(w) then
             CachedAlertWidget = w
             if not InitializedSnapshot then
@@ -217,6 +203,7 @@ function Feature.RegisterHooks()
         "PC_AddRemotePlayer_Alert",
         "/Script/MainSequence.DMSPlayerController:Client_AddRemotePlayer",
         function(Context)
+            if not Core.IsFeatureEnabled("PlayerAlerts") then return end
             local pc = Context and Context:get() or nil
             if not Core.IsValidObj(pc) then return end
             local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
@@ -228,6 +215,7 @@ function Feature.RegisterHooks()
         "PC_RemovePlayer_Alert",
         "/Script/MainSequence.DMSPlayerController:Client_RemovePlayer",
         function(Context)
+            if not Core.IsFeatureEnabled("PlayerAlerts") then return end
             local pc = Context and Context:get() or nil
             if not Core.IsValidObj(pc) then return end
             local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
@@ -238,7 +226,9 @@ function Feature.RegisterHooks()
 end
 
 function Feature.OnClientRestart()
-    ExecuteInGameThreadWithDelay(1200, PollPlayerPresence)
+    if Core.IsFeatureEnabled("PlayerAlerts") then
+        ExecuteInGameThreadWithDelay(1200, PollPlayerPresence)
+    end
 end
 
 function Feature.OnMapLoad()

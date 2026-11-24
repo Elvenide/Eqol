@@ -2362,38 +2362,9 @@ local function NormLookupKey(s)
 end
 
 local function CollectGameTextures()
-    if CachedGameTexList then return CachedGameTexList end
-    CachedGameTexList = {}
-    pcall(function()
-        local allTex = FindAllOf("Texture2D")
-        if allTex then
-            for _, t in ipairs(allTex) do
-                if Core.IsValidObj(t) then
-                    local okN, fname = pcall(function() return t:GetFName():ToString() end)
-                    local fn = (okN and type(fname) == "string") and fname or ""
-                    local low = fn:lower()
-                    if fn ~= "" and not low:match("_n$") and not low:find("_orm", 1, true)
-                        and not low:find("_mask", 1, true) and not low:find("_noise", 1, true)
-                        and not low:find("normal", 1, true) and not low:find("rough", 1, true)
-                        and not low:find("lightmap", 1, true) and not low:find("shadowmap", 1, true)
-                        and not low:find("font", 1, true)
-                    then
-                        local okF, full = pcall(function() return t:GetFullName() end)
-                        if okF and type(full) == "string" and full:find("/Game/", 1, true) then
-                            table.insert(CachedGameTexList, {
-                                tex = t,
-                                name = fn,
-                                full = full,
-                                lowName = low,
-                                lowFull = full:lower(),
-                                normName = NormLookupKey(fn) or "",
-                            })
-                        end
-                    end
-                end
-            end
-        end
-    end)
+    -- Never run FindAllOf("Texture2D") over thousands of engine textures;
+    -- machine icons resolve directly from Buildable.Icon / GetIcon properties.
+    if not CachedGameTexList then CachedGameTexList = {} end
     return CachedGameTexList
 end
 

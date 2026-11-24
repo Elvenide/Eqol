@@ -1242,6 +1242,7 @@ local function FindHudIconTexture(kind, hud)
             "/Game/Textures/Icons/T_Power.T_Power",
         },
         StationMap = {
+            "/Game/Materials/Icons/UI/T_UI_StationIcon.T_UI_StationIcon",
             "/Game/Materials/UI_Textures/T_StationMapIcon.T_StationMapIcon",
             "/Game/Materials/UI_Textures/T_StationIcon.T_StationIcon",
             "/Game/Materials/Icons/T_StationIcon.T_StationIcon",
@@ -1259,60 +1260,7 @@ local function FindHudIconTexture(kind, hud)
         end
     end
 
-    -- One-time scan of already-loaded Texture2Ds for power/station icons if direct paths missed
-    if not Core.IsValidObj(tex) and (kind == "Power" or kind == "StationMap") then
-        local okAll, allTex = pcall(FindAllOf, "Texture2D")
-        if okAll and allTex then
-            local patterns = (kind == "Power")
-                and { "lightning", "bolt", "electric", "power", "energy", "battery", "charge" }
-                or { "stationicon", "mapicon", "radar", "blueprint", "gridicon" }
-            local bestTex, bestScore = nil, -1
-            local bestName = nil
-            for _, t in ipairs(allTex) do
-                if Core.IsValidObj(t) then
-                    local okF, full = pcall(function() return t:GetFullName() end)
-                    local okN, short = pcall(function() return t:GetFName():ToString() end)
-                    if okF and okN and type(full) == "string" and type(short) == "string" then
-                        local fullLow = full:lower()
-                        local shortLow = short:lower()
-                        local isUiAsset = fullLow:find("/icons/", 1, true)
-                            or fullLow:find("/ui_textures/", 1, true)
-                            or fullLow:find("/ui/", 1, true)
-                            or shortLow:find("icon", 1, true)
-                            or shortLow:find("t_ui_", 1, true)
-                        local isExcluded = shortLow:find("_n", 1, true)
-                            or shortLow:find("normal", 1, true)
-                            or shortLow:find("mask", 1, true)
-                            or shortLow:find("noise", 1, true)
-                            or shortLow:find("particle", 1, true)
-                            or shortLow:find("beam", 1, true)
-                            or shortLow:find("logo", 1, true)
-                        if isUiAsset and not isExcluded then
-                            for pIdx, pat in ipairs(patterns) do
-                                if shortLow:find(pat, 1, true) then
-                                    local score = (#patterns - pIdx) * 10
-                                    if fullLow:find("/icons/ui/", 1, true) then score = score + 8 end
-                                    if shortLow:find("t_ui_", 1, true) or shortLow:find("icon", 1, true) then score = score + 5 end
-                                    if score > bestScore then
-                                        bestScore = score
-                                        bestTex = t
-                                        bestName = full
-                                    end
-                                    break
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-            if Core.IsValidObj(bestTex) then
-                tex = bestTex
-                Core.Log(string.format("[Logistics] Matched %s HUD icon texture: %s", kind, tostring(bestName)))
-            end
-        end
-    end
-
-    -- Reliable fallbacks from existing HUD input icons (never reuse BuildingInput hammer for Power!)
+    -- Reliable fallbacks from existing HUD input icons (never scan FindAllOf("Texture2D")!)
     if not Core.IsValidObj(tex) and Core.IsValidObj(hud) then
         if kind == "StationMap" and Core.IsValidObj(hud.MapInput) then
             pcall(function() tex = hud.MapInput.Icon end)
@@ -1488,11 +1436,28 @@ end
 
 local HudIndicatorPollActive = false
 
+local function AnyHudIndicatorFeatureEnabled()
+    return Core.IsFeatureEnabled("Logistics")
+        or Core.IsFeatureEnabled("StationMap")
+        or Core.IsFeatureEnabled("PowerOverview")
+end
+
 local function StartHudIndicatorPoll()
-    if HudIndicatorPollActive then return end
+    if HudIndicatorPollActive or not AnyHudIndicatorFeatureEnabled() then return end
     HudIndicatorPollActive = true
 
     local function Tick()
+        if not AnyHudIndicatorFeatureEnabled() then
+            for addr, entry in pairs(HudKeyIndicators) do
+                if Core.IsValidObj(entry.Root) then
+                    pcall(function() entry.Root:SetVisibility(1) end)
+                else
+                    HudKeyIndicators[addr] = nil
+                end
+            end
+            HudIndicatorPollActive = false
+            return
+        end
         local anyValid = false
         local pc = Core.GetLocalPlayerController()
         local showIndicator = false
@@ -1509,12 +1474,17 @@ local function StartHudIndicatorPoll()
         for addr, entry in pairs(HudKeyIndicators) do
             if Core.IsValidObj(entry.Root) then
                 anyValid = true
-                pcall(function() entry.Root:SetVisibility(targetVis) end)
+                if entry.LastVis ~= targetVis then
+                    entry.LastVis = targetVis
+                    pcall(function() entry.Root:SetVisibility(targetVis) end)
+                end
                 if showIndicator and entry.Items then
                     for _, item in ipairs(entry.Items) do
                         local featOn = (not item.FeatureName) or Core.IsFeatureEnabled(item.FeatureName)
-                        if Core.IsValidObj(item.Icon) then
-                            pcall(function() item.Icon:SetVisibility(featOn and 0 or 1) end)
+                        local iconVis = featOn and 0 or 1
+                        if Core.IsValidObj(item.Icon) and item.LastIconVis ~= iconVis then
+                            item.LastIconVis = iconVis
+                            pcall(function() item.Icon:SetVisibility(iconVis) end)
                         end
                         if featOn and Core.IsValidObj(item.KeyText) then
                             local keyStr = GetFormattedKeybind(item.ConfigKey, item.DefaultKey)
@@ -1531,13 +1501,13 @@ local function StartHudIndicatorPoll()
         end
 
         if anyValid then
-            ExecuteInGameThreadWithDelay(500, Tick)
+            ExecuteInGameThreadWithDelay(1200, Tick)
         else
             HudIndicatorPollActive = false
         end
     end
 
-    ExecuteInGameThreadWithDelay(500, Tick)
+    ExecuteInGameThreadWithDelay(1200, Tick)
 end
 
 --------------------------------------------------------------------------------
@@ -1546,6 +1516,7 @@ end
 
 Feature.WatchWidgets = {
     WBP_CharacterHUD_C = function(hud)
+        if not AnyHudIndicatorFeatureEnabled() then return end
         EnsureHudKeybindIndicator(hud)
         StartHudIndicatorPoll()
     end,
@@ -1620,6 +1591,7 @@ function Feature.RegisterHooks()
         "CharacterHUD_RefreshKeybinds_Logistics",
         "/Game/Blueprints/Widgets/HUDs/WBP_CharacterHUD.WBP_CharacterHUD_C:RefreshKeybinds",
         function(Context)
+            if not AnyHudIndicatorFeatureEnabled() then return end
             local hud = Context:get()
             if Core.IsValidObj(hud) then
                 EnsureHudKeybindIndicator(hud)
@@ -1631,13 +1603,11 @@ function Feature.RegisterHooks()
 
     if not InitialLogisticsWidgetScanDone then
         InitialLogisticsWidgetScanDone = true
-        local okHuds, huds = pcall(FindAllOf, "WBP_CharacterHUD_C")
-        if okHuds and huds then
-            for _, h in ipairs(huds) do
-                if Core.IsValidObj(h) then
-                    EnsureHudKeybindIndicator(h)
-                    StartHudIndicatorPoll()
-                end
+        if AnyHudIndicatorFeatureEnabled() then
+            local okHud, h = pcall(FindFirstOf, "WBP_CharacterHUD_C")
+            if okHud and Core.IsValidObj(h) then
+                EnsureHudKeybindIndicator(h)
+                StartHudIndicatorPoll()
             end
         end
     end

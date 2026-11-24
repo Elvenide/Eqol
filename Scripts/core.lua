@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.VERSION = "0.1.98"
+Core.VERSION = "0.1.99"
 
 -- Shared Unreal Engine UMG enum constants (replaces magic integer literals across features)
 Core.VIS = {
@@ -284,6 +284,12 @@ end
 local CachedLocalPC = nil
 local LastSettingsMenuSyncClock = {}
 
+function Core.SetLocalPlayerController(pc)
+    if Core.IsValidObj(pc) then
+        CachedLocalPC = pc
+    end
+end
+
 function Core.GetLocalPlayerController()
     if Core.IsValidObj(CachedLocalPC) then
         local okLocal, isLocal = pcall(function() return CachedLocalPC:IsLocalPlayerController() end)
@@ -293,6 +299,19 @@ function Core.GetLocalPlayerController()
         CachedLocalPC = nil
     end
 
+    -- Fast singleton lookup first (avoids scanning all PlayerControllers in singleplayer/most sessions)
+    for _, clsName in ipairs({ "BP_PlayerController_C", "PlayerController" }) do
+        local okF, first = pcall(FindFirstOf, clsName)
+        if okF and Core.IsValidObj(first) then
+            local okL, isL = pcall(function() return first:IsLocalPlayerController() end)
+            if okL and isL then
+                CachedLocalPC = first
+                return first
+            end
+        end
+    end
+
+    -- Multiplayer fallback when another client's PlayerController appears first in GUObjectArray
     for _, clsName in ipairs({ "BP_PlayerController_C", "PlayerController" }) do
         local ok, list = pcall(FindAllOf, clsName)
         if ok and list then
@@ -330,13 +349,27 @@ local CORE_WATCHED_MODAL_CLASSES = {
     "WBP_SettingsMenu_C",
     "WBP_PauseMenu_C",
     "WBP_MainMenu_C",
-    "WBP_ConfirmationPopup_C",
-    "WBP_Confirmation_Popup_C",
-    "WBP_RenamePopup_C",
-    "WBP_ElevatorConfig_C",
     "WBP_Chat_C",
     "WBP_TextInput_C",
 }
+
+-- Exact Blueprint class paths for targeted NotifyOnNewObject registration.
+-- Avoids intercepting every UUserWidget constructed in the entire game!
+local WATCHED_WIDGET_CLASS_PATHS = {
+    WBP_SettingsMenu_C      = "/Game/Blueprints/Widgets/Menus/WBP_SettingsMenu.WBP_SettingsMenu_C",
+    WBP_MainMenu_C          = "/Game/Blueprints/Widgets/Menus/WBP_MainMenu.WBP_MainMenu_C",
+    WBP_PauseMenu_C         = "/Game/Blueprints/Widgets/Menus/WBP_PauseMenu.WBP_PauseMenu_C",
+    WBP_CharacterHUD_C      = "/Game/Blueprints/Widgets/HUDs/WBP_CharacterHUD.WBP_CharacterHUD_C",
+    WBP_DesignerHUD_C       = "/Game/Blueprints/Widgets/HUDs/Designer/WBP_DesignerHUD.WBP_DesignerHUD_C",
+    WBP_PlayerAlerts_C      = "/Game/Blueprints/Widgets/HUDs/WBP_PlayerAlerts.WBP_PlayerAlerts_C",
+    WBP_Chat_C              = "/Game/Blueprints/Widgets/HUDs/WBP_Chat.WBP_Chat_C",
+    WBP_PowerOverview_C     = "/Game/Blueprints/Widgets/Windows/WBP_PowerOverview.WBP_PowerOverview_C",
+    WBP_ResearchTree_2_C    = "/Game/Blueprints/Widgets/Windows/WBP_ResearchTree_2.WBP_ResearchTree_2_C",
+    WBP_CodexContent_C      = "/Game/Blueprints/Widgets/Display/Codex/WBP_CodexContent.WBP_CodexContent_C",
+    WBP_TextInput_C         = "/Game/Blueprints/Widgets/Basic/WBP_TextInput.WBP_TextInput_C",
+}
+
+local TargetedWidgetWatchersRegistered = {} -- classPath -> true
 
 local function TrackWidgetInstance(shortClassName, widget)
     if not shortClassName or not Core.IsValidObj(widget) then return end
@@ -356,6 +389,33 @@ local function EnsureModalWidgetWatchers()
             WatchedWidgetClasses[clsName][key] = true
             table.insert(WatchedWidgetClasses[clsName], function(w)
                 TrackWidgetInstance(clsName, w)
+            end)
+        end
+    end
+end
+
+function Core.RegisterTargetedWidgetWatchers()
+    EnsureModalWidgetWatchers()
+    for clsName, _ in pairs(WatchedWidgetClasses) do
+        local clsPath = WATCHED_WIDGET_CLASS_PATHS[clsName]
+        if clsPath and not TargetedWidgetWatchersRegistered[clsPath] then
+            TargetedWidgetWatchersRegistered[clsPath] = true
+            local targetShort = clsName
+            pcall(NotifyOnNewObject, clsPath, function(widget)
+                if not Core.IsValidObj(widget) then return end
+                if IsInGameThread() then
+                    ExecuteInGameThreadAfterFrames(1, function()
+                        if Core.IsValidObj(widget) then
+                            Core.DispatchWidgetConstructed(widget, targetShort)
+                        end
+                    end)
+                else
+                    ExecuteInGameThread(function()
+                        if Core.IsValidObj(widget) then
+                            Core.DispatchWidgetConstructed(widget, targetShort)
+                        end
+                    end)
+                end
             end)
         end
     end
@@ -398,18 +458,12 @@ function Core.IsAnyWidgetClassVisible(shortClassName)
         return false
     end
 
-    local ok, widgets = pcall(FindAllOf, shortClassName)
-    if not ok or not widgets then return false end
-    for _, w in ipairs(widgets) do
-        if Core.IsValidObj(w) then
-            local okInVp, inVp = pcall(function() return w:IsInViewport() end)
-            local okVis, vis = pcall(function() return w:IsVisible() end)
-            if okInVp and inVp and okVis and vis then
-                return true
-            end
-        end
-    end
-    return false
+    -- Non-tracked singleton modal popups (only queried on hotkey press): use FindFirstOf instead of FindAllOf
+    local ok, w = pcall(FindFirstOf, shortClassName)
+    if not ok or not Core.IsValidObj(w) then return false end
+    local okInVp, inVp = pcall(function() return w:IsInViewport() end)
+    local okVis, vis = pcall(function() return w:IsVisible() end)
+    return (okInVp and inVp and okVis and vis) == true
 end
 
 -- Returns true if any blocking UI menu, modal popup, chat, keybind selector, or native CurrentWindow is open.
@@ -511,10 +565,15 @@ function Core.SetFeatureEnabled(name, enabled)
     Core.Config[cfgKey] = val
     Core.WriteConfig()
     local entry = FeatureToggleByName[name]
-    if entry and entry.Feature and type(entry.Feature.OnToggle) == "function" then
-        local ok, err = pcall(entry.Feature.OnToggle, val)
-        if not ok then
-            Core.Log(string.format("[EqolSettings] OnToggle(%s, %s) err: %s", tostring(name), tostring(val), tostring(err)))
+    if entry and entry.Feature then
+        if val and type(entry.Feature.RegisterHooks) == "function" then
+            pcall(entry.Feature.RegisterHooks, Core)
+        end
+        if type(entry.Feature.OnToggle) == "function" then
+            local ok, err = pcall(entry.Feature.OnToggle, val)
+            if not ok then
+                Core.Log(string.format("[EqolSettings] OnToggle(%s, %s) err: %s", tostring(name), tostring(val), tostring(err)))
+            end
         end
     end
 end
@@ -611,7 +670,10 @@ function Core.EnsureAllHooks()
     Core.EnsureKeybindHooks()
     for _, feature in ipairs(Features) do
         if type(feature.RegisterHooks) == "function" then
-            feature.RegisterHooks(Core)
+            local isEnabled = (feature.Toggleable == false) or (not feature.Name) or Core.IsFeatureEnabled(feature.Name)
+            if isEnabled then
+                feature.RegisterHooks(Core)
+            end
         end
     end
 end
@@ -884,18 +946,6 @@ function Core.IsAnyTextInputFocused()
     local pc = Core.GetLocalPlayerController()
     if IsAnyClassInstanceFocused("WBP_TextInput_C", pc) then
         return true
-    end
-    -- Only scan raw UMG editable text widgets when cursor is visible (UI mode); avoids 3x FindAllOf during gameplay.
-    local showCursor = false
-    if Core.IsValidObj(pc) then
-        pcall(function() showCursor = (pc.bShowMouseCursor == true) end)
-    end
-    if showCursor then
-        for _, clsName in ipairs({ "EditableTextBox", "EditableText", "MultiLineEditableTextBox" }) do
-            if IsAnyClassInstanceFocused(clsName, pc) then
-                return true
-            end
-        end
     end
     return false
 end
@@ -1611,14 +1661,10 @@ function Core.EnsureKeybindHooks()
 
     if not InitialSettingsMenuScanDone then
         InitialSettingsMenuScanDone = true
-        local okMenus, menus = pcall(FindAllOf, "WBP_SettingsMenu_C")
-        if okMenus and menus then
-            for _, m in ipairs(menus) do
-                if Core.IsValidObj(m) then
-                    TrackWidgetInstance("WBP_SettingsMenu_C", m)
-                    EnsureMenuKeybindRows(m)
-                end
-            end
+        local okMenu, m = pcall(FindFirstOf, "WBP_SettingsMenu_C")
+        if okMenu and Core.IsValidObj(m) then
+            TrackWidgetInstance("WBP_SettingsMenu_C", m)
+            EnsureMenuKeybindRows(m)
         end
     end
 end

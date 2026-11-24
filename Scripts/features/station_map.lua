@@ -6818,35 +6818,10 @@ local function FindMouseIconTexture(side)
         end
     end
 
-    -- Combined single-pass scan for both LMB and RMB icons so we never scan all Texture2Ds twice
-    MouseIconSearched["LMB"] = true
-    MouseIconSearched["RMB"] = true
-    local okAll, texList = pcall(FindAllOf, "Texture2D")
-    if okAll and texList then
-        for _, tex in ipairs(texList) do
-            if Core.IsValidObj(tex) then
-                local okN, fullName = pcall(function() return tex:GetFullName() end)
-                if okN and type(fullName) == "string" then
-                    local low = fullName:lower()
-                    if not Core.IsValidObj(CachedMouseIconTex["LMB"])
-                        and (low:find("lmb", 1, true) or (low:find("mouse", 1, true) and low:find("left", 1, true)))
-                    then
-                        CachedMouseIconTex["LMB"] = tex
-                        Core.Log("[StationMap] Found LMB icon texture: " .. fullName)
-                    elseif not Core.IsValidObj(CachedMouseIconTex["RMB"])
-                        and (low:find("rmb", 1, true) or (low:find("mouse", 1, true) and low:find("right", 1, true)))
-                    then
-                        CachedMouseIconTex["RMB"] = tex
-                        Core.Log("[StationMap] Found RMB icon texture: " .. fullName)
-                    end
-                    if Core.IsValidObj(CachedMouseIconTex["LMB"]) and Core.IsValidObj(CachedMouseIconTex["RMB"]) then
-                        break
-                    end
-                end
-            end
-        end
-    end
-    return Core.IsValidObj(CachedMouseIconTex[side]) and CachedMouseIconTex[side] or nil
+    -- Never scan FindAllOf("Texture2D") over thousands of engine textures for LMB/RMB icons;
+    -- Station Map legend falls back cleanly to crisp "LMB"/"RMB" text badges when absent.
+    MouseIconSearched[side] = true
+    return nil
 end
 
 local function OpenStationMap()

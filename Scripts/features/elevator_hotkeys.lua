@@ -69,13 +69,9 @@ end
 local function RefreshChatCache()
     LastChatScanClock = os.clock()
     local nextChats = {}
-    local okChats, chats = pcall(FindAllOf, "WBP_Chat_C")
-    if okChats and chats then
-        for _, chat in ipairs(chats) do
-            if Core.IsValidObj(chat) then
-                nextChats[chat:GetAddress()] = chat
-            end
-        end
+    local okChat, chat = pcall(FindFirstOf, "WBP_Chat_C")
+    if okChat and Core.IsValidObj(chat) then
+        nextChats[chat:GetAddress()] = chat
     end
     CachedChats = nextChats
 end
@@ -319,24 +315,10 @@ local function PushElevatorAlert(messageStr)
         local now = os.clock()
         if (now - LastAlertScanTime) >= ALERT_SCAN_COOLDOWN then
             LastAlertScanTime = now
-            local okAlerts, found = pcall(FindAllOf, "WBP_PlayerAlerts_C")
-            if okAlerts and found and #found > 0 then
-                local fallback = nil
-                for _, w in ipairs(found) do
-                    if Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
-                        if not fallback then fallback = w end
-                        local okVP, inVP = pcall(function() return w:IsInViewport() end)
-                        local okVis, isVis = pcall(function() return w:IsVisible() end)
-                        if (okVP and inVP) or (okVis and isVis) then
-                            targetWidget = w
-                            break
-                        end
-                    end
-                end
-                targetWidget = targetWidget or fallback
-                if Core.IsValidObj(targetWidget) then
-                    CachedAlertWidget = targetWidget
-                end
+            local okAlert, w = pcall(FindFirstOf, "WBP_PlayerAlerts_C")
+            if okAlert and Core.IsValidObj(w) and Core.IsValidObj(w.Container) then
+                targetWidget = w
+                CachedAlertWidget = w
             end
         end
     end
@@ -419,6 +401,7 @@ function Feature.RegisterHooks()
         "ElevatorHotkeys_EnterBuildingMode",
         "/Script/MainSequence.DMSPlayerController:EnterBuildingMode",
         function(Context)
+            if not Core.IsFeatureEnabled("ElevatorHotkeys") then return end
             local pc = Context and Context:get() or nil
             if not Core.IsValidObj(pc) then return end
             local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
@@ -430,6 +413,7 @@ function Feature.RegisterHooks()
         "ElevatorHotkeys_OnEnterBuildMode",
         "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C:OnEnterBuildMode",
         function(Context)
+            if not Core.IsFeatureEnabled("ElevatorHotkeys") then return end
             local pc = Context and Context:get() or nil
             if not Core.IsValidObj(pc) then return end
             local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)

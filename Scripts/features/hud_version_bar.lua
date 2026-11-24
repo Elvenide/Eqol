@@ -55,22 +55,47 @@ local function IsVersionOverlayTextBlock(tb)
     return true
 end
 
-local function FindVersionTextBlock()
-    local ok, list = pcall(FindAllOf, "TextBlock")
-    if not ok or not list then return nil, nil end
-    for i = #list, 1, -1 do
-        local tb = list[i]
-        if Core.IsValidObj(tb) and IsVersionOverlayTextBlock(tb) then
-            local okT, txtObj = pcall(function() return tb:GetText() end)
-            if okT and txtObj ~= nil then
-                local okS, s = pcall(function() return txtObj:ToString() end)
-                if okS and type(s) == "string" then
-                    local ver, rawTxt = ExtractMSVersion(s)
-                    if ver then
-                        return tb, ver, rawTxt
+local CachedGameplayStaticsCDO = nil
+
+local function FindVersionTextBlockInWidget(rootWidget)
+    if not Core.IsValidObj(rootWidget) then return nil, nil, nil end
+    local foundTb, foundVer, foundRaw = nil, nil, nil
+    pcall(function()
+        local wt = rootWidget.WidgetTree
+        if Core.IsValidObj(wt) and wt.AllWidgets then
+            local arr = wt.AllWidgets
+            local n = (arr.GetArrayNum and arr:GetArrayNum()) or #arr
+            for i = 1, n do
+                local w = Core.UnwrapArrayElem(arr[i])
+                if Core.IsValidObj(w) and w.GetText and IsVersionOverlayTextBlock(w) then
+                    local okT, txtObj = pcall(function() return w:GetText() end)
+                    if okT and txtObj ~= nil then
+                        local okS, s = pcall(function() return txtObj:ToString() end)
+                        if okS and type(s) == "string" then
+                            local ver, rawTxt = ExtractMSVersion(s)
+                            if ver then
+                                foundTb, foundVer, foundRaw = w, ver, rawTxt
+                                break
+                            end
+                        end
                     end
                 end
             end
+        end
+    end)
+    return foundTb, foundVer, foundRaw
+end
+
+local function FindVersionTextBlock(hintWidget)
+    if Core.IsValidObj(hintWidget) then
+        local tb, ver, rawTxt = FindVersionTextBlockInWidget(hintWidget)
+        if Core.IsValidObj(tb) then return tb, ver, rawTxt end
+    end
+    for _, clsName in ipairs({ "WBP_CharacterHUD_C", "WBP_MainMenu_C" }) do
+        local okF, host = pcall(FindFirstOf, clsName)
+        if okF and Core.IsValidObj(host) then
+            local tb, ver, rawTxt = FindVersionTextBlockInWidget(host)
+            if Core.IsValidObj(tb) then return tb, ver, rawTxt end
         end
     end
     return nil, nil, nil
@@ -96,10 +121,10 @@ end
 
 local SCAN_RETRY_SECONDS = 8.0 -- Safety-net FindAllOf("TextBlock") interval (>= 8s per learning.md §7)
 
-local function TryHookVersionTextBlock()
+local function TryHookVersionTextBlock(hintWidget)
     if Core.IsValidObj(TargetTextBlock) then return true end
     LastScanTime = os.clock()
-    local tb, ver, rawTxt = FindVersionTextBlock()
+    local tb, ver, rawTxt = FindVersionTextBlock(hintWidget)
     if Core.IsValidObj(tb) and ver then
         TargetTextBlock = tb
         OriginalMSVersion = ver
@@ -113,60 +138,65 @@ local function TryHookVersionTextBlock()
     return false
 end
 
+local function SampleNativeFps()
+    if not Core.IsValidObj(CachedGameplayStaticsCDO) then
+        CachedGameplayStaticsCDO = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
+    end
+    local pc = Core.GetLocalPlayerController()
+    if Core.IsValidObj(CachedGameplayStaticsCDO) and Core.IsValidObj(pc) then
+        local okDt, dt = pcall(function() return CachedGameplayStaticsCDO:GetWorldDeltaSeconds(pc) end)
+        if okDt and type(dt) == "number" and dt > 0.0001 and dt < 2.0 then
+            return math.max(1, math.floor((1.0 / dt) + 0.5))
+        end
+    end
+    return CurrentFps
+end
+
 local function StartLoop()
     if PollRunning then return end
     PollRunning = true
-    FrameCount = 0
-    LastFpsTime = os.clock()
 
+    -- Poll at 2 Hz (every 500ms) reading Unreal's native GetWorldDeltaSeconds instead of
+    -- running a 120+ Hz every-frame Lua callback just to count frames!
     local function Tick()
         if not Core.IsFeatureEnabled("HudVersionBar") then
             PollRunning = false
             return
         end
-        FrameCount = FrameCount + 1
+        CurrentFps = SampleNativeFps()
         local now = os.clock()
-        local dt = now - LastFpsTime
-        if dt >= 0.5 then
-            CurrentFps = math.max(0, math.floor((FrameCount / dt) + 0.5))
-            FrameCount = 0
-            LastFpsTime = now
-
-            if not Core.IsValidObj(TargetTextBlock) then
-                if (now - LastScanTime) >= SCAN_RETRY_SECONDS then
-                    TryHookVersionTextBlock()
-                end
-            end
-
-            if Core.IsValidObj(TargetTextBlock) then
-                UpdateVersionTextBlock()
+        if not Core.IsValidObj(TargetTextBlock) then
+            if (now - LastScanTime) >= SCAN_RETRY_SECONDS then
+                TryHookVersionTextBlock()
             end
         end
-
-        ExecuteInGameThreadAfterFrames(1, Tick)
+        if Core.IsValidObj(TargetTextBlock) then
+            UpdateVersionTextBlock()
+        end
+        ExecuteInGameThreadWithDelay(500, Tick)
     end
 
-    ExecuteInGameThreadAfterFrames(1, Tick)
+    ExecuteInGameThreadWithDelay(500, Tick)
 end
 
 -- Trigger a prompt one-shot scan when major HUD/menu widgets construct
 Feature.WatchWidgets = {
-    WBP_CharacterHUD_C = function()
+    WBP_CharacterHUD_C = function(w)
         if not Core.IsFeatureEnabled("HudVersionBar") then return end
         if not Core.IsValidObj(TargetTextBlock) then
             ExecuteInGameThreadWithDelay(200, function()
                 if Core.IsFeatureEnabled("HudVersionBar") then
-                    TryHookVersionTextBlock()
+                    TryHookVersionTextBlock(w)
                 end
             end)
         end
     end,
-    WBP_MainMenu_C = function()
+    WBP_MainMenu_C = function(w)
         if not Core.IsFeatureEnabled("HudVersionBar") then return end
         if not Core.IsValidObj(TargetTextBlock) then
             ExecuteInGameThreadWithDelay(200, function()
                 if Core.IsFeatureEnabled("HudVersionBar") then
-                    TryHookVersionTextBlock()
+                    TryHookVersionTextBlock(w)
                 end
             end)
         end

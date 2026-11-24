@@ -140,18 +140,19 @@ local function StartScrollRotatePoll()
             ConveyorPullingActive = false
         end
         -- Run every frame while actively building so single-frame scroll events are never missed;
-        -- back off to 100ms when idle/not building.
+        -- stop completely when not in build mode (restarted on EnterBuildingMode / EnterMachineBuildMode = 0ms idle cost!).
         if activeBuilding then
             ExecuteInGameThreadAfterFrames(1, Tick)
         else
-            ExecuteInGameThreadWithDelay(100, Tick)
+            PollActive = false
         end
     end
 
-    ExecuteInGameThreadWithDelay(100, Tick)
+    ExecuteInGameThreadAfterFrames(1, Tick)
 end
 
 local function ResetState()
+    PollActive = false
     ConveyorPullingActive = false
     LastConveyorBuilderAddr = nil
     LastBeltSpawnClock = -999.0
@@ -160,35 +161,26 @@ local function ResetState()
 end
 
 function Feature.RegisterHooks()
-    if not BeltSpawnHookRegistered then
-        BeltSpawnHookRegistered = true
-        pcall(NotifyOnNewObject, "/Script/MainSequence.ConveyorBeltObject", function(obj)
-            if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
-            if not Core.IsValidObj(obj) then return end
-            -- Marshal onto game thread and only clear local pulling state if the local player recently confirmed a build
-            -- AND the belt spawned on the local player's current frame (prevents remote MP builds from cancelling local pull).
-            ExecuteInGameThread(function()
-                if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
-                local now = os.clock()
-                if (now - LastLocalConfirmClock) <= 0.35 then
-                    local sameFrame = true
-                    pcall(function()
-                        local localPC = Core.GetLocalPlayerController()
-                        local localFrame = Core.IsValidObj(localPC) and Core.IsValidObj(localPC.PlayerObject)
-                            and localPC.PlayerObject.GetFrame and localPC.PlayerObject:GetFrame() or nil
-                        local objFrame = Core.IsValidObj(obj) and obj.GetFrame and obj:GetFrame() or nil
-                        if Core.IsValidObj(localFrame) and Core.IsValidObj(objFrame) then
-                            sameFrame = (localFrame:GetAddress() == objFrame:GetAddress())
-                        end
-                    end)
-                    if sameFrame then
-                        LastBeltSpawnClock = now
-                        ConveyorPullingActive = false
-                    end
-                end
-            end)
+    local function onEnterBuild(Context)
+        if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
+        local pc = Context and Context:get() or nil
+        if not IsLocalPC(pc) then return end
+        ExecuteInGameThreadAfterFrames(1, function()
+            if Core.IsFeatureEnabled("ConveyorScrollRotate") then
+                StartScrollRotatePoll()
+            end
         end)
     end
+    Core.TryRegisterHook(
+        "ScrollRotate_EnterBuildMode",
+        "/Script/MainSequence.DMSPlayerController:EnterBuildingMode",
+        onEnterBuild
+    )
+    Core.TryRegisterHook(
+        "ScrollRotate_EnterMachineBuildMode",
+        "/Script/MainSequence.DMSPlayerController:EnterMachineBuildMode",
+        onEnterBuild
+    )
     Core.TryRegisterHook(
         "ScrollRotate_ConfirmBuild",
         "/Script/MainSequence.DMSPlayerController:ConfirmBuild",
@@ -200,18 +192,19 @@ function Feature.RegisterHooks()
             LastLocalConfirmClock = clickClock
             ExecuteInGameThreadWithDelay(80, function()
                 if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
-                -- If real ConveyorBeltObject(s) were spawned by this ConfirmBuild, the pulled segments
-                -- were committed and ConveyorBuilder is back in non-pulling mode.
-                if LastBeltSpawnClock >= clickClock - 0.05 then
-                    ConveyorPullingActive = false
-                    return
-                end
                 local curPC = Core.GetLocalPlayerController()
                 if not Core.IsValidObj(curPC) then return end
                 local builder = GetActiveStationBuilder(curPC)
                 if IsConveyorBuilder(builder) then
-                    LastConveyorBuilderAddr = builder:GetAddress()
-                    ConveyorPullingActive = true
+                    local bAddr = builder:GetAddress()
+                    if LastConveyorBuilderAddr == bAddr and ConveyorPullingActive then
+                        -- Second confirm commits the pulled belt run -> back to non-pulling mode
+                        ConveyorPullingActive = false
+                    else
+                        LastConveyorBuilderAddr = bAddr
+                        ConveyorPullingActive = true
+                    end
+                    StartScrollRotatePoll()
                 else
                     ConveyorPullingActive = false
                 end
@@ -233,16 +226,18 @@ end
 
 function Feature.OnToggle(enabled)
     if enabled then
-        StartScrollRotatePoll()
+        local pc = Core.GetLocalPlayerController()
+        if Core.IsValidObj(pc) and Core.IsValidObj(GetActiveStationBuilder(pc)) then
+            StartScrollRotatePoll()
+        end
     else
         ConveyorPullingActive = false
+        PollActive = false
     end
 end
 
 function Feature.Init()
-    if Core.IsFeatureEnabled("ConveyorScrollRotate") then
-        StartScrollRotatePoll()
-    end
+    -- Event-driven via EnterBuildingMode / EnterMachineBuildMode (zero idle polling!)
 end
 
 function Feature.OnMapLoad()

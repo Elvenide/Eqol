@@ -40,12 +40,14 @@ Core.RegisterFeature(require("features.eqol_settings"))
 -- Startup
 Core.InitAll()
 Core.EnsureAllHooks()
+Core.RegisterTargetedWidgetWatchers()
 
 pcall(RegisterHook, "/Script/Engine.PlayerController:ClientRestart", function(Context)
     local pc = Context and Context:get() or nil
     if not Core.IsValidObj(pc) then return end
     local okL, isLocal = pcall(function() return pc:IsLocalPlayerController() end)
     if not (okL and isLocal) then return end
+    Core.SetLocalPlayerController(pc)
     Core.DispatchClientRestart()
 end)
 
@@ -55,32 +57,6 @@ end)
 
 RegisterLoadMapPostHook(function()
     Core.DispatchMapLoad()
-end)
-
-NotifyOnNewObject("/Script/UMG.UserWidget", function(widget)
-    if not Core.IsValidObj(widget) then return end
-
-    local okCls, cls = pcall(function() return widget:GetClass() end)
-    if not okCls or not Core.IsValidObj(cls) then return end
-
-    local okName, clsName = pcall(function() return cls:GetFName():ToString() end)
-    if not okName or not Core.IsWatchedWidgetClass(clsName) then return end
-
-    if IsInGameThread() then
-        Core.EnsureAllHooks()
-        ExecuteInGameThreadAfterFrames(1, function()
-            if Core.IsValidObj(widget) then
-                Core.DispatchWidgetConstructed(widget, clsName)
-            end
-        end)
-    else
-        ExecuteInGameThread(function()
-            Core.EnsureAllHooks()
-            if Core.IsValidObj(widget) then
-                Core.DispatchWidgetConstructed(widget, clsName)
-            end
-        end)
-    end
 end)
 
 Core.Log(string.format("Initialized (Power Overview keybind: %s)", tostring(Core.Config.PowerOverviewKey)))

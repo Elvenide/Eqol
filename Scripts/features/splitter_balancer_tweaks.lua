@@ -5,12 +5,14 @@
 -- 2. Scales splitter, belt balancer, and underground belt meshes to 2/3 height (~0.67x Z), anchored at floor Z.
 
 local Core = require("core")
+local StationData = require("station_data")
 
 local Feature = {
     Name       = "SplitterBalancerTweaks",
-    Toggleable = false, -- Walk-through is always enabled; CompactHeight is registered as a toggleable option
+    Toggleable = false, -- Individual options (Walkthrough + CompactHeight) are registered as toggleable options
 }
 
+local FEAT_WALK   = "SplitterBalancerWalkthrough"
 local FEAT_HEIGHT = "SplitterBalancerCompactHeight"
 
 local HEIGHT_SCALE     = 2.0 / 3.0
@@ -704,73 +706,79 @@ local function RunStaggeredScan()
     local myGen = ScanGeneration
 
     local isMP = IsMultiplayerSession()
-    local allowWalkthrough = not isMP
-    if isMP then
+    local allowWalkthrough = Core.IsFeatureEnabled(FEAT_WALK) and (not isMP)
+    local doHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
+    if not allowWalkthrough and not doHeight then
+        StaggeredScanActive = false
+        return
+    end
+    if isMP and Core.IsFeatureEnabled(FEAT_WALK) then
         if not LoggedMultiplayerDisable then
             LoggedMultiplayerDisable = true
             Core.Log("[SplitterBalancerTweaks] Multiplayer session detected; walk-through automatically disabled (2/3 height remains active).")
         end
     end
 
-    -- Build a flat list of single-class scan tasks so we never run 16 FindAllOf calls in one frame
-    local tasks = {}
-    for _, clsShort in ipairs(WALKTHROUGH_ACTOR_CLASSES) do
-        tasks[#tasks + 1] = { kind = "walk_actor", cls = clsShort }
-    end
-    if allowWalkthrough then
-        for _, simCls in ipairs(WALKTHROUGH_SIM_CLASSES) do
-            tasks[#tasks + 1] = { kind = "walk_sim", cls = simCls }
+    -- Collect splitter/balancer/underground machines directly from DMSWorld.Stations instead of
+    -- running 16 separate FindAllOf scans across the entire GUObjectArray!
+    local targets = {}
+    local pc = Core.GetLocalPlayerController()
+    local worldSub = Core.IsValidObj(pc) and Core.GetWorldSubsystem(pc, Core.PATHS.WorldSubsystemClass) or nil
+    if Core.IsValidObj(worldSub) then
+        local okW, dmsWorld = pcall(function() return worldSub:GetDMSWorld() end)
+        if okW and Core.IsValidObj(dmsWorld) and dmsWorld.Stations then
+            StationData.ForEachArray(dmsWorld.Stations, function(_, stElem)
+                local st = Core.UnwrapArrayElem(stElem)
+                if Core.IsValidObj(st) then
+                    local machines = StationData.GetAllStationMachines(st, nil, nil)
+                    for i = 1, #machines do
+                        local m = machines[i]
+                        if Core.IsValidObj(m) then
+                            local clsName = SafeClassName(m)
+                            local low = clsName:lower()
+                            local isWalk = WALKTHROUGH_SIM_SET[clsName]
+                                or low:find("splitter", 1, true) ~= nil
+                                or low:find("beltbalancer", 1, true) ~= nil
+                            local isUg = UNDERGROUND_SIM_SET[clsName]
+                                or low:find("undergroundbelt", 1, true) ~= nil
+                            if isWalk or isUg then
+                                targets[#targets + 1] = { obj = m, isWalk = isWalk, isUg = isUg }
+                            end
+                        end
+                    end
+                end
+            end)
         end
     end
-    for _, clsShort in ipairs(UNDERGROUND_ACTOR_CLASSES) do
-        tasks[#tasks + 1] = { kind = "ug_actor", cls = clsShort }
-    end
 
-    local simSeen = {}
     local disabledCounts = {}
     local idx = 1
+    local total = #targets
 
     local function Step()
         if myGen ~= ScanGeneration then
             StaggeredScanActive = false
             return
         end
-        if idx <= #tasks then
-            local t = tasks[idx]
+        local budgetEnd = os.clock() + 0.0025
+        local ops = 0
+        while idx <= total and (ops < 8 or os.clock() < budgetEnd) and ops < 40 do
+            local entry = targets[idx]
             idx = idx + 1
-            local ok, list = pcall(FindAllOf, t.cls)
-            if ok and list then
-                if t.kind == "walk_actor" then
-                    local doHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
-                    for _, actor in ipairs(list) do
-                        if Core.IsValidObj(actor) then
-                            if allowWalkthrough then
-                                EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
-                            end
-                            if doHeight then EnsureTargetHeight(actor) end
-                        end
-                    end
-                elseif t.kind == "walk_sim" and allowWalkthrough then
-                    for _, s in ipairs(list) do
-                        if Core.IsValidObj(s) then
-                            local sAddr = s:GetAddress()
-                            if not simSeen[sAddr] then
-                                simSeen[sAddr] = true
-                                DisableSimCollider(s, disabledCounts)
-                            end
-                        end
-                    end
-                elseif t.kind == "ug_actor" then
-                    if Core.IsFeatureEnabled(FEAT_HEIGHT) then
-                        for _, actor in ipairs(list) do
-                            if Core.IsValidObj(actor) then
-                                EnsureTargetHeight(actor)
-                            end
-                        end
-                    end
+            ops = ops + 1
+            local obj = entry.obj
+            if Core.IsValidObj(obj) then
+                local wantWalk = allowWalkthrough and entry.isWalk
+                if wantWalk then
+                    DisableSimCollider(obj, disabledCounts)
+                end
+                if wantWalk or doHeight then
+                    ApplyDirectToMachineActors(obj, wantWalk)
                 end
             end
-            ExecuteInGameThreadAfterFrames(2, Step)
+        end
+        if idx <= total then
+            ExecuteInGameThreadAfterFrames(1, Step)
         else
             if allowWalkthrough then
                 pcall(CleanTrackedEnvs)
@@ -840,24 +848,17 @@ end
 
 local function RegisterMachineObjectHook()
     if NewObjHookRegistered then return end
+    if not Core.IsFeatureEnabled(FEAT_WALK) and not Core.IsFeatureEnabled(FEAT_HEIGHT) then return end
     NewObjHookRegistered = true
-    local function HandleNewMachineObj(obj)
+    local function HandleNewTargetObj(obj, isWalk, isUg)
         if not Core.IsValidObj(obj) then return end
-        local clsName = SafeClassName(obj)
-        local low = clsName:lower()
-        local isWalk = WALKTHROUGH_SIM_SET[clsName]
-            or low:find("splitter", 1, true) ~= nil
-            or low:find("beltbalancer", 1, true) ~= nil
-        local isUg = UNDERGROUND_SIM_SET[clsName]
-            or low:find("undergroundbelt", 1, true) ~= nil
-        if not isWalk and not isUg then return end
+        local allowWalk = isWalk and Core.IsFeatureEnabled(FEAT_WALK) and (not IsMultiplayerSession())
+        local wantHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
+        if not allowWalk and not wantHeight then return end
 
         local myGen = ScanGeneration
         ExecuteInGameThreadWithDelay(150, function()
             if myGen ~= ScanGeneration or not Core.IsValidObj(obj) then return end
-            local allowWalk = isWalk and (not IsMultiplayerSession())
-            local wantHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
-            if not allowWalk and not wantHeight then return end
             if allowWalk then
                 DisableSimCollider(obj)
                 pcall(CleanTrackedEnvs)
@@ -870,16 +871,28 @@ local function RegisterMachineObjectHook()
                             DisableSimCollider(obj)
                             pcall(CleanTrackedEnvs)
                         end
-                        if not ApplyDirectToMachineActors(obj, allowWalk) then
-                            ScheduleStaggeredScan(300)
-                        end
+                        ApplyDirectToMachineActors(obj, allowWalk)
                     end)
                 end
             end
         end)
     end
-    -- MachineObject is the true base class for newly built splitters, balancers, and underground belts
-    pcall(NotifyOnNewObject, "/Script/MainSequence.MachineObject", HandleNewMachineObj)
+    -- Targeted NotifyOnNewObject ONLY on splitter / balancer / underground subclasses
+    -- (never intercepts base MachineObject for every conveyor belt/machine spawned in the game!)
+    for _, path in ipairs({
+        "/Script/MainSequence.SplitterObject",
+        "/Script/MainSequence.BeltBalancerObject",
+        "/Game/Blueprints/Objects/Machines/Logistics/BP_SplitterObject.BP_SplitterObject_C",
+        "/Game/Blueprints/Objects/Machines/Logistics/BPO_BeltBalancer_01.BPO_BeltBalancer_01_C",
+    }) do
+        pcall(NotifyOnNewObject, path, function(obj) HandleNewTargetObj(obj, true, false) end)
+    end
+    for _, path in ipairs({
+        "/Script/MainSequence.UndergroundBeltObject",
+        "/Game/Blueprints/Objects/Machines/Logistics/BP_UndergroundBeltObject.BP_UndergroundBeltObject_C",
+    }) do
+        pcall(NotifyOnNewObject, path, function(obj) HandleNewTargetObj(obj, false, true) end)
+    end
 end
 
 local function RestoreOriginalHeights()
@@ -903,11 +916,23 @@ end
 
 function Feature.Init()
     Core.RegisterToggleableOption({
+        Name        = FEAT_WALK,
+        DisplayName = "Splitter & Balancer Walk-Through (SP)",
+        Description = "Allows walking through splitters and belt balancers in singleplayer (100% save-safe).",
+        OnToggle    = function(enabled)
+            if enabled then
+                RegisterMachineObjectHook()
+                ScheduleStaggeredScan(50)
+            end
+        end,
+    })
+    Core.RegisterToggleableOption({
         Name        = FEAT_HEIGHT,
         DisplayName = "Splitter, Balancer & Underground 2/3 Height",
         Description = "Scales splitters, belt balancers, and underground belts to 2/3 height.",
         OnToggle    = function(enabled)
             if enabled then
+                RegisterMachineObjectHook()
                 ProcessedHeightActors = {}
                 ScheduleStaggeredScan(50)
             else
@@ -917,8 +942,10 @@ function Feature.Init()
     })
 
     LastWorldAddr = GetCurrentWorldAddr()
-    RegisterMachineObjectHook()
-    ScheduleStaggeredScan(1500)
+    if Core.IsFeatureEnabled(FEAT_WALK) or Core.IsFeatureEnabled(FEAT_HEIGHT) then
+        RegisterMachineObjectHook()
+        ScheduleStaggeredScan(1500)
+    end
     Core.Log("[SplitterBalancerTweaks] Initialized.")
 end
 
@@ -928,13 +955,19 @@ function Feature.OnClientRestart()
         LastWorldAddr = curWorld
         ResetWorldCaches()
     end
-    ScheduleStaggeredScan(1800)
+    if Core.IsFeatureEnabled(FEAT_WALK) or Core.IsFeatureEnabled(FEAT_HEIGHT) then
+        RegisterMachineObjectHook()
+        ScheduleStaggeredScan(1800)
+    end
 end
 
 function Feature.OnMapLoad()
     LastWorldAddr = GetCurrentWorldAddr()
     ResetWorldCaches()
-    ScheduleStaggeredScan(2500)
+    if Core.IsFeatureEnabled(FEAT_WALK) or Core.IsFeatureEnabled(FEAT_HEIGHT) then
+        RegisterMachineObjectHook()
+        ScheduleStaggeredScan(2500)
+    end
 end
 
 function Feature.PruneCaches()
