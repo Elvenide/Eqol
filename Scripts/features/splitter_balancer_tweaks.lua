@@ -386,6 +386,10 @@ local function TrackSimEnv(simObj)
     end
 end
 
+local EnvCleanActive = false
+local EnvCleanPending = false
+local EnvCleanGen = 0
+
 local function CleanTrackedEnvs()
     local anyID = next(WalkthroughSimIDs) ~= nil
     if not anyID then return end
@@ -404,104 +408,155 @@ local function CleanTrackedEnvs()
     end
     if not dirty then return end
 
+    if EnvCleanActive then
+        EnvCleanPending = true
+        return
+    end
+    EnvCleanActive = true
+    EnvCleanPending = false
     NeedsEnvClean = false
+    local myCleanGen = EnvCleanGen
+
+    local envList = {}
     for envAddr, env in pairs(TrackedEnvs) do
         if not Core.IsValidObj(env) then
             TrackedEnvs[envAddr] = nil
             ProcessedEnvNums[envAddr] = nil
         else
-            pcall(function()
-                local cols = env.Colliders
-                if not cols or not cols.GetArrayNum then return end
-                local num = tonumber(cols:GetArrayNum()) or 0
-                local dataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
-                if type(dataAddr) ~= "number" or dataAddr == 0 then
-                    if not LoggedKeys["no_data_addr"] then
-                        LoggedKeys["no_data_addr"] = true
-                        Core.Log(string.format("[SplitterBalancerTweaks] Colliders:GetArrayDataAddress unavailable: type=%s val=%s",
-                            type(dataAddr), tostring(dataAddr)))
-                    end
-                    return
+            envList[#envList + 1] = { addr = envAddr, env = env }
+        end
+    end
+
+    local eIdx = 1
+    local curState = nil
+
+    local function StepClean()
+        if myCleanGen ~= EnvCleanGen then
+            EnvCleanActive = false
+            return
+        end
+        local tFrame0 = os.clock()
+        local budgetEnd = tFrame0 + 0.0018
+
+        if not curState then
+            if eIdx > #envList then
+                EnvCleanActive = false
+                if EnvCleanPending and myCleanGen == EnvCleanGen then
+                    EnvCleanPending = false
+                    ExecuteInGameThreadAfterFrames(2, CleanTrackedEnvs)
                 end
+                return
+            end
+            local entry = envList[eIdx]
+            eIdx = eIdx + 1
+            local env = entry.env
+            if not Core.IsValidObj(env) then
+                TrackedEnvs[entry.addr] = nil
+                ProcessedEnvNums[entry.addr] = nil
+                ExecuteInGameThreadAfterFrames(2, StepClean)
+                return
+            end
+            local cols, num, dataAddr = nil, 0, nil
+            pcall(function()
+                cols = env.Colliders
+                if cols and cols.GetArrayNum then
+                    num = tonumber(cols:GetArrayNum()) or 0
+                    dataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
+                end
+            end)
+            if not cols or num <= 0 or type(dataAddr) ~= "number" or dataAddr == 0 then
+                if cols and num > 0 and not LoggedKeys["no_data_addr"] then
+                    LoggedKeys["no_data_addr"] = true
+                    Core.Log(string.format("[SplitterBalancerTweaks] Colliders:GetArrayDataAddress unavailable: type=%s val=%s",
+                        type(dataAddr), tostring(dataAddr)))
+                end
+                ExecuteInGameThreadAfterFrames(2, StepClean)
+                return
+            end
+            curState = {
+                addr = entry.addr,
+                env = env,
+                cols = cols,
+                num = num,
+                dataAddr = dataAddr,
+                i = 1,
+                readErr = 0,
+                firstErr = nil,
+            }
+        end
 
-                local matched = 0
-                local modified = 0
-                local alreadyOff = 0
-                local readErr = 0
-                local sampleMsg = nil
-                local firstErr = nil
-
-                for i = 1, num do
-                    local c = cols[i]
-                    if c then
-                        local okId, cid = pcall(function() return c.ColliderID end)
-                        if okId and type(cid) == "number" and WalkthroughSimIDs[cid] then
-                            matched = matched + 1
-                            local elemAddr = dataAddr + (i - 1) * COLLIDER_STRIDE
-                            local slot, slotErr = EnsureSlotProps(elemAddr, env)
-                            if not slot then
-                                readErr = readErr + 1
-                                if not firstErr then firstErr = slotErr end
+        local st = curState
+        local ops = 0
+        while st.i <= st.num and (ops < 4 or os.clock() < budgetEnd) and ops < 120 do
+            local i = st.i
+            st.i = i + 1
+            ops = ops + 1
+            local c = nil
+            pcall(function() c = st.cols[i] end)
+            if c then
+                local okId, cid = pcall(function() return c.ColliderID end)
+                if okId and type(cid) == "number" and WalkthroughSimIDs[cid] then
+                    local elemAddr = st.dataAddr + (i - 1) * COLLIDER_STRIDE
+                    local slot, slotErr = EnsureSlotProps(elemAddr, st.env)
+                    if not slot then
+                        st.readErr = st.readErr + 1
+                        if not st.firstErr then st.firstErr = slotErr end
+                    else
+                        local anchorObj = slot.anchor.obj
+                        local okRead, gotCid, oldMin, oldMax = pcall(function()
+                            return anchorObj[slot.pCid], anchorObj[slot.pMin], anchorObj[slot.pMax]
+                        end)
+                        if not okRead then
+                            st.readErr = st.readErr + 1
+                            if not st.firstErr then st.firstErr = tostring(gotCid) end
+                        elseif gotCid ~= cid then
+                            st.readErr = st.readErr + 1
+                            if not st.firstErr then
+                                st.firstErr = string.format("cid mismatch got=%s expected=%s at 0x%X",
+                                    tostring(gotCid), tostring(cid), elemAddr)
+                            end
+                        elseif oldMin ~= COLLIDER_DISABLE_MIN or oldMax ~= COLLIDER_DISABLE_MAX then
+                            local curDataAddr = nil
+                            pcall(function() curDataAddr = st.cols.GetArrayDataAddress and st.cols:GetArrayDataAddress() or nil end)
+                            if curDataAddr ~= st.dataAddr then
+                                st.readErr = st.readErr + 1
+                                if not st.firstErr then st.firstErr = "Colliders TArray reallocated mid-pass" end
                             else
-                                local anchorObj = slot.anchor.obj
-                                local okRead, gotCid, oldMin, oldMax = pcall(function()
-                                    return anchorObj[slot.pCid], anchorObj[slot.pMin], anchorObj[slot.pMax]
+                                local okWrite, errW = pcall(function()
+                                    anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
+                                    anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
                                 end)
-                                if not okRead then
-                                    readErr = readErr + 1
-                                    if not firstErr then firstErr = tostring(gotCid) end
-                                elseif gotCid ~= cid then
-                                    readErr = readErr + 1
-                                    if not firstErr then
-                                        firstErr = string.format("cid mismatch got=%s expected=%s at 0x%X",
-                                            tostring(gotCid), tostring(cid), elemAddr)
-                                    end
-                                elseif oldMin == COLLIDER_DISABLE_MIN and oldMax == COLLIDER_DISABLE_MAX then
-                                    alreadyOff = alreadyOff + 1
-                                else
-                                    local curDataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
-                                    if curDataAddr ~= dataAddr then
-                                        readErr = readErr + 1
-                                        if not firstErr then firstErr = "Colliders TArray reallocated mid-pass" end
-                                    else
-                                        local okWrite, errW = pcall(function()
-                                            anchorObj[slot.pMin] = COLLIDER_DISABLE_MIN
-                                            anchorObj[slot.pMax] = COLLIDER_DISABLE_MAX
-                                        end)
-                                        if okWrite then
-                                            local okV, newMin, newMax = pcall(function()
-                                                return anchorObj[slot.pMin], anchorObj[slot.pMax]
-                                            end)
-                                            if okV and newMin == COLLIDER_DISABLE_MIN and newMax == COLLIDER_DISABLE_MAX then
-                                                modified = modified + 1
-                                                if not sampleMsg then
-                                                    sampleMsg = string.format("id=%d X:[%d..%d]->[%d..%d]",
-                                                        cid, oldMin, oldMax, newMin, newMax)
-                                                end
-                                            else
-                                                readErr = readErr + 1
-                                                if not firstErr then firstErr = "verify failed" end
-                                            end
-                                        else
-                                            readErr = readErr + 1
-                                            if not firstErr then firstErr = tostring(errW) end
-                                        end
-                                    end
+                                if not okWrite then
+                                    st.readErr = st.readErr + 1
+                                    if not st.firstErr then st.firstErr = tostring(errW) end
                                 end
                             end
                         end
                     end
                 end
+            end
+        end
 
-                ProcessedEnvNums[envAddr] = num
-                if readErr > 0 and not LoggedKeys["env_err"] then
-                    LoggedKeys["env_err"] = true
-                    Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] collider write err=%d (%s)",
-                        tostring(envAddr), readErr, firstErr or "?"))
-                end
-            end)
+        local elapsedMs = (os.clock() - tFrame0) * 1000.0
+        if elapsedMs > 15.0 then
+            Core.Log(string.format("[Perf] SplitterBalancerTweaks.CleanTrackedEnvs step took %.1fms (ops=%d/%d)", elapsedMs, ops, st.num))
+        end
+
+        if st.i <= st.num then
+            ExecuteInGameThreadAfterFrames(2, StepClean)
+        else
+            ProcessedEnvNums[st.addr] = st.num
+            if st.readErr > 0 and not LoggedKeys["env_err"] then
+                LoggedKeys["env_err"] = true
+                Core.Log(string.format("[SplitterBalancerTweaks] Env[%s] collider write err=%d (%s)",
+                    tostring(st.addr), st.readErr, st.firstErr or "?"))
+            end
+            curState = nil
+            ExecuteInGameThreadAfterFrames(2, StepClean)
         end
     end
+
+    ExecuteInGameThreadAfterFrames(2, StepClean)
 end
 
 local function DisableSimCollider(simObj)
@@ -685,6 +740,9 @@ local DebouncedScanGen = 0
 
 local function ResetWorldCaches()
     ScanGeneration = ScanGeneration + 1
+    EnvCleanGen = EnvCleanGen + 1
+    EnvCleanActive = false
+    EnvCleanPending = false
     StaggeredScanActive = false
     StaggeredScanPending = false
     DebouncedScanScheduled = false

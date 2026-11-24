@@ -2035,7 +2035,15 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
 
     local function pumpAsyncBuild()
         if myGen ~= AsyncFloorBuildGen then return end
-        local budgetEnd = os.clock() + frameBudget
+        local tTick0 = os.clock()
+        local phaseAtStart = phase
+        local budgetEnd = tTick0 + frameBudget
+        local function logSlowTick()
+            local ms = (os.clock() - tTick0) * 1000.0
+            if ms > 15.0 then
+                Core.Log(string.format("[Perf] StationData.pumpAsyncBuild phase=%s took %.1fms", tostring(phaseAtStart), ms))
+            end
+        end
 
         if phase == "bg_plats" then
             if not Core.IsValidObj(station) then return end
@@ -2045,6 +2053,7 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
                 plats = { walkFrame }
             end
             phase = "bg_machines_list"
+            logSlowTick()
             ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
             return
         end
@@ -2083,6 +2092,7 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
             end
             bgElevIdx = 1
             phase = "bg_elevators"
+            logSlowTick()
             ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
             return
         end
@@ -2199,6 +2209,7 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
 
         if phase == "walls_init" then
             wallState = initWallExtraction()
+            logSlowTick()
             if not wallState then
                 finishAsyncBuild()
                 return
