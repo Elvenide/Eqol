@@ -89,13 +89,16 @@ jobs:
             echo ""
             echo "📖 **[Getting Started & Installation Guide](https://github.com/${{ github.repository }}/blob/main/docs/get-started.md)** (supports [MSCoreManager](https://github.com/xxalex3xx97/MSCore/releases/latest) and manual UE4SS installation)"
             echo ""
-            echo "## What's Changed"
+            echo "<details>"
+            echo "<summary><strong>What's Changed</strong></summary>"
             echo ""
             if [ -s CHANGELOG_RELEASE.md ]; then
               cat CHANGELOG_RELEASE.md
             else
               echo "- Maintenance and polish updates."
             fi
+            echo ""
+            echo "</details>"
           } > RELEASE_NOTES.md
 
       - name: Create GitHub Release

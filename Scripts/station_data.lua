@@ -976,6 +976,79 @@ local function CollectElevatorStopLocalZs(station, allMachines, xform)
 end
 
 local MachineCacheVersion = 0
+local AsyncFloorBuildGen = 0
+
+local function MergeWallList(list)
+    if not list or #list <= 1 then return end
+    local eps = 8.0
+    local function mergeAxis(items, axis)
+        if #items <= 1 then return items end
+        local out = {}
+        local function bandKey(v) return math.floor(v / eps + 0.5) end
+        if axis == "X" then
+            table.sort(items, function(a, b)
+                local ay1, by1 = bandKey(a.minY), bandKey(b.minY)
+                if ay1 ~= by1 then return ay1 < by1 end
+                local ay2, by2 = bandKey(a.maxY), bandKey(b.maxY)
+                if ay2 ~= by2 then return ay2 < by2 end
+                if a.minZ ~= b.minZ then return a.minZ < b.minZ end
+                return a.minX < b.minX
+            end)
+        else
+            table.sort(items, function(a, b)
+                local ax1, bx1 = bandKey(a.minX), bandKey(b.minX)
+                if ax1 ~= bx1 then return ax1 < bx1 end
+                local ax2, bx2 = bandKey(a.maxX), bandKey(b.maxX)
+                if ax2 ~= bx2 then return ax2 < bx2 end
+                if a.minZ ~= b.minZ then return a.minZ < b.minZ end
+                return a.minY < b.minY
+            end)
+        end
+        for i = 1, #items do
+            local b = items[i]
+            local mergedInto = nil
+            for k = #out, math.max(1, #out - 8), -1 do
+                local a = out[k]
+                local zOverlap = (a.minZ <= b.maxZ - 40.0 and b.minZ <= a.maxZ - 40.0)
+                if zOverlap then
+                    if axis == "X" then
+                        if math.abs(a.minY - b.minY) <= eps and math.abs(a.maxY - b.maxY) <= eps
+                            and a.minX <= b.maxX + eps and b.minX <= a.maxX + eps
+                        then
+                            mergedInto = a
+                            break
+                        end
+                    else
+                        if math.abs(a.minX - b.minX) <= eps and math.abs(a.maxX - b.maxX) <= eps
+                            and a.minY <= b.maxY + eps and b.minY <= a.maxY + eps
+                        then
+                            mergedInto = a
+                            break
+                        end
+                    end
+                end
+            end
+            if mergedInto then
+                mergedInto.minX = math.min(mergedInto.minX, b.minX)
+                mergedInto.maxX = math.max(mergedInto.maxX, b.maxX)
+                mergedInto.minY = math.min(mergedInto.minY, b.minY)
+                mergedInto.maxY = math.max(mergedInto.maxY, b.maxY)
+                mergedInto.minZ = math.min(mergedInto.minZ, b.minZ)
+                mergedInto.maxZ = math.max(mergedInto.maxZ, b.maxZ)
+                mergedInto.cx = (mergedInto.minX + mergedInto.maxX) * 0.5
+                mergedInto.cy = (mergedInto.minY + mergedInto.maxY) * 0.5
+                mergedInto.ex = (mergedInto.maxX - mergedInto.minX) * 0.5
+                mergedInto.ey = (mergedInto.maxY - mergedInto.minY) * 0.5
+            else
+                out[#out + 1] = b
+            end
+        end
+        return out
+    end
+    local res = mergeAxis(mergeAxis(list, "X"), "Y")
+    for i = 1, #list do list[i] = nil end
+    for i = 1, #res do list[i] = res[i] end
+end
 
 function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, playerZ)
     local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
@@ -994,7 +1067,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
             for _, m in ipairs(freshMachines) do
                 if not StationData.ShouldHideMachineOnMap(m) then
                     local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, cXform)
-                    local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
+                    local skipZero = math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5 and (not Core.IsValidObj(StationData.GetObjectActor(m)))
                     if not skipZero then
                         local bestFl = nil
                         local bestDz = math.huge
@@ -1148,7 +1221,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     for _, m in ipairs(allMachines) do
         if not StationData.ShouldHideMachineOnMap(m) then
             local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, xform)
-            local skipZero = (not Core.IsValidObj(StationData.GetObjectActor(m))) and math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5
+            local skipZero = math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5 and (not Core.IsValidObj(StationData.GetObjectActor(m)))
             if not skipZero then
                 table.insert(localMachines, { machine = m, x = lx, y = ly, z = lz, yaw = lyaw })
                 if not hasElevators and #floors == 0 then
@@ -1218,7 +1291,7 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     if Core.IsValidObj(station) and #floors > 0 then
         local stWallKey = tostring(station:GetAddress())
         local cachedWalls = CachedStationWallsByKey[stWallKey]
-        if cachedWalls and cachedWalls.time and (now - cachedWalls.time) >= 60.0 then
+        if cachedWalls and cachedWalls.time and (now - cachedWalls.time) >= 300.0 then
             cachedWalls = nil
             CachedStationWallsByKey[stWallKey] = nil
         end
@@ -1599,6 +1672,467 @@ function StationData.BuildStationFloorMap(station, walkFrame, playerX, playerY, 
     end
 
     return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY, xform
+end
+
+-- Non-blocking time-sliced variant of BuildStationFloorMap for Station Map open.
+-- Returns platforms & floor list immediately (<10ms) and streams machine binning + wall extraction
+-- across subsequent frames (3ms/frame) before invoking onComplete(floors).
+function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, playerY, playerZ, onComplete, budgetSecOpt)
+    AsyncFloorBuildGen = AsyncFloorBuildGen + 1
+    local myGen = AsyncFloorBuildGen
+    local frameBudget = budgetSecOpt or 0.0030
+    local cacheKey = Core.IsValidObj(station) and tostring(station:GetAddress()) or nil
+    local now = os.clock()
+
+    if cacheKey and CachedFloorMap and CachedFloorMap.key == cacheKey and (now - CachedFloorMap.time) < 300.0 then
+        local cFloors = CachedFloorMap.floors
+        local cXform = CachedFloorMap.xform
+        local curIdx = 1
+        if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" and #cFloors > 0 then
+            local _, _, plz = StationData.WorldToStationLocal(cXform, playerX, playerY, playerZ, nil, nil, nil)
+            local bestD = math.huge
+            for _, fl in ipairs(cFloors) do
+                local d = math.abs(plz - fl.z)
+                if d < bestD then bestD = d; curIdx = fl.index end
+            end
+        end
+        if CachedFloorMap.machineVersion == MachineCacheVersion then
+            return cFloors, curIdx, CachedFloorMap.unitSize, CachedFloorMap.gridOriginX, CachedFloorMap.gridOriginY, cXform, false
+        end
+
+        local freshMachines = StationData.GetAllStationMachines(station, nil, walkFrame)
+        for _, fl in ipairs(cFloors) do fl.machines = {} end
+        local mIdx = 1
+        local totalM = #freshMachines
+        local function pumpRebin()
+            if myGen ~= AsyncFloorBuildGen then return end
+            local budgetEnd = os.clock() + 0.0030
+            local step = 0
+            while mIdx <= totalM and (step < 15 or os.clock() < budgetEnd) and step < 120 do
+                local m = freshMachines[mIdx]
+                mIdx = mIdx + 1
+                step = step + 1
+                if Core.IsValidObj(m) and not StationData.ShouldHideMachineOnMap(m) then
+                    local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, cXform)
+                    local skipZero = math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5 and (not Core.IsValidObj(StationData.GetObjectActor(m)))
+                    if not skipZero then
+                        local bestFl, bestDz = nil, math.huge
+                        for _, fl in ipairs(cFloors) do
+                            local dz = math.abs(lz - fl.z)
+                            if dz < bestDz then bestDz = dz; bestFl = fl end
+                        end
+                        if bestFl then
+                            bestFl.machines[#bestFl.machines + 1] = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw }
+                        end
+                    end
+                end
+            end
+            if mIdx <= totalM then
+                ExecuteInGameThreadAfterFrames(1, pumpRebin)
+            else
+                if CachedFloorMap and CachedFloorMap.key == cacheKey then
+                    CachedFloorMap.machineVersion = MachineCacheVersion
+                end
+                if type(onComplete) == "function" then onComplete(cFloors) end
+            end
+        end
+        ExecuteInGameThreadAfterFrames(1, pumpRebin)
+        return cFloors, curIdx, CachedFloorMap.unitSize, CachedFloorMap.gridOriginX, CachedFloorMap.gridOriginY, cXform, true
+    end
+
+    -- Cold build: compute platforms & floors immediately (~5-10ms), stream machines & walls in background
+    local xform = StationData.GetStationFrameTransform(station)
+    local plats = StationData.GetStationPlatforms(station, walkFrame)
+    if #plats == 0 and Core.IsValidObj(walkFrame) then
+        plats = { walkFrame }
+    end
+    local allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
+    local elevStopLists = CollectElevatorStopLocalZs(station, allMachines, xform)
+    local bestElevStops = nil
+    for _, sl in ipairs(elevStopLists) do
+        if not bestElevStops or #sl > #bestElevStops then bestElevStops = sl end
+    end
+    local stationInverted = false
+    if bestElevStops and #bestElevStops >= 2 and bestElevStops[#bestElevStops] < bestElevStops[1] then
+        stationInverted = true
+        xform.ux, xform.uy, xform.uz = -xform.ux, -xform.uy, -xform.uz
+        xform.rx, xform.ry, xform.rz = -xform.rx, -xform.ry, -xform.rz
+        for _, sl in ipairs(elevStopLists) do
+            for k = 1, #sl do sl[k] = -sl[k] end
+        end
+    end
+
+    local zTolerance = 190.0
+    local floors = {}
+    local function ensureFloorForZ(lz)
+        if type(lz) ~= "number" then return nil end
+        for _, fl in ipairs(floors) do
+            if math.abs(lz - fl.z) <= zTolerance then return fl end
+        end
+        local nf = { index = #floors + 1, z = lz, platforms = {}, machines = {}, walls = {} }
+        floors[#floors + 1] = nf
+        return nf
+    end
+
+    local hasElevators = (#elevStopLists > 0)
+    if hasElevators then
+        for _, sl in ipairs(elevStopLists) do
+            for _, sz in ipairs(sl) do ensureFloorForZ(sz) end
+        end
+    end
+
+    local entries = {}
+    local minHalf = nil
+    for idx1, p in ipairs(plats) do
+        local b = StationData.GetPlatformWorldBounds(p, station, idx1)
+        local lcx, lcy, lcz, lyaw = StationData.WorldToStationLocal(xform, b.cx, b.cy, b.cz, b.fwdX, b.fwdY, b.fwdZ)
+        local lex, ley = b.ex, b.ey
+        if b.fwdX and b.fwdY then
+            local normRot = (math.floor((lyaw or 0) / 90.0 + 0.5) % 4 + 4) % 4
+            if normRot == 1 or normRot == 3 then lex, ley = b.ey, b.ex end
+        end
+        local localB = { cx = lcx, cy = lcy, cz = lcz, ex = lex, ey = ley, ez = b.ez, yaw = lyaw or 0.0, id = b.id, hasActor = b.hasActor }
+        entries[#entries + 1] = { platform = p, bounds = localB }
+        local smaller = math.min(lex, ley)
+        if not minHalf or smaller < minHalf then minHalf = smaller end
+        if #floors == 0 or (not hasElevators and b.hasActor) then
+            local fl = ensureFloorForZ(lcz)
+            if fl then fl.platforms[#fl.platforms + 1] = { platform = p, bounds = localB } end
+        elseif hasElevators and (b.hasActor or lex >= 150.0) then
+            local spanLo = lcz - math.max(350.0, localB.ez - 150.0)
+            local spanHi = lcz + math.max(350.0, localB.ez - 150.0)
+            local matchedAny = false
+            for _, fl in ipairs(floors) do
+                if fl.z >= spanLo and fl.z <= spanHi then
+                    fl.platforms[#fl.platforms + 1] = { platform = p, bounds = localB }
+                    matchedAny = true
+                end
+            end
+            if not matchedAny then
+                local bestFl, bestDz = nil, math.huge
+                for _, fl in ipairs(floors) do
+                    local dz = math.abs(lcz - fl.z)
+                    if dz < bestDz then bestDz = dz; bestFl = fl end
+                end
+                if bestFl and bestDz <= math.max(600.0, localB.ez + 200.0) then
+                    bestFl.platforms[#bestFl.platforms + 1] = { platform = p, bounds = localB }
+                end
+            end
+        end
+    end
+
+    if #floors == 0 then
+        floors[1] = { index = 1, z = 0.0, platforms = entries, machines = {}, walls = {} }
+    end
+    table.sort(floors, function(a, b) return a.z < b.z end)
+    for i, fl in ipairs(floors) do fl.index = i end
+
+    local fallbackPlat = entries[1] and entries[1].platform or walkFrame or station
+    for _, fl in ipairs(floors) do
+        if #fl.platforms == 0 then
+            fl.platforms[1] = {
+                platform = fallbackPlat,
+                bounds = { cx = 0.0, cy = 0.0, cz = fl.z, ex = 600.0, ey = 600.0, ez = 200.0, yaw = 0.0, synthetic = true },
+            }
+        end
+    end
+
+    local unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
+    local gridOriginX, gridOriginY = 0.0, 0.0
+    local firstB = floors[1] and floors[1].platforms[1] and floors[1].platforms[1].bounds
+    if firstB then
+        gridOriginX = firstB.cx - firstB.ex
+        gridOriginY = firstB.cy - firstB.ey
+    end
+
+    local currentFloorIndex = 1
+    if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" and #floors > 0 then
+        local _, _, playerLz = StationData.WorldToStationLocal(xform, playerX, playerY, playerZ, nil, nil, nil)
+        local bestDist = math.huge
+        for _, fl in ipairs(floors) do
+            local d = math.abs(playerLz - fl.z)
+            if d < bestDist then bestDist = d; currentFloorIndex = fl.index end
+        end
+    end
+
+    -- Background state machine: Phase 1 (machine binning) -> Phase 2 (wall collider extraction)
+    local mIdx = 1
+    local totalM = #allMachines
+    local machineIdSet = {}
+    local phase = "machines"
+    local wallState = nil
+
+    local function initWallExtraction()
+        if not Core.IsValidObj(station) or #floors == 0 then return nil end
+        local stWallKey = tostring(station:GetAddress())
+        local cachedWalls = CachedStationWallsByKey[stWallKey]
+        if cachedWalls and cachedWalls.time and (os.clock() - cachedWalls.time) < 300.0 then
+            for _, wb in ipairs(cachedWalls.walls) do
+                for _, fl in ipairs(floors) do
+                    if wb.minZ <= (fl.z + 200.0) and wb.maxZ >= (fl.z + 50.0) then
+                        fl.walls[#fl.walls + 1] = wb
+                    end
+                end
+            end
+            return nil
+        end
+
+        local env = nil
+        pcall(function()
+            if station.GetCollisionEnv then env = station:GetCollisionEnv() end
+            if not Core.IsValidObj(env) then env = station.CollisionEnv end
+        end)
+        if not Core.IsValidObj(env) or not env.Colliders then return nil end
+        local cols = env.Colliders
+        local num = cols.GetArrayNum and (tonumber(cols:GetArrayNum()) or 0) or 0
+        if num <= 0 then return nil end
+        local dataAddr = cols.GetArrayDataAddress and cols:GetArrayDataAddress() or nil
+        if type(dataAddr) ~= "number" or dataAddr == 0 then return nil end
+        if type(RegisterCustomProperty) ~= "function" or type(PropertyTypes) ~= "table" then return nil end
+
+        local COLLIDER_STRIDE = 28
+        local maxByteAddr = dataAddr + num * COLLIDER_STRIDE
+        local DISALLOWED = {
+            ["/Script/CoreUObject.Object"] = true,
+            ["/Script/Engine.Actor"] = true,
+            ["/Script/Engine.ActorComponent"] = true,
+        }
+        local function recordAnchor(obj)
+            if not Core.IsValidObj(obj) then return nil end
+            local addr = obj:GetAddress()
+            if type(addr) ~= "number" then return nil end
+            if CachedWallAnchors[addr] then return CachedWallAnchors[addr] end
+            local okC, cls = pcall(function() return obj:GetClass() end)
+            if not okC or not Core.IsValidObj(cls) then return nil end
+            local okF, full = pcall(function() return cls:GetFullName() end)
+            if not okF or type(full) ~= "string" then return nil end
+            local cp = full:match("^%S+ (.+)$") or full
+            if cp and not DISALLOWED[cp] then
+                CachedWallAnchors[addr] = { obj = obj, addr = addr, clsPath = cp }
+                return CachedWallAnchors[addr]
+            end
+            return nil
+        end
+        local function fitsRange(e)
+            if not e or not Core.IsValidObj(e.obj) then return false end
+            local dMin = dataAddr - e.addr
+            local dMax = maxByteAddr - e.addr
+            return dMin >= 0 and dMax >= 0 and dMax <= 0x7FFFFFFF
+        end
+        local anchor = nil
+        for _, cand in ipairs({ env, station }) do
+            local e = recordAnchor(cand)
+            if fitsRange(e) then anchor = e break end
+        end
+        if not anchor then
+            for _, e in pairs(CachedWallAnchors) do
+                if fitsRange(e) then anchor = e break end
+            end
+        end
+        if not anchor then
+            for _, searchCls in ipairs({
+                "GameInstance", "LocalPlayer", "GameViewportClient", "PlayerController",
+                "World", "Level", "DMSObject", "StationObject", "MachineObject", "UserWidget",
+            }) do
+                local okA, list = pcall(FindAllOf, searchCls)
+                if okA and list then
+                    for _, obj in ipairs(list) do
+                        if Core.IsValidObj(obj) then
+                            local a = obj:GetAddress()
+                            if type(a) == "number" and (dataAddr - a) >= 0 and (maxByteAddr - a) <= 0x7FFFFFFF then
+                                local e = recordAnchor(obj)
+                                if fitsRange(e) then anchor = e break end
+                            end
+                        end
+                    end
+                end
+                if anchor then break end
+            end
+        end
+        if not anchor then return nil end
+
+        local function readIntAt(absAddr)
+            local off = absAddr - anchor.addr
+            local key = anchor.clsPath .. ":" .. tostring(off)
+            local pName = CachedWallPropNames[key]
+            if not pName then
+                pName = string.format("EqolW_%X_%X", anchor.addr, off)
+                local okReg = pcall(RegisterCustomProperty, {
+                    Name = pName,
+                    Type = PropertyTypes.IntProperty,
+                    BelongsToClass = anchor.clsPath,
+                    OffsetInternal = off,
+                })
+                if not okReg then return nil end
+                CachedWallPropNames[key] = pName
+            end
+            local okV, v = pcall(function() return anchor.obj[pName] end)
+            return (okV and type(v) == "number") and v or nil
+        end
+
+        local refCid1 = nil
+        pcall(function() refCid1 = tonumber(cols[1].ColliderID) end)
+        local rawCid1 = readIntAt(dataAddr + 0x18)
+        if refCid1 ~= nil and rawCid1 ~= refCid1 then return nil end
+
+        return {
+            stWallKey = stWallKey,
+            cols = cols,
+            num = num,
+            idx = 1,
+            dataAddr = dataAddr,
+            stride = COLLIDER_STRIDE,
+            readIntAt = readIntAt,
+            rawBoxes = {},
+            maxAbs = 0.0,
+        }
+    end
+
+    local function finishAsyncBuild()
+        if cacheKey then
+            CachedFloorMap = {
+                key = cacheKey,
+                time = os.clock(),
+                machineVersion = MachineCacheVersion,
+                floors = floors,
+                unitSize = unitSize,
+                gridOriginX = gridOriginX,
+                gridOriginY = gridOriginY,
+                xform = xform,
+            }
+        end
+        if type(onComplete) == "function" then
+            onComplete(floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY, xform)
+        end
+    end
+
+    local function pumpAsyncBuild()
+        if myGen ~= AsyncFloorBuildGen then return end
+        local budgetEnd = os.clock() + frameBudget
+
+        if phase == "machines" then
+            local step = 0
+            while mIdx <= totalM and (step < 15 or os.clock() < budgetEnd) and step < 120 do
+                local m = allMachines[mIdx]
+                mIdx = mIdx + 1
+                step = step + 1
+                if Core.IsValidObj(m) then
+                    pcall(function()
+                        local mid = tonumber(m.ID)
+                        if mid and mid > 0 then machineIdSet[mid] = true end
+                    end)
+                    if not StationData.ShouldHideMachineOnMap(m) then
+                        local lx, ly, lz, lyaw = GetMachineLocalPosAndYaw(m, xform)
+                        local skipZero = math.abs(lx) < 0.5 and math.abs(ly) < 0.5 and math.abs(lz) < 0.5 and (not Core.IsValidObj(StationData.GetObjectActor(m)))
+                        if not skipZero then
+                            local bestFl, bestDz = nil, math.huge
+                            for _, fl in ipairs(floors) do
+                                local dz = math.abs(lz - fl.z)
+                                if dz < bestDz then bestDz = dz; bestFl = fl end
+                            end
+                            if bestFl then
+                                bestFl.machines[#bestFl.machines + 1] = { machine = m, x = lx, y = ly, z = lz, yaw = lyaw }
+                            end
+                        end
+                    end
+                end
+            end
+            if mIdx <= totalM then
+                ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+                return
+            end
+            phase = "walls_init"
+            ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+            return
+        end
+
+        if phase == "walls_init" then
+            wallState = initWallExtraction()
+            if not wallState then
+                finishAsyncBuild()
+                return
+            end
+            phase = "walls_scan"
+            ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+            return
+        end
+
+        if phase == "walls_scan" and wallState then
+            local ws = wallState
+            local step = 0
+            while ws.idx <= ws.num and (step < 10 or os.clock() < budgetEnd) and step < 80 do
+                local i = ws.idx
+                ws.idx = i + 1
+                step = step + 1
+                local c = ws.cols[i]
+                local cid = nil
+                if c then pcall(function() cid = tonumber(c.ColliderID) end) end
+                if not (cid and machineIdSet[cid]) then
+                    local elemAddr = ws.dataAddr + (i - 1) * ws.stride
+                    local z1 = ws.readIntAt(elemAddr + 0x08)
+                    local z2 = ws.readIntAt(elemAddr + 0x14)
+                    if z1 and z2 and z2 > z1 then
+                        local x1 = ws.readIntAt(elemAddr + 0x00)
+                        local y1 = ws.readIntAt(elemAddr + 0x04)
+                        local x2 = ws.readIntAt(elemAddr + 0x0C)
+                        local y2 = ws.readIntAt(elemAddr + 0x10)
+                        if x1 and y1 and x2 and y2 and x1 < 999000000 and x2 > -999000000 and x2 > x1 and y2 > y1 then
+                            local aMax = math.max(math.abs(x1), math.abs(x2), math.abs(y1), math.abs(y2))
+                            if aMax > ws.maxAbs then ws.maxAbs = aMax end
+                            ws.rawBoxes[#ws.rawBoxes + 1] = { x1 = x1, y1 = y1, z1 = z1, x2 = x2, y2 = y2, z2 = z2 }
+                        end
+                    end
+                end
+            end
+            if ws.idx <= ws.num then
+                ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+                return
+            end
+
+            local scale = 1.0
+            if ws.maxAbs > 1000000.0 then
+                scale = 1.0 / 65536.0
+                if (ws.maxAbs * scale) < 260.0 then scale = scale * 100.0 end
+            elseif ws.maxAbs > 100000.0 then
+                scale = 0.1
+            elseif ws.maxAbs > 0.0 and ws.maxAbs < 260.0 then
+                scale = 50.0
+            end
+
+            local extractedWalls = {}
+            for _, rb in ipairs(ws.rawBoxes) do
+                local minX, maxX = rb.x1 * scale, rb.x2 * scale
+                local minY, maxY = rb.y1 * scale, rb.y2 * scale
+                local minZ, maxZ = rb.z1 * scale, rb.z2 * scale
+                if stationInverted then
+                    minY, maxY = -maxY, -minY
+                    minZ, maxZ = -maxZ, -minZ
+                end
+                local dx, dy, dz = maxX - minX, maxY - minY, maxZ - minZ
+                if dz >= 70.0 and math.max(dx, dy) >= 20.0 and not (dx >= 1200.0 and dy >= 1200.0) then
+                    extractedWalls[#extractedWalls + 1] = {
+                        minX = minX, maxX = maxX, minY = minY, maxY = maxY, minZ = minZ, maxZ = maxZ,
+                        cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, ex = dx * 0.5, ey = dy * 0.5,
+                    }
+                end
+            end
+            MergeWallList(extractedWalls)
+            CachedStationWallsByKey[ws.stWallKey] = {
+                total = ws.num, scale = scale, status = "ok", walls = extractedWalls, time = os.clock(),
+            }
+            for _, wb in ipairs(extractedWalls) do
+                for _, fl in ipairs(floors) do
+                    if wb.minZ <= (fl.z + 200.0) and wb.maxZ >= (fl.z + 50.0) then
+                        fl.walls[#fl.walls + 1] = wb
+                    end
+                end
+            end
+            finishAsyncBuild()
+        end
+    end
+
+    ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+    return floors, currentFloorIndex, unitSize, gridOriginX, gridOriginY, xform, true
 end
 
 --------------------------------------------------------------------------------
@@ -3131,6 +3665,7 @@ end
 
 function StationData.InvalidateCaches()
     MachineCacheVersion = MachineCacheVersion + 1
+    AsyncFloorBuildGen = AsyncFloorBuildGen + 1
     CachedPlatforms = { key = nil, time = -999, list = {} }
     CachedMachinesByFrame = {}
     CachedStationMachines = { key = nil, time = 0, list = {} }
