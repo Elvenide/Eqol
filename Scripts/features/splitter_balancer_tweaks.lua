@@ -50,6 +50,14 @@ for _, clsName in ipairs(WALKTHROUGH_SIM_CLASSES) do
     WALKTHROUGH_SIM_SET[clsName] = true
 end
 
+local UNDERGROUND_SIM_SET = {
+    BP_UndergroundBeltObject_C = true,
+    BP_UndergroundBeltObject_2_C = true,
+    BP_UndergroundBeltObject_3_C = true,
+}
+
+local ApplyDirectToMachineActors = nil
+
 local OrigMeshState            = {} -- compAddr -> { ... }
 local ProcessedHeightActors    = {} -- actorAddr -> true
 local ProcessedCollisionActors = {} -- actorAddr -> true
@@ -809,13 +817,7 @@ local function ScheduleStaggeredScan(delayMs)
     end)
 end
 
-local UNDERGROUND_SIM_SET = {
-    BP_UndergroundBeltObject_C = true,
-    BP_UndergroundBeltObject_2_C = true,
-    BP_UndergroundBeltObject_3_C = true,
-}
-
-local function ApplyDirectToMachineActors(obj, isWalk)
+ApplyDirectToMachineActors = function(obj, isWalk)
     if not Core.IsValidObj(obj) then return false end
     local foundActor = false
     local simSeen = {}

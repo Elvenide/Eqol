@@ -160,6 +160,18 @@ local function ResetState()
     CachedStationCheck = { time = -999, inStation = false }
 end
 
+local function GetStationMachineCount(pc)
+    if not Core.IsValidObj(pc) then return -1 end
+    local _, _, station = StationData.IsPlayerInStation(pc)
+    if not Core.IsValidObj(station) then return -1 end
+    local okN, n = pcall(function()
+        local arr = station.Machines
+        if not arr then return -1 end
+        return (arr.GetArrayNum and arr:GetArrayNum()) or #arr
+    end)
+    return (okN and type(n) == "number") and n or -1
+end
+
 function Feature.RegisterHooks()
     local function onEnterBuild(Context)
         if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
@@ -188,22 +200,23 @@ function Feature.RegisterHooks()
             if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
             local pc = Context and Context:get() or nil
             if not IsLocalPC(pc) then return end
-            local clickClock = os.clock()
-            LastLocalConfirmClock = clickClock
+            local prevMachCount = GetStationMachineCount(pc)
             ExecuteInGameThreadWithDelay(80, function()
                 if not Core.IsFeatureEnabled("ConveyorScrollRotate") then return end
                 local curPC = Core.GetLocalPlayerController()
                 if not Core.IsValidObj(curPC) then return end
+                local newMachCount = GetStationMachineCount(curPC)
+                -- O(1) machine count delta: if real belt(s) spawned, the pulled run committed -> non-pulling mode;
+                -- otherwise (0 new belts spawned while holding ConveyorBuilder), pulling mode just began!
+                if prevMachCount >= 0 and newMachCount > prevMachCount then
+                    ConveyorPullingActive = false
+                    StartScrollRotatePoll()
+                    return
+                end
                 local builder = GetActiveStationBuilder(curPC)
                 if IsConveyorBuilder(builder) then
-                    local bAddr = builder:GetAddress()
-                    if LastConveyorBuilderAddr == bAddr and ConveyorPullingActive then
-                        -- Second confirm commits the pulled belt run -> back to non-pulling mode
-                        ConveyorPullingActive = false
-                    else
-                        LastConveyorBuilderAddr = bAddr
-                        ConveyorPullingActive = true
-                    end
+                    LastConveyorBuilderAddr = builder:GetAddress()
+                    ConveyorPullingActive = true
                     StartScrollRotatePoll()
                 else
                     ConveyorPullingActive = false
