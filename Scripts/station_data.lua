@@ -1740,30 +1740,27 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
         return cFloors, curIdx, CachedFloorMap.unitSize, CachedFloorMap.gridOriginX, CachedFloorMap.gridOriginY, cXform, true
     end
 
-    -- Cold build: compute platforms & floors immediately (~5-10ms), stream machines & walls in background
-    local xform = StationData.GetStationFrameTransform(station)
-    local plats = StationData.GetStationPlatforms(station, walkFrame)
-    if #plats == 0 and Core.IsValidObj(walkFrame) then
-        plats = { walkFrame }
-    end
-    local allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
-    local elevStopLists = CollectElevatorStopLocalZs(station, allMachines, xform)
-    local bestElevStops = nil
-    for _, sl in ipairs(elevStopLists) do
-        if not bestElevStops or #sl > #bestElevStops then bestElevStops = sl end
-    end
-    local stationInverted = false
-    if bestElevStops and #bestElevStops >= 2 and bestElevStops[#bestElevStops] < bestElevStops[1] then
-        stationInverted = true
-        xform.ux, xform.uy, xform.uz = -xform.ux, -xform.uy, -xform.uz
-        xform.rx, xform.ry, xform.rz = -xform.rx, -xform.ry, -xform.rz
-        for _, sl in ipairs(elevStopLists) do
-            for k = 1, #sl do sl[k] = -sl[k] end
-        end
-    end
+    -- Cold build:
+    -- When called for quiet background prewarm (frameBudget <= 0.0020), run even platform/elevator
+    -- discovery inside the time-sliced state machine so there is ZERO synchronous post-load hitch!
+    local isQuietBg = (frameBudget <= 0.0020)
+    local frameStride = isQuietBg and 2 or 1
+    local minMachStep = isQuietBg and 1 or 15
+    local minWallStep = isQuietBg and 1 or 10
 
+    local xform = nil
+    local plats = {}
+    local allMachines = {}
+    local elevStopLists = {}
+    local stationInverted = false
     local zTolerance = 190.0
     local floors = {}
+    local entries = {}
+    local minHalf = nil
+    local unitSize = 1200.0
+    local gridOriginX, gridOriginY = 0.0, 0.0
+    local currentFloorIndex = 1
+
     local function ensureFloorForZ(lz)
         if type(lz) ~= "number" then return nil end
         for _, fl in ipairs(floors) do
@@ -1774,16 +1771,7 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
         return nf
     end
 
-    local hasElevators = (#elevStopLists > 0)
-    if hasElevators then
-        for _, sl in ipairs(elevStopLists) do
-            for _, sz in ipairs(sl) do ensureFloorForZ(sz) end
-        end
-    end
-
-    local entries = {}
-    local minHalf = nil
-    for idx1, p in ipairs(plats) do
+    local function processSinglePlatform(idx1, p, hasElevators)
         local b = StationData.GetPlatformWorldBounds(p, station, idx1)
         local lcx, lcy, lcz, lyaw = StationData.WorldToStationLocal(xform, b.cx, b.cy, b.cz, b.fwdX, b.fwdY, b.fwdZ)
         local lex, ley = b.ex, b.ey
@@ -1821,46 +1809,85 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
         end
     end
 
-    if #floors == 0 then
-        floors[1] = { index = 1, z = 0.0, platforms = entries, machines = {}, walls = {} }
-    end
-    table.sort(floors, function(a, b) return a.z < b.z end)
-    for i, fl in ipairs(floors) do fl.index = i end
-
-    local fallbackPlat = entries[1] and entries[1].platform or walkFrame or station
-    for _, fl in ipairs(floors) do
-        if #fl.platforms == 0 then
-            fl.platforms[1] = {
-                platform = fallbackPlat,
-                bounds = { cx = 0.0, cy = 0.0, cz = fl.z, ex = 600.0, ey = 600.0, ez = 200.0, yaw = 0.0, synthetic = true },
-            }
+    local function finalizeFloorsAndOrigin()
+        if #floors == 0 then
+            floors[1] = { index = 1, z = 0.0, platforms = entries, machines = {}, walls = {} }
         end
-    end
+        table.sort(floors, function(a, b) return a.z < b.z end)
+        for i, fl in ipairs(floors) do fl.index = i end
 
-    local unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
-    local gridOriginX, gridOriginY = 0.0, 0.0
-    local firstB = floors[1] and floors[1].platforms[1] and floors[1].platforms[1].bounds
-    if firstB then
-        gridOriginX = firstB.cx - firstB.ex
-        gridOriginY = firstB.cy - firstB.ey
-    end
-
-    local currentFloorIndex = 1
-    if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" and #floors > 0 then
-        local _, _, playerLz = StationData.WorldToStationLocal(xform, playerX, playerY, playerZ, nil, nil, nil)
-        local bestDist = math.huge
+        local fallbackPlat = entries[1] and entries[1].platform or walkFrame or station
         for _, fl in ipairs(floors) do
-            local d = math.abs(playerLz - fl.z)
-            if d < bestDist then bestDist = d; currentFloorIndex = fl.index end
+            if #fl.platforms == 0 then
+                fl.platforms[1] = {
+                    platform = fallbackPlat,
+                    bounds = { cx = 0.0, cy = 0.0, cz = fl.z, ex = 600.0, ey = 600.0, ez = 200.0, yaw = 0.0, synthetic = true },
+                }
+            end
+        end
+
+        unitSize = (minHalf and minHalf > 100) and (minHalf * 2.0) or 1200.0
+        gridOriginX, gridOriginY = 0.0, 0.0
+        local firstB = floors[1] and floors[1].platforms[1] and floors[1].platforms[1].bounds
+        if firstB then
+            gridOriginX = firstB.cx - firstB.ex
+            gridOriginY = firstB.cy - firstB.ey
+        end
+
+        currentFloorIndex = 1
+        if type(playerX) == "number" and type(playerY) == "number" and type(playerZ) == "number" and #floors > 0 then
+            local _, _, playerLz = StationData.WorldToStationLocal(xform, playerX, playerY, playerZ, nil, nil, nil)
+            local bestDist = math.huge
+            for _, fl in ipairs(floors) do
+                local d = math.abs(playerLz - fl.z)
+                if d < bestDist then bestDist = d; currentFloorIndex = fl.index end
+            end
         end
     end
 
-    -- Background state machine: Phase 1 (machine binning) -> Phase 2 (wall collider extraction)
     local mIdx = 1
-    local totalM = #allMachines
+    local totalM = 0
     local machineIdSet = {}
-    local phase = "machines"
+    local phase = isQuietBg and "bg_plats" or "machines"
     local wallState = nil
+    local bgElevIdx = 1
+    local bgElevCls = nil
+    local bgSeenElev = {}
+    local bgPlatIdx = 1
+    local bgHasElevators = false
+
+    if not isQuietBg then
+        xform = StationData.GetStationFrameTransform(station)
+        plats = StationData.GetStationPlatforms(station, walkFrame)
+        if #plats == 0 and Core.IsValidObj(walkFrame) then
+            plats = { walkFrame }
+        end
+        allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
+        totalM = #allMachines
+        elevStopLists = CollectElevatorStopLocalZs(station, allMachines, xform)
+        local bestElevStops = nil
+        for _, sl in ipairs(elevStopLists) do
+            if not bestElevStops or #sl > #bestElevStops then bestElevStops = sl end
+        end
+        if bestElevStops and #bestElevStops >= 2 and bestElevStops[#bestElevStops] < bestElevStops[1] then
+            stationInverted = true
+            xform.ux, xform.uy, xform.uz = -xform.ux, -xform.uy, -xform.uz
+            xform.rx, xform.ry, xform.rz = -xform.rx, -xform.ry, -xform.rz
+            for _, sl in ipairs(elevStopLists) do
+                for k = 1, #sl do sl[k] = -sl[k] end
+            end
+        end
+        local hasElevators = (#elevStopLists > 0)
+        if hasElevators then
+            for _, sl in ipairs(elevStopLists) do
+                for _, sz in ipairs(sl) do ensureFloorForZ(sz) end
+            end
+        end
+        for idx1, p in ipairs(plats) do
+            processSinglePlatform(idx1, p, hasElevators)
+        end
+        finalizeFloorsAndOrigin()
+    end
 
     local function initWallExtraction()
         if not Core.IsValidObj(station) or #floors == 0 then return nil end
@@ -2006,14 +2033,133 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
         end
     end
 
-    local isQuietBg = (frameBudget <= 0.0020)
-    local frameStride = isQuietBg and 2 or 1
-    local minMachStep = isQuietBg and 1 or 15
-    local minWallStep = isQuietBg and 1 or 10
-
     local function pumpAsyncBuild()
         if myGen ~= AsyncFloorBuildGen then return end
         local budgetEnd = os.clock() + frameBudget
+
+        if phase == "bg_plats" then
+            if not Core.IsValidObj(station) then return end
+            xform = StationData.GetStationFrameTransform(station)
+            plats = StationData.GetStationPlatforms(station, walkFrame)
+            if #plats == 0 and Core.IsValidObj(walkFrame) then
+                plats = { walkFrame }
+            end
+            phase = "bg_machines_list"
+            ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
+            return
+        end
+
+        if phase == "bg_machines_list" then
+            if not Core.IsValidObj(station) then return end
+            allMachines = StationData.GetAllStationMachines(station, plats, walkFrame)
+            totalM = #allMachines
+            bgElevCls = GetClassCached("ElevatorObject", "/Script/MainSequence.ElevatorObject")
+            if Core.IsValidObj(station) then
+                pcall(function()
+                    if station.Elevators then
+                        StationData.ForEachArray(station.Elevators, function(_, elem)
+                            local el = Core.UnwrapArrayElem(elem)
+                            if Core.IsValidObj(el) then
+                                local addr = el:GetAddress()
+                                if not bgSeenElev[addr] then
+                                    bgSeenElev[addr] = true
+                                    local stack = el.ElevatorStack
+                                    if stack then
+                                        local list = {}
+                                        StationData.ForEachArray(stack, function(_, se)
+                                            local stopObj = Core.UnwrapArrayElem(se)
+                                            if Core.IsValidObj(stopObj) and stopObj.bIsElevatorStop == true then
+                                                local _, _, lz = GetMachineLocalPosAndYaw(stopObj, xform)
+                                                list[#list + 1] = lz
+                                            end
+                                        end)
+                                        if #list >= 2 then elevStopLists[#elevStopLists + 1] = list end
+                                    end
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
+            bgElevIdx = 1
+            phase = "bg_elevators"
+            ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
+            return
+        end
+
+        if phase == "bg_elevators" then
+            local step = 0
+            while bgElevIdx <= totalM and Core.IsValidObj(bgElevCls) and (step < 1 or os.clock() < budgetEnd) and step < 120 do
+                local m = allMachines[bgElevIdx]
+                bgElevIdx = bgElevIdx + 1
+                step = step + 1
+                if Core.IsValidObj(m) and m:IsA(bgElevCls) then
+                    local addr = m:GetAddress()
+                    if not bgSeenElev[addr] then
+                        bgSeenElev[addr] = true
+                        pcall(function()
+                            local stack = m.ElevatorStack
+                            if stack then
+                                local list = {}
+                                StationData.ForEachArray(stack, function(_, se)
+                                    local stopObj = Core.UnwrapArrayElem(se)
+                                    if Core.IsValidObj(stopObj) and stopObj.bIsElevatorStop == true then
+                                        local _, _, lz = GetMachineLocalPosAndYaw(stopObj, xform)
+                                        list[#list + 1] = lz
+                                    end
+                                end)
+                                if #list >= 2 then elevStopLists[#elevStopLists + 1] = list end
+                            end
+                        end)
+                    end
+                end
+            end
+            if bgElevIdx <= totalM and Core.IsValidObj(bgElevCls) then
+                ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
+                return
+            end
+            local bestElevStops = nil
+            for _, sl in ipairs(elevStopLists) do
+                if not bestElevStops or #sl > #bestElevStops then bestElevStops = sl end
+            end
+            if bestElevStops and #bestElevStops >= 2 and bestElevStops[#bestElevStops] < bestElevStops[1] then
+                stationInverted = true
+                xform.ux, xform.uy, xform.uz = -xform.ux, -xform.uy, -xform.uz
+                xform.rx, xform.ry, xform.rz = -xform.rx, -xform.ry, -xform.rz
+                for _, sl in ipairs(elevStopLists) do
+                    for k = 1, #sl do sl[k] = -sl[k] end
+                end
+            end
+            bgHasElevators = (#elevStopLists > 0)
+            if bgHasElevators then
+                for _, sl in ipairs(elevStopLists) do
+                    for _, sz in ipairs(sl) do ensureFloorForZ(sz) end
+                end
+            end
+            bgPlatIdx = 1
+            phase = "bg_plat_bounds"
+            ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
+            return
+        end
+
+        if phase == "bg_plat_bounds" then
+            local step = 0
+            local totalP = #plats
+            while bgPlatIdx <= totalP and (step < 1 or os.clock() < budgetEnd) and step < 8 do
+                local p = plats[bgPlatIdx]
+                processSinglePlatform(bgPlatIdx, p, bgHasElevators)
+                bgPlatIdx = bgPlatIdx + 1
+                step = step + 1
+            end
+            if bgPlatIdx <= totalP then
+                ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
+                return
+            end
+            finalizeFloorsAndOrigin()
+            phase = "machines"
+            ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
+            return
+        end
 
         if phase == "machines" then
             local step = 0

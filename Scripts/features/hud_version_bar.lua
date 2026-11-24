@@ -74,53 +74,101 @@ local function TryExtractVersionFromTextObj(tb)
     return nil, nil, nil
 end
 
--- Verified direct widget path in Main Sequence:
--- WBP_CharacterHUD_C / WBP_MainMenu_C -> WBP_Version -> WBP_Text -> TextBlock (ZERO FindAllOf("TextBlock")!)
-local function FindVersionTextBlockInWidget(hostWidget)
-    if not Core.IsValidObj(hostWidget) then return nil, nil, nil end
-    local tb = nil
-    pcall(function()
-        local verW = hostWidget.WBP_Version
-        if Core.IsValidObj(verW) then
-            local txtW = verW.WBP_Text
-            if Core.IsValidObj(txtW) and Core.IsValidObj(txtW.TextBlock) then
-                tb = txtW.TextBlock
-            elseif Core.IsValidObj(verW.TextBlock) then
-                tb = verW.TextBlock
+-- Walk a UUserWidget/UPanelWidget subtree via native UMG GetRootWidget + GetChildrenCount/GetChildAt
+-- (works in Shipping builds where WidgetTree is stripped and when "Is Variable" is unchecked).
+local function FindVersionTextInWidgetTree(rootWidget, maxDepth)
+    if not Core.IsValidObj(rootWidget) then return nil, nil, nil end
+    local limit = maxDepth or 8
+    local visited = {}
+    local queue = { { w = rootWidget, d = 0 } }
+    local head = 1
+    local maxNodes = 160
+
+    while head <= #queue and head <= maxNodes do
+        local item = queue[head]
+        head = head + 1
+        local w = item.w
+        local d = item.d
+        if Core.IsValidObj(w) then
+            local addr = w:GetAddress()
+            if not visited[addr] then
+                visited[addr] = true
+                -- Check if this node itself is a TextBlock with the MS version string
+                if w.GetText and w.SetText then
+                    local tb, ver, rawTxt = TryExtractVersionFromTextObj(w)
+                    if Core.IsValidObj(tb) then
+                        return tb, ver, rawTxt
+                    end
+                end
+                if d < limit then
+                    -- UserWidget -> GetRootWidget()
+                    if w.GetRootWidget then
+                        local okR, rw = pcall(function() return w:GetRootWidget() end)
+                        if okR and Core.IsValidObj(rw) then
+                            queue[#queue + 1] = { w = rw, d = d + 1 }
+                        end
+                    end
+                    -- PanelWidget / ContentWidget -> GetChildrenCount() + GetChildAt(i)
+                    if w.GetChildrenCount and w.GetChildAt then
+                        local okN, n = pcall(function() return tonumber(w:GetChildrenCount()) or 0 end)
+                        if okN and n > 0 then
+                            local cap = math.min(n, 32)
+                            for i = 0, cap - 1 do
+                                local okC, child = pcall(function() return w:GetChildAt(i) end)
+                                if okC and Core.IsValidObj(child) then
+                                    queue[#queue + 1] = { w = child, d = d + 1 }
+                                end
+                            end
+                        end
+                    end
+                end
             end
         end
-    end)
-    if Core.IsValidObj(tb) then
-        return TryExtractVersionFromTextObj(tb)
     end
     return nil, nil, nil
 end
 
+local function FindVersionTextBlockInVersionWidget(verW)
+    if not Core.IsValidObj(verW) then return nil, nil, nil end
+    local tb = nil
+    pcall(function()
+        local txtW = verW.WBP_Text
+        if Core.IsValidObj(txtW) and Core.IsValidObj(txtW.TextBlock) then
+            tb = txtW.TextBlock
+        elseif Core.IsValidObj(verW.TextBlock) then
+            tb = verW.TextBlock
+        end
+    end)
+    if Core.IsValidObj(tb) then
+        local foundTb, ver, rawTxt = TryExtractVersionFromTextObj(tb)
+        if Core.IsValidObj(foundTb) then return foundTb, ver, rawTxt end
+    end
+    return FindVersionTextInWidgetTree(verW, 6)
+end
+
+-- Verified widget hierarchy in Main Sequence:
+-- WBP_CharacterHUD_C / WBP_MainMenu_C -> WBP_Version (WBP_Version_C) -> WBP_Text -> TextBlock
+-- Uses FindAllOf("WBP_Version_C") (only 1-2 instances exist in the entire game) + native UMG tree walk.
 local function FindVersionTextBlock(hintWidget)
+    local okAll, verList = pcall(FindAllOf, "WBP_Version_C")
+    if okAll and verList then
+        for i = #verList, 1, -1 do
+            local vw = verList[i]
+            if Core.IsValidObj(vw) then
+                local tb, ver, rawTxt = FindVersionTextBlockInVersionWidget(vw)
+                if Core.IsValidObj(tb) then return tb, ver, rawTxt end
+            end
+        end
+    end
     if Core.IsValidObj(hintWidget) then
-        local tb, ver, rawTxt = FindVersionTextBlockInWidget(hintWidget)
+        local tb, ver, rawTxt = FindVersionTextInWidgetTree(hintWidget, 8)
         if Core.IsValidObj(tb) then return tb, ver, rawTxt end
     end
     for _, clsName in ipairs({ "WBP_CharacterHUD_C", "WBP_MainMenu_C" }) do
         local okF, host = pcall(FindFirstOf, clsName)
         if okF and Core.IsValidObj(host) then
-            local tb, ver, rawTxt = FindVersionTextBlockInWidget(host)
+            local tb, ver, rawTxt = FindVersionTextInWidgetTree(host, 8)
             if Core.IsValidObj(tb) then return tb, ver, rawTxt end
-        end
-    end
-    -- Direct singleton fallback on WBP_Version_C itself (never scans FindAllOf("TextBlock")!)
-    local okV, verWidget = pcall(FindFirstOf, "WBP_Version_C")
-    if okV and Core.IsValidObj(verWidget) then
-        local tb = nil
-        pcall(function()
-            if Core.IsValidObj(verWidget.WBP_Text) and Core.IsValidObj(verWidget.WBP_Text.TextBlock) then
-                tb = verWidget.WBP_Text.TextBlock
-            elseif Core.IsValidObj(verWidget.TextBlock) then
-                tb = verWidget.TextBlock
-            end
-        end)
-        if Core.IsValidObj(tb) then
-            return TryExtractVersionFromTextObj(tb)
         end
     end
     return nil, nil, nil
@@ -205,27 +253,20 @@ local function StartLoop()
 end
 
 -- Trigger a prompt one-shot scan when major HUD/menu widgets construct
+local function ScheduleHintScan(w)
+    if not Core.IsFeatureEnabled("HudVersionBar") then return end
+    for _, delayMs in ipairs({ 200, 1000 }) do
+        ExecuteInGameThreadWithDelay(delayMs, function()
+            if Core.IsFeatureEnabled("HudVersionBar") and not Core.IsValidObj(TargetTextBlock) then
+                TryHookVersionTextBlock(w)
+            end
+        end)
+    end
+end
+
 Feature.WatchWidgets = {
-    WBP_CharacterHUD_C = function(w)
-        if not Core.IsFeatureEnabled("HudVersionBar") then return end
-        if not Core.IsValidObj(TargetTextBlock) then
-            ExecuteInGameThreadWithDelay(200, function()
-                if Core.IsFeatureEnabled("HudVersionBar") then
-                    TryHookVersionTextBlock(w)
-                end
-            end)
-        end
-    end,
-    WBP_MainMenu_C = function(w)
-        if not Core.IsFeatureEnabled("HudVersionBar") then return end
-        if not Core.IsValidObj(TargetTextBlock) then
-            ExecuteInGameThreadWithDelay(200, function()
-                if Core.IsFeatureEnabled("HudVersionBar") then
-                    TryHookVersionTextBlock(w)
-                end
-            end)
-        end
-    end,
+    WBP_CharacterHUD_C = ScheduleHintScan,
+    WBP_MainMenu_C     = ScheduleHintScan,
 }
 
 function Feature.OnToggle(enabled)

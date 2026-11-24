@@ -704,6 +704,40 @@ local function ResetWorldCaches()
     LoggedMultiplayerDisable = false
 end
 
+local RegisteredActorClassHooks = {} -- clsPath -> true
+
+local function RegisterDynamicActorHook(actor, isWalk)
+    if not Core.IsValidObj(actor) then return end
+    local clsPath = GetObjectClassPath(actor)
+    if not clsPath or RegisteredActorClassHooks[clsPath] then return end
+    RegisteredActorClassHooks[clsPath] = true
+    pcall(NotifyOnNewObject, clsPath, function(newActor)
+        if not Core.IsValidObj(newActor) then return end
+        local allowWalk = isWalk and Core.IsFeatureEnabled(FEAT_WALK) and (not IsMultiplayerSession())
+        local wantHeight = Core.IsFeatureEnabled(FEAT_HEIGHT)
+        if not allowWalk and not wantHeight then return end
+        local myGen = ScanGeneration
+        ExecuteInGameThreadWithDelay(100, function()
+            if myGen ~= ScanGeneration or not Core.IsValidObj(newActor) then return end
+            if allowWalk then
+                EnsureActorPawnIgnoreAndSimDisable(newActor, {}, {})
+                pcall(CleanTrackedEnvs)
+            end
+            if wantHeight then
+                EnsureTargetHeight(newActor)
+            end
+        end)
+    end)
+end
+
+-- Exact 3 verified visual actor classes in Main Sequence (never scans 13+ guessed class names
+-- or triggers FindAllOf("MachineObject") across distant empty stations).
+local VERIFIED_ACTOR_SCAN_CLASSES = {
+    { cls = "BP_Splitter_C",             isWalk = true  },
+    { cls = "BP_BeltBalancer_01_C",      isWalk = true  },
+    { cls = "BP_UndergroundBeltActor_C", isWalk = false },
+}
+
 local function RunStaggeredScan()
     if StaggeredScanActive then
         StaggeredScanPending = true
@@ -727,79 +761,75 @@ local function RunStaggeredScan()
         end
     end
 
-    -- Collect splitter/balancer/underground machines directly from DMSWorld.Stations instead of
-    -- running 16 separate FindAllOf scans across the entire GUObjectArray!
-    local targets = {}
-    local pc = Core.GetLocalPlayerController()
-    local worldSub = Core.IsValidObj(pc) and Core.GetWorldSubsystem(pc, Core.PATHS.WorldSubsystemClass) or nil
-    if Core.IsValidObj(worldSub) then
-        local okW, dmsWorld = pcall(function() return worldSub:GetDMSWorld() end)
-        if okW and Core.IsValidObj(dmsWorld) and dmsWorld.Stations then
-            StationData.ForEachArray(dmsWorld.Stations, function(_, stElem)
-                local st = Core.UnwrapArrayElem(stElem)
-                if Core.IsValidObj(st) then
-                    local machines = StationData.GetAllStationMachines(st, nil, nil)
-                    for i = 1, #machines do
-                        local m = machines[i]
-                        if Core.IsValidObj(m) then
-                            local clsName = SafeClassName(m)
-                            local low = clsName:lower()
-                            local isWalk = WALKTHROUGH_SIM_SET[clsName]
-                                or low:find("splitter", 1, true) ~= nil
-                                or low:find("beltbalancer", 1, true) ~= nil
-                            local isUg = UNDERGROUND_SIM_SET[clsName]
-                                or low:find("undergroundbelt", 1, true) ~= nil
-                            if isWalk or isUg then
-                                targets[#targets + 1] = { obj = m, isWalk = isWalk, isUg = isUg }
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-    end
-
+    local simSeen = {}
     local disabledCounts = {}
-    local idx = 1
-    local total = #targets
+    local clsIdx = 1
+    local curActors = nil
+    local actorIdx = 1
+    local totalActorsSeen = 0
 
     local function Step()
         if myGen ~= ScanGeneration then
             StaggeredScanActive = false
             return
         end
-        local budgetEnd = os.clock() + 0.0025
-        local ops = 0
-        while idx <= total and (ops < 8 or os.clock() < budgetEnd) and ops < 40 do
-            local entry = targets[idx]
-            idx = idx + 1
-            ops = ops + 1
-            local obj = entry.obj
-            if Core.IsValidObj(obj) then
-                local wantWalk = allowWalkthrough and entry.isWalk
-                if wantWalk then
-                    DisableSimCollider(obj, disabledCounts)
+
+        -- Fetch one verified actor class per tick (only 3 classes total, <0.5ms each)
+        if not curActors then
+            if clsIdx > #VERIFIED_ACTOR_SCAN_CLASSES then
+                if allowWalkthrough then
+                    pcall(CleanTrackedEnvs)
                 end
-                if wantWalk or doHeight then
-                    ApplyDirectToMachineActors(obj, wantWalk)
+                StaggeredScanActive = false
+                if StaggeredScanPending and myGen == ScanGeneration then
+                    StaggeredScanPending = false
+                    ExecuteInGameThreadWithDelay(300, RunStaggeredScan)
+                end
+                return
+            end
+            local spec = VERIFIED_ACTOR_SCAN_CLASSES[clsIdx]
+            local okF, list = pcall(FindAllOf, spec.cls)
+            if okF and list and #list > 0 then
+                curActors = list
+                actorIdx = 1
+                totalActorsSeen = totalActorsSeen + #list
+            else
+                clsIdx = clsIdx + 1
+            end
+            ExecuteInGameThreadAfterFrames(2, Step)
+            return
+        end
+
+        local spec = VERIFIED_ACTOR_SCAN_CLASSES[clsIdx]
+        local budgetEnd = os.clock() + 0.0018
+        local ops = 0
+        local total = #curActors
+        while actorIdx <= total and (ops < 4 or os.clock() < budgetEnd) and ops < 24 do
+            local actor = curActors[actorIdx]
+            actorIdx = actorIdx + 1
+            ops = ops + 1
+            if Core.IsValidObj(actor) then
+                RegisterDynamicActorHook(actor, spec.isWalk)
+                local wantWalk = allowWalkthrough and spec.isWalk
+                if wantWalk then
+                    EnsureActorPawnIgnoreAndSimDisable(actor, simSeen, disabledCounts)
+                end
+                if doHeight then
+                    EnsureTargetHeight(actor)
                 end
             end
         end
-        if idx <= total then
-            ExecuteInGameThreadAfterFrames(1, Step)
+
+        if actorIdx <= total then
+            ExecuteInGameThreadAfterFrames(2, Step)
         else
-            if allowWalkthrough then
-                pcall(CleanTrackedEnvs)
-            end
-            StaggeredScanActive = false
-            if StaggeredScanPending and myGen == ScanGeneration then
-                StaggeredScanPending = false
-                ExecuteInGameThreadWithDelay(300, RunStaggeredScan)
-            end
+            curActors = nil
+            clsIdx = clsIdx + 1
+            ExecuteInGameThreadAfterFrames(2, Step)
         end
     end
 
-    ExecuteInGameThreadAfterFrames(1, Step)
+    ExecuteInGameThreadAfterFrames(2, Step)
 end
 
 local function ScheduleStaggeredScan(delayMs)
