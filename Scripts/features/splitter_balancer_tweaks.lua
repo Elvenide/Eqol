@@ -835,7 +835,11 @@ ApplyDirectToMachineActors = function(obj, isWalk)
     end
 
     pcall(function()
-        if Core.IsValidObj(obj.Actor) then
+        local resolved = StationData.GetObjectActor and StationData.GetObjectActor(obj) or nil
+        if Core.IsValidObj(resolved) then
+            handleActor(resolved)
+        end
+        if Core.IsValidObj(obj.Actor) and (not Core.IsValidObj(resolved) or obj.Actor:GetAddress() ~= resolved:GetAddress()) then
             handleActor(obj.Actor)
         end
         if obj.Actors then

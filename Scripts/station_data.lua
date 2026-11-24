@@ -2006,13 +2006,18 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
         end
     end
 
+    local isQuietBg = (frameBudget <= 0.0020)
+    local frameStride = isQuietBg and 2 or 1
+    local minMachStep = isQuietBg and 1 or 15
+    local minWallStep = isQuietBg and 1 or 10
+
     local function pumpAsyncBuild()
         if myGen ~= AsyncFloorBuildGen then return end
         local budgetEnd = os.clock() + frameBudget
 
         if phase == "machines" then
             local step = 0
-            while mIdx <= totalM and (step < 15 or os.clock() < budgetEnd) and step < 120 do
+            while mIdx <= totalM and (step < minMachStep or os.clock() < budgetEnd) and step < 120 do
                 local m = allMachines[mIdx]
                 mIdx = mIdx + 1
                 step = step + 1
@@ -2038,11 +2043,11 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
                 end
             end
             if mIdx <= totalM then
-                ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+                ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
                 return
             end
             phase = "walls_init"
-            ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+            ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
             return
         end
 
@@ -2053,14 +2058,14 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
                 return
             end
             phase = "walls_scan"
-            ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+            ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
             return
         end
 
         if phase == "walls_scan" and wallState then
             local ws = wallState
             local step = 0
-            while ws.idx <= ws.num and (step < 10 or os.clock() < budgetEnd) and step < 80 do
+            while ws.idx <= ws.num and (step < minWallStep or os.clock() < budgetEnd) and step < 80 do
                 local i = ws.idx
                 ws.idx = i + 1
                 step = step + 1
@@ -2085,7 +2090,7 @@ function StationData.BuildStationFloorMapAsync(station, walkFrame, playerX, play
                 end
             end
             if ws.idx <= ws.num then
-                ExecuteInGameThreadAfterFrames(1, pumpAsyncBuild)
+                ExecuteInGameThreadAfterFrames(frameStride, pumpAsyncBuild)
                 return
             end
 

@@ -56,7 +56,6 @@ local function IsVersionOverlayTextBlock(tb)
 end
 
 local CachedGameplayStaticsCDO = nil
-local FallbackScanDoneThisWorld = false
 
 local function TryExtractVersionFromTextObj(tb)
     if not Core.IsValidObj(tb) or not tb.GetText or not IsVersionOverlayTextBlock(tb) then
@@ -75,30 +74,26 @@ local function TryExtractVersionFromTextObj(tb)
     return nil, nil, nil
 end
 
--- Shipping builds strip UserWidget.WidgetTree, so inspect UClass properties directly via ForEachProperty
-local function FindVersionTextBlockInWidget(rootWidget)
-    if not Core.IsValidObj(rootWidget) then return nil, nil, nil end
-    local foundTb, foundVer, foundRaw = nil, nil, nil
+-- Verified direct widget path in Main Sequence:
+-- WBP_CharacterHUD_C / WBP_MainMenu_C -> WBP_Version -> WBP_Text -> TextBlock (ZERO FindAllOf("TextBlock")!)
+local function FindVersionTextBlockInWidget(hostWidget)
+    if not Core.IsValidObj(hostWidget) then return nil, nil, nil end
+    local tb = nil
     pcall(function()
-        local cls = rootWidget:GetClass()
-        if Core.IsValidObj(cls) and cls.ForEachProperty then
-            cls:ForEachProperty(function(prop)
-                if foundTb then return end
-                local pName = prop:GetFName():ToString()
-                local okV, val = pcall(function() return rootWidget[pName] end)
-                if okV and Core.IsValidObj(val) then
-                    local tb, ver, rawTxt = TryExtractVersionFromTextObj(val)
-                    if tb then
-                        foundTb, foundVer, foundRaw = tb, ver, rawTxt
-                    elseif val.TextBlock and Core.IsValidObj(val.TextBlock) then
-                        local tb2, ver2, raw2 = TryExtractVersionFromTextObj(val.TextBlock)
-                        if tb2 then foundTb, foundVer, foundRaw = tb2, ver2, raw2 end
-                    end
-                end
-            end)
+        local verW = hostWidget.WBP_Version
+        if Core.IsValidObj(verW) then
+            local txtW = verW.WBP_Text
+            if Core.IsValidObj(txtW) and Core.IsValidObj(txtW.TextBlock) then
+                tb = txtW.TextBlock
+            elseif Core.IsValidObj(verW.TextBlock) then
+                tb = verW.TextBlock
+            end
         end
     end)
-    return foundTb, foundVer, foundRaw
+    if Core.IsValidObj(tb) then
+        return TryExtractVersionFromTextObj(tb)
+    end
+    return nil, nil, nil
 end
 
 local function FindVersionTextBlock(hintWidget)
@@ -113,20 +108,19 @@ local function FindVersionTextBlock(hintWidget)
             if Core.IsValidObj(tb) then return tb, ver, rawTxt end
         end
     end
-    -- Strictly one-shot fallback per world load if version text lives on a standalone widget
-    if not FallbackScanDoneThisWorld then
-        FallbackScanDoneThisWorld = true
-        local ok, list = pcall(FindAllOf, "TextBlock")
-        if ok and list then
-            for i = #list, 1, -1 do
-                local tb, ver, rawTxt = TryExtractVersionFromTextObj(list[i])
-                if Core.IsValidObj(tb) then
-                    pcall(function()
-                        Core.Log("[HudVersionBar] Version TextBlock owner path: " .. tostring(tb:GetFullName()))
-                    end)
-                    return tb, ver, rawTxt
-                end
+    -- Direct singleton fallback on WBP_Version_C itself (never scans FindAllOf("TextBlock")!)
+    local okV, verWidget = pcall(FindFirstOf, "WBP_Version_C")
+    if okV and Core.IsValidObj(verWidget) then
+        local tb = nil
+        pcall(function()
+            if Core.IsValidObj(verWidget.WBP_Text) and Core.IsValidObj(verWidget.WBP_Text.TextBlock) then
+                tb = verWidget.WBP_Text.TextBlock
+            elseif Core.IsValidObj(verWidget.TextBlock) then
+                tb = verWidget.TextBlock
             end
+        end)
+        if Core.IsValidObj(tb) then
+            return TryExtractVersionFromTextObj(tb)
         end
     end
     return nil, nil, nil
@@ -253,14 +247,12 @@ end
 
 function Feature.OnMapLoad()
     TargetTextBlock = nil
-    FallbackScanDoneThisWorld = false
     LastScanTime = -999.0
     if Core.IsFeatureEnabled("HudVersionBar") then StartLoop() end
 end
 
 function Feature.OnClientRestart()
     TargetTextBlock = nil
-    FallbackScanDoneThisWorld = false
     LastScanTime = -999.0
     if Core.IsFeatureEnabled("HudVersionBar") then StartLoop() end
 end

@@ -7961,7 +7961,7 @@ function Feature.OnMapLoad()
     CachedWblCDO = nil
     PendingGhosts = {}
     Clipboard = {}
-    Perf.SchedulePrewarm(4000, 2)
+    -- Prewarm is scheduled once in OnClientRestart (avoid duplicate overlapping prewarm timers!)
 end
 
 function Feature.PruneCaches()
