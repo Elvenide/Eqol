@@ -1,36 +1,28 @@
-# Eqol — Elvenide's Quality of Life for Main Sequence
+# Eqol — Elvenide's Quality of Life for Main Sequence *(Deprecated)*
 
-**Eqol** is a collection of vanilla-friendly, client-side quality-of-life improvements for **Main Sequence**, built with UE4SS Lua.
+> [!WARNING]
+> **Eqol has been discontinued and split into 11 standalone, self-contained mods.**
+>
+> Instead of installing one large mega-mod, you can now pick and choose only the specific features you want! Each standalone mod has zero external mod dependencies, is **100% save-safe**, and supports automatic installation via **MSCoreManager** as well as manual UE4SS installation.
+>
+> If you currently have **Eqol** installed, remove the `Eqol` folder from `ue4ss\Mods\` (and remove `Eqol : 1` from `mods.txt`) before installing the standalone mods below.
 
-Every feature in Eqol is designed to feel native to the base game—matching its exact UI style—and is **100% save-safe and removable** without adding custom items, machines, or save dependencies.
+## Replacement Standalone Mods
 
-## Getting Started
+| Mod | Description | Repository |
+|---|---|---|
+| **Elvenide's Station Map** | Interactive fullscreen 2D station map (`N`) with floor switching, live machines/players, copy-paste, delete, and ghost build planning | [MainSequenceStationMap](https://github.com/Elvenide/MainSequenceStationMap) |
+| **Elvenide's Logistics Menu** | Station-wide logistics dashboard (`L`) showing stored items, machine statuses, and live production/consumption rates | [MainSequenceLogisticsMenu](https://github.com/Elvenide/MainSequenceLogisticsMenu) |
+| **Elvenide's Power QoL** | Open Power Overview anywhere on a station (`P`), colored satisfaction progress bars, and Ship/Station Designer power stats | [MainSequencePowerQoL](https://github.com/Elvenide/MainSequencePowerQoL) |
+| **Elvenide's Ship QoL** | Toggleable 3rd-person ship camera (`H`) with scroll zoom & telemetry wings, plus instant zero-throttle braking (`0`) | [MainSequenceShipQoL](https://github.com/Elvenide/MainSequenceShipQoL) |
+| **Elvenide's Build QoL** | Mouse scroll-wheel rotation for machines/conveyors and hotbar craftable build counts from your inventory | [MainSequenceBuildQoL](https://github.com/Elvenide/MainSequenceBuildQoL) |
+| **Elvenide's Elevator QoL** | Elevator floor hotkeys (`1`–`9`, `0` for Floor 10) and 3D world-space item icons on elevator ports | [MainSequenceElevatorQoL](https://github.com/Elvenide/MainSequenceElevatorQoL) |
+| **Elvenide's Compact Splitters** | Walk directly over Splitters and Belt Balancers (SP) and 2/3 height for Splitters, Balancers, and Underground Belts | [MainSequenceCompactSplitters](https://github.com/Elvenide/MainSequenceCompactSplitters) |
+| **Elvenide's Freecam Toggle** | Single keybind (`C`) to toggle Spectator Mode and Hide HUD simultaneously | [MainSequenceFreecamToggle](https://github.com/Elvenide/MainSequenceFreecamToggle) |
+| **Elvenide's Multiplayer QoL** | Native player join/leave alerts and floating 3D overhead player nametags | [MainSequenceMultiplayerQoL](https://github.com/Elvenide/MainSequenceMultiplayerQoL) |
+| **Elvenide's Research & Codex QoL** | Live search bars in the Research and Codex/Help menus plus drag-and-drop research queue reordering | [MainSequenceResearchCodexQoL](https://github.com/Elvenide/MainSequenceResearchCodexQoL) |
+| **Elvenide's HUD Stats** | Live FPS and total save play time in the bottom-right HUD alongside the Main Sequence version | [MainSequenceHUDStats](https://github.com/Elvenide/MainSequenceHUDStats) |
 
-- **[Getting Started & Installation Guide](docs/get-started.md)**
+## Support & Community
 
-## Features
-
-- **[In-Game Eqol Settings Tab](docs/eqol-settings.md)** — Native **Eqol** tab inside **Settings** to toggle individual Eqol features on or off live without restarting.
-- **[Power Overview Hotkey & Summary Bars](docs/power-overview.md)** — Open the Power Overview from anywhere inside a space station (`P`, rebindable in Settings → Controls, with top-right HUD indicator) and view Production, Consumption, and Power Satisfaction progress bars at a glance.
-- **[Full Station Map UI](docs/station-map.md)** — Fullscreen floor-by-floor 2D station map (`N`, rebindable in Settings → Controls, with top-right HUD indicator) featuring floating overlays, WASD/scroll pan & zoom, walls, ports, hover tooltips, drag box-select, rotate (`R`), delete (`X`), full machine config copy-paste, ghost staging, live Modification Cost & Build Validation panels, and `Apply Changes`/`Discard Changes`.
-- **[Logistics UI Screen](docs/logistics.md)** — Icon-heavy station storage overview and live machine production/consumption rate monitor with bottleneck indicators (`L`, rebindable in Settings → Controls, with top-right HUD indicator).
-- **[Designer Power Stats](docs/designer-power-stats.md)** — Displays total Power Generation and Power Consumption alongside Hull and Mass in the Ship Designer and Station Designer.
-- **[Cinematic Freecam](docs/cinematic-freecam.md)** — Single keybind (`C`, rebindable) to toggle Spectator Mode and Hide HUD together.
-- **[Ship 3rd-Person Perspective, Scroll Zoom & Telemetry Wings](docs/ship-camera.md)** — Dynamic 3rd-person ship camera (`H`, rebindable) with `1.0×–7.0×` scroll zoom, MMB reset, reactive Spacebar boost zoom/FOV, contextual ship keybind legend, and symmetrical Boost/Speed/Fuel/Hull/Shield telemetry wings.
-- **[Scroll to Rotate Machines & Conveyors](docs/conveyor-scroll-rotate.md)** — Use the mouse scroll wheel to rotate any station machine or conveyor belt (including 3-mode pulled conveyor routing) while building, in addition to `R`.
-- **[Ship Instant Zero Throttle](docs/ship-zero-throttle.md)** — Instantly set ship throttle/acceleration to `0` with a single keypress (`0`, rebindable).
-- **[Elevator Floor Hotkeys](docs/elevator-hotkeys.md)** — Press `1`–`9` (or `0` for Floor 10) while inside an elevator pod to travel directly to that floor.
-- **[Item Elevator Port Icons](docs/elevator-labels.md)** — 3D world-space item icons displayed directly on nearby elevator port panels (within 30m) across every floor in the shaft.
-- **[Splitter, Balancer & Underground Belt Tweaks](docs/splitter-balancer-tweaks.md)** — Walk directly over Splitters and Belt Balancers, with compact 2/3 height on Splitters, Balancers, and Underground Belts.
-- **[Codex / Help Menu Search Bar](docs/codex-search.md)** — Live search box in the Help / Codex menu (`K`) to filter entries across any tab.
-- **[Research Tree Search & Queue Drag-and-Drop](docs/research-enhancements.md)** — Live search bar on the Research screen plus drag-and-drop reordering for the research queue.
-- **[Hotbar Craftable Count Badges](docs/hotbar-build-counts.md)** — Compact numeric badges on bottom hotbar slots showing how many of each machine you can build from your current inventory.
-- **[HUD Version & FPS Bar](docs/hud-version-bar.md)** — Enhances the bottom-right version label in-place with live FPS, Eqol version, and Main Sequence version.
-- **[Player Nametags](docs/player-nametags.md)** — Floating 3D world-space nametags above players with Online/Offline status indicators.
-- **[Player Join & Leave Alerts](docs/player-alerts.md)** — Native HUD alerts when players (including the host) join or leave the game.
-
-## Credits
-
-**Eqol** is created and maintained by Elvenide. This is an unofficial mod and I'm not affiliated with Main Sequence.
-
-> If you have questions or run into issues, Eqol has a dedicated post in `#modding-guides` within the [official Main Sequence Discord server](https://discord.com/invite/uy8w2pTcQE). Feel free to contact me in that channel on the server.
+If you have questions or run into issues with any of the standalone mods above, feel free to reach out in `#modding-guides` within the [official Main Sequence Discord server](https://discord.com/invite/uy8w2pTcQE).
